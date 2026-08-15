@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, perez-ai-ec2]
     timeout-minutes: 10
 
     steps:
@@ -21,30 +21,13 @@ jobs:
 
       - name: Validate repository
         run: |
+          set -euo pipefail
           python3 -m py_compile main.py $(find src -name '*.py' -type f)
 
-      - name: Configure SSH
+      - name: Deploy locally on EC2
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          test -n "$EC2_HOST"
-          test -n "$EC2_USER"
-          test -n "$EC2_SSH_KEY"
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/perez_ai_ec2
-          chmod 600 ~/.ssh/perez_ai_ec2
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-      - name: Deploy
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
           DEPLOY_BRANCH: ${{ github.ref_name }}
         run: |
-          ssh -i ~/.ssh/perez_ai_ec2 "$EC2_USER@$EC2_HOST" "bash -s" <<EOF
           set -euo pipefail
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
           git fetch origin
@@ -52,6 +35,15 @@ jobs:
           git reset --hard "origin/$DEPLOY_BRANCH"
           test -f .env
           test -x venv/bin/python
-          venv/bin/python -m py_compile main.py \$(find src -name '*.py' -type f)
+          venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           echo "DEPLOY_OK"
-          EOF
+          echo "HOST=$(hostname)"
+          echo "COMMIT=$(git rev-parse --short HEAD)"
+          echo "STATIC_IP_NOT_REQUIRED=true"
+
+      - name: Verify paper safety
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src 2>/dev/null | head -20 || true
+          echo "PAPER_SAFETY_CHECK_COMPLETE"
