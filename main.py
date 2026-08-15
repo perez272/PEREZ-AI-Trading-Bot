@@ -95,6 +95,79 @@ def main():
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
+        # ============================================================
+        # HARD OPTIONS QUALITY GATE — PAPER ONLY
+        # ============================================================
+        option_type = (
+            "CE"
+            if candidate["signal"] == "BUY CE"
+            else "PE"
+        )
+
+        contract_probe = create_trade(
+            candidate["symbol"],
+            candidate["close"],
+            candidate["signal"],
+            CAPITAL,
+        )
+
+        if contract_probe.get("status") != "PAPER TRADE ACTIVE":
+            print(
+                "Options contract/LTP validation rejected candidate:",
+                contract_probe,
+            )
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
+
+        gate_candidate = {
+            "symbol": candidate["symbol"],
+            "option_type": option_type,
+            "expiry": contract_probe.get("expiry", ""),
+            "ltp": contract_probe.get("entry", 0),
+
+            # Existing market evidence
+            "trend_score": candidate.get("score", 0),
+            "momentum_score": candidate.get("score", 0),
+            "volume_score": candidate.get("volume_ratio", 0),
+            "vwap_score": candidate.get("score", 0),
+
+            # Required confirmation
+            "index_confirmation": 8 if candidate.get("trend") else 0,
+
+            # Conservative defaults until real derivatives evidence
+            # is explicitly populated by the option-chain engine.
+            "oi_score": 0,
+            "oi_change_score": 0,
+            "iv_score": 0,
+            "liquidity_score": 0,
+            "volatility_score": 0,
+            "structure_score": 0,
+            "news_confirmation": 0,
+            "event_risk_penalty": 0,
+            "spread_pct": 0,
+            "slippage_pct": 0,
+        }
+
+        options_result = evaluate_option_candidate(
+            gate_candidate
+        )
+
+        print(
+            f"OPTIONS GATE: "
+            f"{options_result.get('options_score', 0)}/100 | "
+            f"{options_result.get('options_gate', {}).get('decision', 'NO TRADE')}"
+        )
+
+        if not options_result.get("paper_trade_candidate"):
+            print(
+                "Options gate rejected candidate:",
+                options_result.get("options_gate", {}).get("reasons", []),
+            )
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
+
+        # Only after the strict options gate passes do we create
+        # the paper trade.
         trade = create_trade(
             candidate["symbol"],
             candidate["close"],

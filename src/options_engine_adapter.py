@@ -261,3 +261,8 @@ if __name__ == "__main__":
     print("Paper trading    : ENABLED")
     print("Live orders      : DISABLED")
     print("=" * 72)
+
+
+def evaluate_option_candidate(candidate):
+    """Backward-compatible public entry point for main.py."""
+    return evaluate_candidate(candidate)
