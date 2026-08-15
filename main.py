@@ -1,4 +1,6 @@
 import time
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
 from src.market_scanner import print_results, scan_market, select_best_candidate
@@ -21,7 +23,27 @@ OPTIONS_STOP_LOSS_PCT = 2.0
 OPTIONS_TARGETS_PCT = (5.0, 10.0, 15.0, 20.0)
 
 
+def wait_for_0940_ist():
+    tz = ZoneInfo("Asia/Kolkata")
+    start = dt_time(9, 40)
+    while True:
+        now = datetime.now(tz)
+        if now.time() >= start:
+            print("09:40 IST reached — starting live-data scan.")
+            return
+        target = now.replace(
+            hour=9, minute=40, second=0, microsecond=0
+        )
+        seconds = max(1, int((target-now).total_seconds()))
+        print(
+            f"WAITING FOR 09:40 IST — {seconds}s remaining"
+        )
+        time.sleep(min(seconds, 60))
+
+
 def main():
+    wait_for_0940_ist()
+
     print("=" * 60)
     print("PEREZ AI PAPER-TRADING BOT")
     print("Paper mode only — no real orders are placed.")
