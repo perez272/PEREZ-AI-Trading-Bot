@@ -1,4 +1,4 @@
-from hidden_value_detector import HiddenValueInput, calculate_hidden_value_score
+from src.hidden_value_detector import HiddenValueInput, calculate_hidden_value_score
 
 def scan(candidates):
     results = []
