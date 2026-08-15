@@ -1,33 +1,27 @@
-from SmartApi import SmartConnect
-from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
-import pyotp
+import time
+from datetime import datetime, timedelta
+from src.market_scanner_v3 import get_client
 
-
-def login():
-
-    obj = SmartConnect(api_key=API_KEY)
-
-    obj.generateSession(
-        CLIENT_ID,
-        PASSWORD,
-        pyotp.TOTP(TOTP_SECRET).now()
-    )
-
-    return obj
-
+_price_cache = {}
 
 def get_option_ltp(exchange, symbol, token):
+    key = (exchange, symbol, str(token))
+    now = datetime.now()
 
-    obj = login()
+    cached = _price_cache.get(key)
+    if cached and (now - cached[1]) < timedelta(seconds=5):
+        return cached[0]
 
-    response = obj.ltpData(
-        exchange,
-        symbol,
-        token
-    )
+    try:
+        response = get_client().get_ltp(exchange, symbol, token)
 
-    if response["status"]:
-        return float(response["data"]["ltp"])
+        if response and response.get("status") and response.get("data"):
+            price = float(response["data"]["ltp"])
+            _price_cache[key] = (price, now)
+            return price
 
-    print(response)
-    return None
+    except Exception as e:
+        print("LTP ERROR:", e)
+        time.sleep(2)
+
+    return cached[0] if cached else None
