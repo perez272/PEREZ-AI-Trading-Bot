@@ -124,6 +124,8 @@ def main():
             "option_type": option_type,
             "expiry": contract_probe.get("expiry", ""),
             "ltp": contract_probe.get("entry", 0),
+            "exchange": contract_probe.get("exchange", "NFO"),
+            "token": contract_probe.get("token", ""),
 
             # Existing market evidence
             "trend_score": candidate.get("score", 0),

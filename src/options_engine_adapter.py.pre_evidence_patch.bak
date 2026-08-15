@@ -190,8 +190,6 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         "percent_change",
         "volume_score",
         "oi_score",
-        "oi_change_score",
-        "iv_score",
         "liquidity_score",
     ):
         result.pop(key, None)
@@ -288,29 +286,20 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         if result["open_interest"] > 0:
             result["oi_score"] = 5.0
 
-        # Greeks / IV are intentionally unavailable until a
-        # reliable low-rate source is established.
-        # Never fabricate IV or Greek-derived evidence.
-        result["iv_score"] = 0.0
-        result["iv_available"] = False
-        result["greeks_available"] = False
-
-        # OI / volume is participation evidence only.
-        #
-        # IMPORTANT:
-        # OI / volume is NOT OI CHANGE.
-        # Do not award oi_change_score from this ratio.
-        #
-        # Actual OI-change evidence must come from a genuine
-        # previous-OI/current-OI comparison or another trusted
-        # Angel One source. Until then it remains zero.
-        result["oi_change_score"] = 0.0
-        result["oi_change_available"] = False
-
+        # Real OI/volume relationship: useful liquidity/participation
+        # evidence, but deliberately conservative.
         if result["volume"] > 0 and result["open_interest"] > 0:
-            result["oi_volume_ratio"] = (
+            oi_volume_ratio = (
                 result["open_interest"] / result["volume"]
             )
+            result["oi_volume_ratio"] = oi_volume_ratio
+
+            if oi_volume_ratio >= 1.0:
+                result["oi_change_score"] = 4.0
+            elif oi_volume_ratio >= 0.5:
+                result["oi_change_score"] = 2.0
+            else:
+                result["oi_change_score"] = 1.0
 
         if result["buy_quantity"] > result["sell_quantity"]:
             result["liquidity_score"] = min(
