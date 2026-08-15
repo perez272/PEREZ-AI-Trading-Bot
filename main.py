@@ -5,6 +5,8 @@ from src.market_scanner import print_results, scan_market, select_best_candidate
 from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade
+from src.options_engine_adapter import evaluate_option_candidate
+from src.high_conviction_discovery import discover
 
 
 CAPITAL = 50000
@@ -12,6 +14,11 @@ MINIMUM_SCORE = 55
 MAX_TRADES_PER_DAY = 3
 MAX_DAILY_LOSS = 300.0
 RESCAN_DELAY_SECONDS = 300
+
+# OPTIONS PAPER-TRADE GATE
+OPTIONS_MIN_SCORE = 80
+OPTIONS_STOP_LOSS_PCT = 2.0
+OPTIONS_TARGETS_PCT = (5.0, 10.0, 15.0, 20.0)
 
 
 def main():
@@ -38,9 +45,53 @@ def main():
         results = scan_market()
         print_results(results)
 
-        candidate = select_best_candidate(results, MINIMUM_SCORE)
+        # ============================================================
+        # STRICT FUNDAMENTAL -> MARKET -> PAPER TRADE GATE
+        # ============================================================
+        admitted, rejected = discover()
+
+        print(
+            f"Fundamental candidates admitted: {len(admitted)} | "
+            f"rejected: {len(rejected)}"
+        )
+
+        if not admitted:
+            print(
+                "No HIGH-CONVICTION fundamental candidate. "
+                "No paper trade will be created."
+            )
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
+
+        admitted_symbols = {x["symbol"] for x in admitted}
+
+        eligible_market = [
+            x for x in results
+            if x.get("symbol", "").upper() in admitted_symbols
+        ]
+
+        candidate = select_best_candidate(
+            eligible_market,
+            MINIMUM_SCORE
+        )
+
         if not candidate:
-            print(f"No qualifying signal. Rescanning in {RESCAN_DELAY_SECONDS} seconds.")
+            print(
+                "High-conviction fundamental candidate exists, "
+                "but no qualifying market signal."
+            )
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
+
+        print(
+            f"HIGH-CONVICTION PAPER CANDIDATE: "
+            f"{candidate['symbol']} | "
+            f"Score {candidate['score']}/100"
+        )
+
+        # HARD SAFETY: this integration can only create paper trades.
+        if not candidate.get("symbol"):
+            print("Safety rejection: candidate has no symbol.")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
