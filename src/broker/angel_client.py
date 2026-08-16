@@ -6,11 +6,13 @@ class AngelClient:
     # Minimum spacing between historical candle requests.
     # This is deliberately conservative to reduce AB1021 bursts.
     CANDLE_REQUEST_INTERVAL = 1.0
+    MARKET_DATA_REQUEST_INTERVAL = 1.2
 
     def __init__(self, smartapi, session_manager=None):
         self.api = smartapi
         self.session_manager = session_manager
         self._last_candle_request = 0.0
+        self._last_market_data_request = 0.0
 
     def _is_invalid_token(self, response=None, error=None):
 
@@ -246,6 +248,14 @@ class AngelClient:
         mode,
         exchange_tokens
     ):
+
+        elapsed = time.monotonic() - self._last_market_data_request
+        wait = self.MARKET_DATA_REQUEST_INTERVAL - elapsed
+
+        if wait > 0:
+            time.sleep(wait)
+
+        self._last_market_data_request = time.monotonic()
 
         return self._retry(
             self.api.getMarketData,

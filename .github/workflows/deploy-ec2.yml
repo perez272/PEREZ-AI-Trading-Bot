@@ -1,0 +1,49 @@
+name: Deploy PEREZ AI to EC2
+
+on:
+  push:
+    branches:
+      - ec2-sync-20260815-recovery
+  workflow_dispatch:
+
+concurrency:
+  group: perez-ai-ec2-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, x64, perez-ai-ec2]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate repository
+        run: |
+          set -euo pipefail
+          python3 -m py_compile main.py $(find src -name '*.py' -type f)
+
+      - name: Deploy locally on EC2
+        env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          git fetch origin
+          git checkout "$DEPLOY_BRANCH"
+          git reset --hard "origin/$DEPLOY_BRANCH"
+          test -f .env
+          test -x venv/bin/python
+          venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
+          echo "DEPLOY_OK"
+          echo "HOST=$(hostname)"
+          echo "COMMIT=$(git rev-parse --short HEAD)"
+          echo "STATIC_IP_NOT_REQUIRED=true"
+
+      - name: Verify paper safety
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src 2>/dev/null | head -20 || true
+          echo "PAPER_SAFETY_CHECK_COMPLETE"

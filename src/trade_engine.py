@@ -39,6 +39,7 @@ def create_trade(symbol, spot, signal, capital=5000):
         "contract": contract["symbol"],
         "exchange": contract["exchange"],
         "token": contract["token"],
+        "expiry": contract["expiry"],
         "entry": float(ltp),
         "quantity": quantity,
         "lots": lots,
