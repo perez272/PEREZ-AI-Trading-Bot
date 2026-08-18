@@ -7,7 +7,8 @@ TARGET1_PCT = 0.05
 TARGET2_PCT = 0.10
 
 
-def create_trade(symbol, spot, signal, capital=5000):
+def resolve_option_contract(symbol, spot, signal):
+    """Resolve and validate the option contract/LTP without creating a trade."""
     if signal not in ("BUY CE", "BUY PE"):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
 
@@ -15,7 +16,7 @@ def create_trade(symbol, spot, signal, capital=5000):
     contract = select_contract(symbol, spot, option_type)
 
     if not contract or contract.get("status") == "NO CONTRACT":
-        return {"status": "NO CONTRACT"}
+        return {"status": "NO CONTRACT", "reason": contract.get("reason", "No contract") if contract else "No contract"}
 
     try:
         ltp = get_option_ltp(
@@ -27,12 +28,30 @@ def create_trade(symbol, spot, signal, capital=5000):
         return {"status": "NO LTP", "reason": repr(exc)}
 
     if not ltp or ltp <= 0:
-        return {"status": "NO LTP"}
+        return {"status": "NO LTP", "reason": "Invalid option LTP"}
 
-    lot_size = int(float(contract["lotsize"]))
-    if lot_size <= 0:
-        return {"status": "INVALID CONTRACT", "reason": "Invalid lot size"}
+    return {
+        "status": "CONTRACT VALID",
+        "option_type": option_type,
+        "contract": contract["symbol"],
+        "exchange": contract["exchange"],
+        "token": contract["token"],
+        "expiry": contract["expiry"],
+        "strike": contract.get("strike"),
+        "lotsize": int(float(contract["lotsize"])),
+        "ltp": float(ltp),
+    }
 
+
+def create_trade(symbol, spot, signal, capital=5000):
+    """Create a PAPER trade only after contract/LTP validation."""
+    resolved = resolve_option_contract(symbol, spot, signal)
+
+    if resolved.get("status") != "CONTRACT VALID":
+        return resolved
+
+    lot_size = resolved["lotsize"]
+    ltp = resolved["ltp"]
     lots = int(capital // (ltp * lot_size))
 
     if lots < 1:
@@ -51,10 +70,10 @@ def create_trade(symbol, spot, signal, capital=5000):
     return {
         "symbol": symbol,
         "signal": signal,
-        "contract": contract["symbol"],
-        "exchange": contract["exchange"],
-        "token": contract["token"],
-        "expiry": contract["expiry"],
+        "contract": resolved["contract"],
+        "exchange": resolved["exchange"],
+        "token": resolved["token"],
+        "expiry": resolved["expiry"],
         "entry": entry,
         "quantity": quantity,
         "remaining_quantity": quantity,
