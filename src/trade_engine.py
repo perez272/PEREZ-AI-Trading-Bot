@@ -2,6 +2,11 @@ from src.contract_selector import select_contract
 from src.live_option_price import get_option_ltp
 
 
+STOP_LOSS_PCT = 0.02
+TARGET1_PCT = 0.05
+TARGET2_PCT = 0.10
+
+
 def create_trade(symbol, spot, signal, capital=5000):
     if signal not in ("BUY CE", "BUY PE"):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
@@ -12,16 +17,22 @@ def create_trade(symbol, spot, signal, capital=5000):
     if not contract or contract.get("status") == "NO CONTRACT":
         return {"status": "NO CONTRACT"}
 
-    ltp = get_option_ltp(
-        contract["exchange"],
-        contract["symbol"],
-        contract["token"],
-    )
+    try:
+        ltp = get_option_ltp(
+            contract["exchange"],
+            contract["symbol"],
+            contract["token"],
+        )
+    except Exception as exc:
+        return {"status": "NO LTP", "reason": repr(exc)}
 
     if not ltp or ltp <= 0:
         return {"status": "NO LTP"}
 
     lot_size = int(float(contract["lotsize"]))
+    if lot_size <= 0:
+        return {"status": "INVALID CONTRACT", "reason": "Invalid lot size"}
+
     lots = int(capital // (ltp * lot_size))
 
     if lots < 1:
@@ -32,6 +43,10 @@ def create_trade(symbol, spot, signal, capital=5000):
 
     quantity = lots * lot_size
     investment = round(quantity * ltp, 2)
+    entry = float(ltp)
+    stop_loss = round(entry * (1 - STOP_LOSS_PCT), 2)
+    target1 = round(entry * (1 + TARGET1_PCT), 2)
+    target2 = round(entry * (1 + TARGET2_PCT), 2)
 
     return {
         "symbol": symbol,
@@ -40,11 +55,18 @@ def create_trade(symbol, spot, signal, capital=5000):
         "exchange": contract["exchange"],
         "token": contract["token"],
         "expiry": contract["expiry"],
-        "entry": float(ltp),
+        "entry": entry,
         "quantity": quantity,
+        "remaining_quantity": quantity,
         "lots": lots,
         "investment": investment,
-        "stop_loss": round(float(ltp) * 0.98, 2),
-        "target": round(float(ltp) * 1.07, 2),
+        "initial_stop_loss": stop_loss,
+        "stop_loss": stop_loss,
+        "target1": target1,
+        "target2": target2,
+        "target": target2,
+        "partial_booked": False,
+        "realized_pnl": 0.0,
         "status": "PAPER TRADE ACTIVE",
+        "live_orders": False,
     }
