@@ -3,17 +3,20 @@ name: Deploy PEREZ AI to EC2
 on:
   push:
     branches:
-      - ec2-sync-20260815-recovery
+      - main
   workflow_dispatch:
 
 concurrency:
   group: perez-ai-ec2-deploy
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: [self-hosted, linux, x64, perez-ai-ec2]
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -35,6 +38,7 @@ jobs:
           git reset --hard "origin/$DEPLOY_BRANCH"
           test -f .env
           test -x venv/bin/python
+          venv/bin/python -m pip install -r requirements.txt
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
@@ -45,5 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
+            echo "ERROR: live-order API usage detected"
+            exit 1
+          fi
           grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src 2>/dev/null | head -20 || true
           echo "PAPER_SAFETY_CHECK_COMPLETE"
