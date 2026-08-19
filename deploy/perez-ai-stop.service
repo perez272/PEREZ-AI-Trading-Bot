@@ -1,0 +1,25 @@
+[Unit]
+Description=PEREZ AI guarded EC2 shutdown after trading hours
+After=network-online.target perez-market-close.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+  set -e; \
+  echo "[EC2-SHUTDOWN-GUARD] Stopping trading services..."; \
+  /bin/systemctl stop perez-ai-bot.service perez-paper-monitor.service || true; \
+  sleep 5; \
+  if /bin/systemctl is-active --quiet perez-ai-bot.service || /bin/systemctl is-active --quiet perez-paper-monitor.service; then \
+    echo "[EC2-SHUTDOWN-GUARD] Trading service still active; refusing shutdown."; \
+    exit 1; \
+  fi; \
+  if /usr/bin/pgrep -af '/PEREZ-AI-Trading-Bot/.*python.*main.py' >/dev/null; then \
+    echo "[EC2-SHUTDOWN-GUARD] main.py still running; refusing shutdown."; \
+    exit 1; \
+  fi; \
+  echo "[EC2-SHUTDOWN-GUARD] No trading process remains. Shutting down EC2 OS."; \
+  /usr/sbin/shutdown -h now'
+
+[Install]
+WantedBy=multi-user.target
