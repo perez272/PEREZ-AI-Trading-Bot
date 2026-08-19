@@ -13,7 +13,6 @@ from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DE
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
 IST = ZoneInfo("Asia/Kolkata")
-
 _session = None
 _client = None
 
@@ -22,12 +21,11 @@ def get_client():
     global _session, _client
     if _client is None:
         _session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
-        _client = AngelClient(_session.get_client())
+        _client = AngelClient(_session.get_client(), session_manager=_session)
     return _client
 
 
 def _validate_candle_freshness(candles, symbol):
-    """Fail closed on malformed, future-dated, or stale Angel One candles."""
     if not isinstance(candles, list) or not candles:
         print(f"{symbol}: NO CANDLE DATA")
         return False
@@ -64,13 +62,7 @@ def _validate_candle_freshness(candles, symbol):
 def _scan_one(symbol, exchange, token):
     to_date = datetime.now(IST)
     from_date = to_date - timedelta(days=5)
-    params = {
-        "exchange": exchange,
-        "symboltoken": token,
-        "interval": "FIVE_MINUTE",
-        "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-        "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-    }
+    params = {"exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE", "fromdate": from_date.strftime("%Y-%m-%d %H:%M"), "todate": to_date.strftime("%Y-%m-%d %H:%M")}
     try:
         response = get_client().get_candles(params)
         if not response or not response.get("status"):
@@ -88,24 +80,13 @@ def _scan_one(symbol, exchange, token):
         signal, trend = get_trade_decision(score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
-        return {
-            "symbol": symbol,
-            "score": score,
-            "close": float(last["close"]),
-            "rsi": float(last["RSI"]),
-            "signal": signal,
-            "trend": trend,
-            "volume_ratio": float(last.get("volume_ratio", 0) or 0),
-        }
+        return {"symbol": symbol, "score": score, "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0)}
     except Exception as exc:
         print(f"{symbol}: {exc}")
         return None
 
 
 def scan_market():
-    # Sequential requests are intentional: one authenticated Angel One client is
-    # shared to avoid session/rate-limit races. Responsiveness comes from removing
-    # the old per-symbol delay and shortening the outer rescan interval.
     results = []
     for symbol, (exchange, token) in SYMBOLS.items():
         item = _scan_one(symbol, exchange, token)
