@@ -1,8 +1,8 @@
 """PEREZ AI self-healing runtime guard.
 
-This module is intentionally conservative: it can restart only the known
-PEREZ services, never enables live orders, and never modifies source code.
-Its job is process/service recovery, not autonomous code generation.
+Conservative service recovery only. During the configured off-hours window,
+health checks must not restart the trading services that the daily scheduler
+intentionally stopped.
 """
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import os
 import subprocess
 import time
 from pathlib import Path
+
+from src.risk_manager import is_runtime_window
 
 SERVICES = (
     "perez-ai-bot.service",
@@ -45,6 +47,12 @@ def _heartbeat_stale() -> bool:
 
 
 def check_and_repair() -> int:
+    # The daily scheduler intentionally stops trading services after market
+    # close. Never undo that scheduled shutdown during off-hours/weekends.
+    if not is_runtime_window():
+        print("[SELF-REPAIR] Outside trading runtime window; scheduled services remain stopped.", flush=True)
+        return 0
+
     repaired = False
 
     for service in SERVICES:
@@ -52,8 +60,6 @@ def check_and_repair() -> int:
             _restart(service)
             repaired = True
 
-    # A stale heartbeat means the main scanner may be hung even though systemd
-    # still sees the process as active. Only restart the main bot in this case.
     if _active("perez-ai-bot.service") and _heartbeat_stale():
         print("[SELF-REPAIR] Main heartbeat is stale; restarting scanner service", flush=True)
         _restart("perez-ai-bot.service")
