@@ -83,7 +83,7 @@ def main():
     print("Paper mode only — no real orders are placed.")
     print("09:15 IST — market-data initialization / fresh-data scanning enabled.")
     print("Auto-reconnect / self-healing enabled for transient broker and scanner failures.")
-    print("=" * 60)
+    print("=​" * 60)
 
     while True:
         try:
@@ -104,8 +104,11 @@ def main():
 
             print_results(results)
 
-            admitted, rejected = discover()
-            print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
+            admitted, watchlist, rejected = discover()
+            print(
+                f"Fundamental candidates admitted: {len(admitted)} | "
+                f"watchlist: {len(watchlist)} | rejected: {len(rejected)}"
+            )
 
             if not admitted:
                 print("No HIGH-CONVICTION fundamental candidate. No paper trade will be created.")
