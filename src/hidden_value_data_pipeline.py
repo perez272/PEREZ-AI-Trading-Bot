@@ -1,7 +1,14 @@
-"""Read-only ELCID-style candidate refresh with auditable source metadata."""
+"""Read-only hidden-value candidate refresh with auditable source metadata.
+
+This module is the canonical producer for ``data/hidden_value_candidates.csv``.
+It deliberately writes candidates atomically so an interrupted refresh cannot
+leave discovery with a header-only/partially-written file.
+"""
 from datetime import date, datetime
 from pathlib import Path
 import csv
+import os
+import tempfile
 from typing import Iterable
 
 from src.hidden_value_ranking import rank_rows
@@ -61,27 +68,43 @@ def build_candidates(rows: Iterable[dict], max_age_days: int = 400) -> list[dict
     return result
 
 
+def _atomic_write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
+    """Replace a CSV atomically, preventing header-only files on interruption."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
 def refresh(input_path: Path = INPUT, output_path: Path = OUTPUT, max_age_days: int = 400) -> int:
     rows = []
     if input_path.exists():
         with input_path.open(newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
+
     candidates = build_candidates(rows, max_age_days=max_age_days)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS + ["market_cap_cr"])
-        writer.writeheader()
-        writer.writerows(candidates)
+    candidate_fields = FIELDS + ["market_cap_cr"]
+    _atomic_write_csv(output_path, candidate_fields, candidates)
 
     ranked = rank_rows(candidates)
-    if ranked:
-        ranked_fields = list(ranked[0].keys())
-    else:
-        ranked_fields = FIELDS + ["market_cap_cr"]
-    with RANKED_OUTPUT.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=ranked_fields)
-        writer.writeheader()
-        writer.writerows(ranked)
+    ranked_fields = list(ranked[0].keys()) if ranked else candidate_fields
+    _atomic_write_csv(RANKED_OUTPUT, ranked_fields, ranked)
+
+    # This invariant makes the pipeline self-auditing: ranking must never
+    # silently contain a different candidate universe than the canonical file.
+    if len(ranked) != len(candidates):
+        raise RuntimeError(
+            f"HIDDEN_VALUE_PIPELINE_INVARIANT_FAILED: candidates={len(candidates)} ranked={len(ranked)}"
+        )
     return len(candidates)
 
 
