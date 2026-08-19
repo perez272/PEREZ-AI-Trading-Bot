@@ -9,17 +9,15 @@ from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover
-
+from src.upgrade_config import (
+    RESCAN_DELAY_SECONDS,
+    MINIMUM_SCORE,
+    MAX_TRADES_PER_DAY,
+    MAX_DAILY_LOSS,
+    OPTIONS_MIN_SCORE,
+)
 
 CAPITAL = 50000
-MINIMUM_SCORE = 55
-MAX_TRADES_PER_DAY = 3
-MAX_DAILY_LOSS = 300.0
-RESCAN_DELAY_SECONDS = 300
-
-OPTIONS_MIN_SCORE = 80
-OPTIONS_STOP_LOSS_PCT = 2.0
-OPTIONS_TARGETS_PCT = (5.0, 10.0, 15.0, 20.0)
 
 
 def wait_for_0915_ist():
@@ -38,26 +36,23 @@ def wait_for_0915_ist():
 
 def main():
     wait_for_0915_ist()
-
-    print("=" * 60)
-    print("PEREZ AI PAPER-TRADING BOT")
+    print("=" * 72)
+    print("PEREZ AI PAPER-TRADING BOT — UPGRADED")
     print("Paper mode only — no real orders are placed.")
-    print("09:15 IST — market-data initialization / fresh-data scanning enabled.")
-    print("=" * 60)
+    print("09:15 IST — fresh-data scanning enabled.")
+    print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
+    print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
+    print("=" * 72)
 
     while True:
-        allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS)
-        print(
-            f"Today's closed trades: {summary['closed_trades']} | "
-            f"Today's P/L: Rs {summary['pnl']:.2f}"
-        )
+        allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL)
+        print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
         if not allowed:
             print(f"Bot stopped: {reason}")
             return
 
         results = scan_market()
         print_results(results)
-
         admitted, rejected = discover()
         print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
 
@@ -69,26 +64,14 @@ def main():
         admitted_symbols = {x["symbol"] for x in admitted}
         eligible_market = [x for x in results if x.get("symbol", "").upper() in admitted_symbols]
         candidate = select_best_candidate(eligible_market, MINIMUM_SCORE)
-
         if not candidate:
             print("High-conviction fundamental candidate exists, but no qualifying market signal.")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
         print(f"HIGH-CONVICTION PAPER CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
-
-        if not candidate.get("symbol"):
-            print("Safety rejection: candidate has no symbol.")
-            time.sleep(RESCAN_DELAY_SECONDS)
-            continue
-
         option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
-
-        # Validate contract/LTP only. This does NOT create a paper trade.
-        contract_probe = resolve_option_contract(
-            candidate["symbol"], candidate["close"], candidate["signal"]
-        )
-
+        contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
         if contract_probe.get("status") != "CONTRACT VALID":
             print("Options contract/LTP validation rejected candidate:", contract_probe)
             time.sleep(RESCAN_DELAY_SECONDS)
@@ -119,20 +102,13 @@ def main():
         }
 
         options_result = evaluate_option_candidate(gate_candidate)
-        print(
-            f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | "
-            f"{options_result.get('options_gate', {}).get('decision', 'NO TRADE')}"
-        )
-
+        gate = options_result.get("options_gate", {})
+        print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')}")
         if not options_result.get("paper_trade_candidate"):
-            print(
-                "Options gate rejected candidate:",
-                options_result.get("options_gate", {}).get("reasons", []),
-            )
+            print("Options gate rejected candidate:", gate.get("reasons", []))
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
-        # Final creation happens ONLY after all gates pass.
         trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], CAPITAL)
         if trade.get("status") != "PAPER TRADE ACTIVE":
             print("Trade was not created:", trade)
@@ -144,7 +120,6 @@ def main():
         if result is None:
             print("Bot stopped manually.")
             return
-
         print("Trade cycle complete. Returning to scanner.")
         time.sleep(RESCAN_DELAY_SECONDS)
 
