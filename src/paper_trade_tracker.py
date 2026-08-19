@@ -1,4 +1,4 @@
-"""PEREZ AI — read-only paper trade tracker.
+"""PEREZ AI — read-only paper trade tracker with Telegram notifications.
 
 Tracks simulated candidates/exits only. It never calls a broker and never
 changes the live-order safety state.
@@ -8,6 +8,8 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
+
+from src.telegram_alert import send_alert
 
 TRADES_FILE = Path("data/paper_trades.csv")
 FIELDS = [
@@ -57,16 +59,23 @@ def open_trade(candidate: dict, quantity: int = 1) -> dict:
     }
     with TRADES_FILE.open("a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=FIELDS).writerow(row)
+
+    send_alert(
+        "🟢 PEREZ AI — PAPER TRADE OPENED\n\n"
+        f"Trade: {trade_id}\n"
+        f"Symbol: {row['symbol']}\n"
+        f"Entry: ₹{float(row['entry']):,.2f}\n"
+        f"Stop: ₹{float(row['stop_loss']):,.2f}\n"
+        f"Target: ₹{float(row['target']):,.2f}\n"
+        f"Quantity: {quantity}\n\n"
+        "PAPER ONLY — ORDERS DISABLED"
+    )
     return row
 
 
 def close_trade(trade_id: str, exit_price: float, reason: str = "") -> dict:
     rows = _rows()
-    found = None
-    for row in rows:
-        if row["trade_id"] == trade_id:
-            found = row
-            break
+    found = next((row for row in rows if row["trade_id"] == trade_id), None)
     if found is None:
         raise KeyError(f"Unknown trade_id: {trade_id}")
     if found["status"] != "OPEN":
@@ -75,17 +84,33 @@ def close_trade(trade_id: str, exit_price: float, reason: str = "") -> dict:
     entry = float(found["entry"])
     stop = float(found["stop_loss"])
     qty = int(found["quantity"])
+    exit_price = float(exit_price)
     risk = abs(entry - stop) * qty
-    pnl = (float(exit_price) - entry) * qty
-    found.update({
+    pnl = (exit_price - entry) * qty
+    r_multiple = round(pnl / risk, 3) if risk else 0.0
+    result = {
         "status": "CLOSED",
-        "exit": float(exit_price),
+        "exit": exit_price,
         "pnl": round(pnl, 2),
-        "r_multiple": round(pnl / risk, 3) if risk else 0.0,
+        "r_multiple": r_multiple,
         "reason": reason,
         "closed_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    found.update(result)
     _rewrite(rows)
+
+    outcome = "🏆 WIN" if pnl > 0 else "🔴 LOSS" if pnl < 0 else "⚪ BREAKEVEN"
+    send_alert(
+        f"{outcome} — PEREZ AI PAPER TRADE\n\n"
+        f"Trade: {trade_id}\n"
+        f"Symbol: {found['symbol']}\n"
+        f"Entry: ₹{entry:,.2f}\n"
+        f"Exit: ₹{exit_price:,.2f}\n"
+        f"P/L: ₹{pnl:,.2f}\n"
+        f"R: {r_multiple:.3f}\n"
+        f"Reason: {reason or 'CLOSED'}\n\n"
+        "PAPER ONLY — ORDERS DISABLED"
+    )
     return found
 
 
