@@ -1,0 +1,11 @@
+[Unit]
+Description=Start PEREZ AI trading services at 09:15 IST on trading days
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:15:00 Asia/Kolkata
+Persistent=true
+AccuracySec=1s
+Unit=perez-market-open.service
+
+[Install]
+WantedBy=timers.target
