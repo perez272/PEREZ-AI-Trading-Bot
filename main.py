@@ -22,26 +22,27 @@ OPTIONS_STOP_LOSS_PCT = 2.0
 OPTIONS_TARGETS_PCT = (5.0, 10.0, 15.0, 20.0)
 
 
-def wait_for_0940_ist():
+def wait_for_0915_ist():
     tz = ZoneInfo("Asia/Kolkata")
-    start = dt_time(9, 40)
+    start = dt_time(9, 15)
     while True:
         now = datetime.now(tz)
         if now.time() >= start:
-            print("09:40 IST reached — starting live-data scan.")
+            print("09:15 IST reached — starting market-data initialization and live-data scan.")
             return
-        target = now.replace(hour=9, minute=40, second=0, microsecond=0)
+        target = now.replace(hour=9, minute=15, second=0, microsecond=0)
         seconds = max(1, int((target - now).total_seconds()))
-        print(f"WAITING FOR 09:40 IST — {seconds}s remaining")
+        print(f"WAITING FOR 09:15 IST — {seconds}s remaining")
         time.sleep(min(seconds, 60))
 
 
 def main():
-    wait_for_0940_ist()
+    wait_for_0915_ist()
 
     print("=" * 60)
     print("PEREZ AI PAPER-TRADING BOT")
     print("Paper mode only — no real orders are placed.")
+    print("09:15 IST — market-data initialization / fresh-data scanning enabled.")
     print("=" * 60)
 
     while True:
