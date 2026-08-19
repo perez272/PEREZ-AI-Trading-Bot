@@ -2,12 +2,10 @@
 
 from datetime import time
 
-# Scanner responsiveness
 RESCAN_DELAY_SECONDS = 60
 PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
-# Broader liquid universe; option contracts are validated before paper entry.
 SYMBOLS = {
     "NIFTY": ("NSE", "99926000"),
     "BANKNIFTY": ("NSE", "99926009"),
@@ -21,25 +19,21 @@ SYMBOLS = {
     "AXISBANK": ("NSE", "5900"),
 }
 
-# Signal/risk gates
 MINIMUM_SCORE = 65
 MAX_TRADES_PER_DAY = 3
 MAX_DAILY_LOSS = 300.0
 MAX_DAILY_DRAWDOWN_PCT = 2.0
 MAX_CONSECUTIVE_LOSSES = 2
 
-# Option-quality gates
-OPTIONS_MIN_SCORE = 80
+# 60 is deliberate: the current evidence adapter can supply strong live
+# participation/liquidity evidence, but IV/Greeks and genuine OI-change are
+# fail-closed at zero until a trusted source is available.
+OPTIONS_MIN_SCORE = 60
 MAX_SPREAD_PCT = 1.50
 MAX_SLIPPAGE_PCT = 1.00
-MIN_OPTION_VOLUME = 10000
-MIN_OPTION_OI = 25000
 
-# Trading session safety
 ENTRY_START = time(9, 30)
 LAST_ENTRY = time(14, 45)
 FORCED_EXIT_TIME = time(15, 10)
-
-# Market-data freshness
 FRESHNESS_MAX_AGE_MINUTES = 5
 HEALTH_STALE_AFTER_SECONDS = 120
