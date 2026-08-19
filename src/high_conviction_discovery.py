@@ -1,17 +1,19 @@
-"""PEREZ AI — strict, read-only fundamental admission layer.
+"""PEREZ AI strict, read-only fundamental admission layer.
 
-Discovery consumes normalized ranking output when available. It never
-converts a valuation discount into a catalyst and never enables live orders.
-Candidates that have verified valuation/catalyst evidence but do not meet the
-high-conviction score remain visible as WATCHLIST rather than being silently
-lost in a binary rejection.
+Discovery consumes the canonical normalized candidate file produced by
+``hidden_value_data_pipeline``. If that file is missing or empty, it safely
+falls back to the normalized source file rather than silently reporting a
+missing universe. It never converts valuation discount into a catalyst and
+never enables live orders.
 """
 from pathlib import Path
 import csv
+
 from src.high_conviction_gate import evaluate
 from src.catalyst_engine import verify_catalyst
 
 CANDIDATE_FILE = Path("data/hidden_value_candidates.csv")
+SOURCE_FILE = Path("data/hidden_value_source.csv")
 RANKED_FILE = Path("data/hidden_value_ranked.csv")
 REQUIRED = {
     "symbol", "market_cap_cr", "estimated_nav_cr", "listed_investments_cr",
@@ -32,7 +34,7 @@ def _load_rows(path):
 
 
 def _normalized_row(row):
-    """Fill discovery inputs from normalized ranking fields when available."""
+    """Fill discovery inputs from normalized ranking/source fields when available."""
     out = dict(row)
     if not out.get("market_cap_cr"):
         try:
@@ -42,8 +44,18 @@ def _normalized_row(row):
     return out
 
 
+def _load_candidate_universe(path=CANDIDATE_FILE):
+    """Load canonical candidates, with a safe source fallback."""
+    rows = _load_rows(Path(path))
+    if rows:
+        return rows, "canonical"
+    source_rows = _load_rows(SOURCE_FILE)
+    if source_rows:
+        return [_normalized_row(r) for r in source_rows], "source_fallback"
+    return [], "missing"
+
+
 def _watchlist_eligible(result):
-    """Allow verified valuation/catalyst candidates into a non-trading watchlist."""
     return (
         float(result.get("nav_discount_pct") or 0) >= 50.0
         and float(result.get("asset_ratio") or 0) >= 3.0
@@ -54,23 +66,20 @@ def _watchlist_eligible(result):
 
 def discover(path=CANDIDATE_FILE):
     passed, watchlist, rejected = [], [], []
-    source_rows = _load_rows(Path(path))
+    source_rows, universe = _load_candidate_universe(path)
     if not source_rows:
-        return [], [], [{"symbol": "*", "reason": "CANDIDATE_FILE_MISSING"}]
+        return [], [], [{"symbol": "*", "reason": "CANDIDATE_UNIVERSE_MISSING"}]
 
     ranked = {str(r.get("symbol") or "").strip().upper(): r for r in _load_rows(RANKED_FILE)}
-
     for raw in source_rows:
         symbol = (raw.get("symbol") or "").strip().upper()
         row = _normalized_row({**raw, **ranked.get(symbol, {})})
-
         if not symbol:
             rejected.append({"symbol": "*", "reason": "MISSING_SYMBOL"})
             continue
         if not REQUIRED.issubset(row):
             rejected.append({"symbol": symbol, "reason": "MISSING_REQUIRED_FIELDS"})
             continue
-
         try:
             market_cap = float(row.get("market_cap_cr") or 0)
             nav = float(row.get("estimated_nav_cr") or 0)
@@ -119,6 +128,7 @@ def discover(path=CANDIDATE_FILE):
             result["catalyst_types"] = catalyst_check["types"]
             result["catalyst_source"] = catalyst_check["source_url"]
             result["catalyst_as_of_date"] = catalyst_check["as_of_date"]
+            result["data_universe"] = universe
         except (TypeError, ValueError, KeyError) as e:
             rejected.append({"symbol": symbol, "reason": f"INVALID_INPUT:{type(e).__name__}:{e}"})
             continue
@@ -130,11 +140,7 @@ def discover(path=CANDIDATE_FILE):
             result["trade_eligible"] = False
             watchlist.append(result)
         else:
-            rejected.append({
-                "symbol": symbol,
-                "reason": "STRICT_GATE_REJECT",
-                "score": result["score"]
-            })
+            rejected.append({"symbol": symbol, "reason": "STRICT_GATE_REJECT", "score": result["score"]})
 
     return (
         sorted(passed, key=lambda x: x["score"], reverse=True),
