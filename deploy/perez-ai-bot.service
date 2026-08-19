@@ -2,6 +2,8 @@
 Description=PEREZ AI Trading Bot - PAPER TRADING
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -14,8 +16,6 @@ Environment=PEREZ_PAPER_ONLY=true
 ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -u main.py
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=300
-StartLimitBurst=10
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
