@@ -83,7 +83,7 @@ def main():
     print("Paper mode only — no real orders are placed.")
     print("09:15 IST — market-data initialization / fresh-data scanning enabled.")
     print("Auto-reconnect / self-healing enabled for transient broker and scanner failures.")
-    print("=​" * 60)
+    print("=" * 60)
 
     while True:
         try:
