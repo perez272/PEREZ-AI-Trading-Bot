@@ -27,7 +27,7 @@ def _ensure_file():
 
 
 def _normalize_rows(rows: list[dict]) -> list[dict]:
-    """Normalize legacy CSV rows so monitoring never fails on missing keys."""
+    """Normalize legacy CSV rows and quarantine malformed open trades."""
     changed = False
     for index, row in enumerate(rows, start=1):
         defaults = {
@@ -48,7 +48,7 @@ def _normalize_rows(rows: list[dict]) -> list[dict]:
             "orders_enabled": "False",
         }
         for field in FIELDS:
-            if field not in row or row[field] in (None, "") and field in {"trade_id", "quantity", "status", "paper_trade_only", "orders_enabled"}:
+            if field not in row or (row[field] in (None, "") and field in {"trade_id", "quantity", "status", "paper_trade_only", "orders_enabled"}):
                 row[field] = defaults[field]
                 changed = True
         if row.get("trade_id") == "":
@@ -57,6 +57,19 @@ def _normalize_rows(rows: list[dict]) -> list[dict]:
         if row.get("status") == "":
             row["status"] = "OPEN"
             changed = True
+
+        # Old CSV rows can contain an OPEN record without usable price levels.
+        # Such a row can never be evaluated safely, so quarantine it rather
+        # than allowing the live paper monitor to retry it forever.
+        if row.get("status") == "OPEN":
+            required = ("entry", "stop_loss", "target")
+            malformed = any(str(row.get(field) or "").strip() == "" for field in required)
+            if malformed:
+                row["status"] = "INVALID"
+                row["reason"] = "LEGACY_MALFORMED_MISSING_PRICE"
+                row["closed_at"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+
     if changed:
         _rewrite(rows)
     return rows
