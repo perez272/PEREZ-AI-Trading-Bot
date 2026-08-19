@@ -1,4 +1,8 @@
-"""Read-only ELCID-style candidate refresh with auditable source metadata."""
+"""Build ELCID-style hidden-value candidates from a maintained source universe.
+
+Read-only: this module never places broker orders. Missing, invalid, or stale
+rows are rejected rather than guessed.
+"""
 from datetime import date, datetime
 from pathlib import Path
 import csv
@@ -15,7 +19,6 @@ FIELDS = [
     "revenue_growth_pct", "profit_growth_pct", "source_url", "source_name",
     "as_of_date",
 ]
-
 REQUIRED_SOURCE_FIELDS = ("source_url", "source_name", "as_of_date")
 
 
@@ -42,7 +45,6 @@ def build_candidates(rows: Iterable[dict], max_age_days: int = 400) -> list[dict
                 continue
             if not _fresh_enough(row["as_of_date"], max_age_days):
                 continue
-
             clean = {k: row.get(k, "") for k in FIELDS}
             clean.update({
                 "symbol": symbol,
