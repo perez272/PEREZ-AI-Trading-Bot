@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop PEREZ AI trading services after market close
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop perez-ai-bot.service perez-paper-monitor.service

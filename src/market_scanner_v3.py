@@ -25,7 +25,7 @@ def get_client():
     global _session, _client
     if _client is None:
         _session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
-        _client = AngelClient(_session.get_client())
+        _client = AngelClient(_session.get_client(), session_manager=_session)
     return _client
 
 
@@ -59,14 +59,11 @@ def _validate_candles(candles):
         last = candles[-1]
         if not isinstance(last, (list, tuple)) or len(last) < 6:
             return False
-        # Angel One candle timestamp is the first field.
         raw_ts = str(last[0]).replace("Z", "+00:00")
         ts = datetime.fromisoformat(raw_ts)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
         now = datetime.now(ts.tzinfo)
-        # During market hours a 5-minute candle should not be older than 10 min.
-        # Outside market hours, allow the latest completed session candle.
         age = (now - ts).total_seconds()
         if age < -60 or age > 15 * 60:
             return False
@@ -95,7 +92,6 @@ def get_candles(symbol, exchange, token):
     except Exception as e:
         print(f"{symbol}: persistent cache error -> {e}")
 
-    # With live refreshes disabled, stale/missing data is a hard NO-DATA result.
     if MAX_API_REFRESHES_PER_SCAN <= 0:
         return None
 

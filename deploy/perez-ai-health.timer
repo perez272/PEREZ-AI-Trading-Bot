@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PEREZ AI automatic health and repair engine every minute
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

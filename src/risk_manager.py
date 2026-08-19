@@ -7,7 +7,10 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 ENTRY_START = time(9, 30)
 LAST_ENTRY = time(14, 45)
-FORCED_EXIT_TIME = time(15, 10)
+MARKET_CLOSE = time(15, 30)
+FORCED_EXIT_TIME = MARKET_CLOSE
+RUNTIME_START = time(9, 15)
+RUNTIME_STOP = time(15, 31)
 
 
 def now_ist():
@@ -19,6 +22,15 @@ def is_entry_window(current=None):
     return (
         current.weekday() < 5
         and ENTRY_START <= current.time() <= LAST_ENTRY
+    )
+
+
+def is_runtime_window(current=None):
+    """True while the bot is expected to be running on a trading day."""
+    current = current or now_ist()
+    return (
+        current.weekday() < 5
+        and RUNTIME_START <= current.time() < RUNTIME_STOP
     )
 
 

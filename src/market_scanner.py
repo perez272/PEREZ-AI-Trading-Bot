@@ -25,6 +25,7 @@ _client = None
 
 
 def get_client():
+    """Return the shared Angel client with its session manager attached."""
     global _session, _client
 
     if _client is None:
@@ -34,9 +35,16 @@ def get_client():
             PASSWORD,
             TOTP_SECRET,
         )
-        _client = AngelClient(_session.get_client())
+        _client = AngelClient(_session.get_client(), session_manager=_session)
 
     return _client
+
+
+def reset_client():
+    """Drop the broker client so the next scan creates a fresh session."""
+    global _session, _client
+    _client = None
+    _session = None
 
 
 def _validate_candle_freshness(candles, symbol):
@@ -90,6 +98,7 @@ def _validate_candle_freshness(candles, symbol):
 
 
 def scan_market():
+    """Fetch fresh candles and fail closed on broker/data problems."""
     results = []
     to_date = datetime.now(IST)
     from_date = to_date - timedelta(days=5)

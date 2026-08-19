@@ -1,0 +1,10 @@
+[Unit]
+Description=Run guarded PEREZ AI EC2 shutdown at 15:35 IST weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 15:35:00 Asia/Kolkata
+Persistent=true
+Unit=perez-ai-stop.service
+
+[Install]
+WantedBy=timers.target
