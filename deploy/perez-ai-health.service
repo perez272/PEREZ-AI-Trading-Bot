@@ -1,0 +1,12 @@
+[Unit]
+Description=PEREZ AI automatic health and repair engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.self_repair
+Environment=PEREZ_HEARTBEAT_FILE=/home/ubuntu/PEREZ-AI-Trading-Bot/data/runtime/main_heartbeat
+Environment=PEREZ_HEARTBEAT_MAX_AGE=900
