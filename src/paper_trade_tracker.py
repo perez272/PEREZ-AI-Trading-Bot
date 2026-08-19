@@ -26,10 +26,47 @@ def _ensure_file():
             csv.DictWriter(f, fieldnames=FIELDS).writeheader()
 
 
+def _normalize_rows(rows: list[dict]) -> list[dict]:
+    """Normalize legacy CSV rows so monitoring never fails on missing keys."""
+    changed = False
+    for index, row in enumerate(rows, start=1):
+        defaults = {
+            "trade_id": f"PAPER-{index:06d}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": "",
+            "entry": "0",
+            "stop_loss": "0",
+            "target": "0",
+            "quantity": "1",
+            "status": "OPEN",
+            "exit": "",
+            "pnl": "",
+            "r_multiple": "",
+            "reason": "",
+            "closed_at": "",
+            "paper_trade_only": "True",
+            "orders_enabled": "False",
+        }
+        for field in FIELDS:
+            if field not in row or row[field] in (None, "") and field in {"trade_id", "quantity", "status", "paper_trade_only", "orders_enabled"}:
+                row[field] = defaults[field]
+                changed = True
+        if row.get("trade_id") == "":
+            row["trade_id"] = defaults["trade_id"]
+            changed = True
+        if row.get("status") == "":
+            row["status"] = "OPEN"
+            changed = True
+    if changed:
+        _rewrite(rows)
+    return rows
+
+
 def _rows():
     _ensure_file()
     with TRADES_FILE.open(newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    return _normalize_rows(rows)
 
 
 def open_trade(candidate: dict, quantity: int = 1) -> dict:
@@ -75,15 +112,15 @@ def open_trade(candidate: dict, quantity: int = 1) -> dict:
 
 def close_trade(trade_id: str, exit_price: float, reason: str = "") -> dict:
     rows = _rows()
-    found = next((row for row in rows if row["trade_id"] == trade_id), None)
+    found = next((row for row in rows if row.get("trade_id") == trade_id), None)
     if found is None:
         raise KeyError(f"Unknown trade_id: {trade_id}")
-    if found["status"] != "OPEN":
+    if found.get("status") != "OPEN":
         raise ValueError("Trade is already closed")
 
     entry = float(found["entry"])
     stop = float(found["stop_loss"])
-    qty = int(found["quantity"])
+    qty = max(1, int(found["quantity"]))
     exit_price = float(exit_price)
     risk = abs(entry - stop) * qty
     pnl = (exit_price - entry) * qty
@@ -123,13 +160,13 @@ def _rewrite(rows):
 
 def performance() -> dict:
     rows = _rows()
-    closed = [r for r in rows if r["status"] == "CLOSED"]
+    closed = [r for r in rows if r.get("status") == "CLOSED"]
     pnls = [float(r["pnl"]) for r in closed]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
     return {
         "total_trades": len(rows),
-        "open_trades": sum(r["status"] == "OPEN" for r in rows),
+        "open_trades": sum(r.get("status") == "OPEN" for r in rows),
         "closed_trades": len(closed),
         "wins": len(wins),
         "losses": len(losses),
