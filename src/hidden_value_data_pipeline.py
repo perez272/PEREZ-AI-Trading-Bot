@@ -4,8 +4,11 @@ from pathlib import Path
 import csv
 from typing import Iterable
 
+from src.hidden_value_ranking import rank_rows
+
 INPUT = Path("data/hidden_value_source.csv")
 OUTPUT = Path("data/hidden_value_candidates.csv")
+RANKED_OUTPUT = Path("data/hidden_value_ranked.csv")
 FIELDS = [
     "symbol", "shares_outstanding", "market_price", "estimated_nav_cr",
     "listed_investments_cr", "cash_cr", "debt_cr", "deferred_tax_cr",
@@ -36,7 +39,7 @@ def build_candidates(rows: Iterable[dict], max_age_days: int = 400) -> list[dict
             price = float(row["market_price"])
             nav = float(row["estimated_nav_cr"])
             listed = float(row.get("listed_investments_cr", 0) or 0)
-            if not symbol or shares <= 0 or price < 0 or nav <= 0 or listed < 0:
+            if not symbol or shares <= 0 or price <= 0 or nav <= 0 or listed < 0:
                 continue
             if any(not str(row.get(k, "")).strip() for k in REQUIRED_SOURCE_FIELDS):
                 continue
@@ -48,7 +51,7 @@ def build_candidates(rows: Iterable[dict], max_age_days: int = 400) -> list[dict
                 "symbol": symbol,
                 "shares_outstanding": shares,
                 "market_price": price,
-                "market_cap_cr": shares * price / 1e7,
+                "market_cap_cr": round(shares * price / 1e7, 4),
                 "estimated_nav_cr": nav,
                 "listed_investments_cr": listed,
             })
@@ -69,13 +72,25 @@ def refresh(input_path: Path = INPUT, output_path: Path = OUTPUT, max_age_days: 
         writer = csv.DictWriter(f, fieldnames=FIELDS + ["market_cap_cr"])
         writer.writeheader()
         writer.writerows(candidates)
+
+    ranked = rank_rows(candidates)
+    if ranked:
+        ranked_fields = list(ranked[0].keys())
+    else:
+        ranked_fields = FIELDS + ["market_cap_cr"]
+    with RANKED_OUTPUT.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=ranked_fields)
+        writer.writeheader()
+        writer.writerows(ranked)
     return len(candidates)
 
 
 if __name__ == "__main__":
     started = datetime.now().isoformat(timespec="seconds")
     count = refresh()
+    ranked_count = sum(1 for _ in csv.DictReader(RANKED_OUTPUT.open(newline="", encoding="utf-8"))) if RANKED_OUTPUT.exists() else 0
     print(f"REFRESHED HIDDEN-VALUE CANDIDATES: {count}")
+    print(f"RANKED HIDDEN-VALUE CANDIDATES: {ranked_count}")
     print(f"RUN TIME: {started}")
     print("READ ONLY: TRUE")
     print("ORDERS ENABLED: FALSE")
