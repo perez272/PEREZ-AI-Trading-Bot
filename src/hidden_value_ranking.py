@@ -27,7 +27,6 @@ def rank_rows(rows: list[dict]) -> list[dict]:
         shares = _num(row, "shares_outstanding")
         price = _num(row, "market_price")
         nav_cr = _num(row, "estimated_nav_cr")
-        market_cap_cr = _num(row, "market_cap_cr")
 
         if not symbol or shares <= 0 or price <= 0 or nav_cr <= 0:
             continue
@@ -51,10 +50,17 @@ def rank_rows(rows: list[dict]) -> list[dict]:
             for k in ("corporate_action", "regulatory_catalyst", "special_auction", "restructuring_event")
         )
         source_name = str(row.get("source_name") or "")
-        nav_type = "VERIFIED_LIVE_SOTP" if symbol == "ELCIDINVESTMENTS" and "verified live ELCID" in source_name.lower() else "BOOK_VALUE_SCREENING"
+        nav_type = (
+            "VERIFIED_LIVE_SOTP"
+            if symbol == "ELCIDINVESTMENTS" and "verified live elcid" in source_name.lower()
+            else "BOOK_VALUE_SCREENING"
+        )
 
         # Ranking is valuation-only. Catalyst is a separate gate and is never inferred.
-        score = min(100.0, round(discount_pct * 0.75 + (15.0 if nav_type == "VERIFIED_LIVE_SOTP" else 0.0) + (10.0 if catalyst else 0.0), 2))
+        score = min(
+            100.0,
+            round(discount_pct * 0.75 + (15.0 if nav_type == "VERIFIED_LIVE_SOTP" else 0.0) + (10.0 if catalyst else 0.0), 2),
+        )
         ranked.append({
             **row,
             "nav_per_share": round(nav_per_share, 2),
@@ -80,10 +86,10 @@ def refresh(input_path: Path = INPUT, output_path: Path = OUTPUT) -> int:
         rows = list(csv.DictReader(f))
     ranked = rank_rows(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fields = list(ranked[0].keys()) if ranked else list(csv.DictReader(input_path.open(newline="", encoding="utf-8")).fieldnames or [])
-    for extra in ("nav_per_share", "nav_multiple", "nav_discount_pct", "nav_premium_pct", "valuation_score", "classification", "catalyst_verified", "nav_type", "orders_enabled"):
-        if extra not in fields:
-            fields.append(extra)
+    fields = list(ranked[0].keys()) if ranked else []
+    if not fields:
+        with input_path.open(newline="", encoding="utf-8") as f:
+            fields = list(csv.DictReader(f).fieldnames or [])
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
