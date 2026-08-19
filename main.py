@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, time as dt_time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
@@ -18,16 +19,26 @@ MAX_DAILY_LOSS = 300.0
 RESCAN_DELAY_SECONDS = 300
 SCANNER_RECOVERY_DELAY_SECONDS = 15
 MAX_EMPTY_SCAN_RECOVERIES = 3
+HEARTBEAT_FILE = Path("data/runtime/main_heartbeat")
 
 OPTIONS_MIN_SCORE = 80
 OPTIONS_STOP_LOSS_PCT = 2.0
 OPTIONS_TARGETS_PCT = (5.0, 10.0, 15.0, 20.0)
 
 
+def touch_heartbeat():
+    try:
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_FILE.touch()
+    except OSError as exc:
+        print(f"[SELF-HEAL] Heartbeat write failed: {exc!r}")
+
+
 def wait_for_0915_ist():
     tz = ZoneInfo("Asia/Kolkata")
     start = dt_time(9, 15)
     while True:
+        touch_heartbeat()
         now = datetime.now(tz)
         if now.time() >= start:
             print("09:15 IST reached — starting market-data initialization and live-data scan.")
@@ -41,9 +52,11 @@ def wait_for_0915_ist():
 def scan_with_recovery():
     """Run the scanner and automatically rebuild the broker session after failures."""
     for attempt in range(1, MAX_EMPTY_SCAN_RECOVERIES + 1):
+        touch_heartbeat()
         try:
             results = scan_market()
             if results:
+                touch_heartbeat()
                 return results
             print(
                 f"[SELF-HEAL] Scan returned no valid symbols "
@@ -55,6 +68,7 @@ def scan_with_recovery():
             )
 
         reset_client()
+        touch_heartbeat()
         time.sleep(SCANNER_RECOVERY_DELAY_SECONDS)
 
     print("[SELF-HEAL] Scanner recovery exhausted; staying fail-closed and retrying next cycle.")
@@ -73,6 +87,7 @@ def main():
 
     while True:
         try:
+            touch_heartbeat()
             allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS)
             print(
                 f"Today's closed trades: {summary['closed_trades']} | "
@@ -181,10 +196,9 @@ def main():
             print("Bot stopped by operator.")
             return
         except Exception as exc:
-            # Never turn an unexpected transient dependency failure into a dead bot.
-            # systemd also has Restart=always as the last-resort process recovery.
             print(f"[SELF-HEAL] Main loop recovered from error: {exc!r}")
             reset_client()
+            touch_heartbeat()
             time.sleep(SCANNER_RECOVERY_DELAY_SECONDS)
 
 
