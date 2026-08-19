@@ -1,115 +1,165 @@
-"""PEREZ AI — strict, read-only fundamental admission layer."""
+"""PEREZ AI — strict, read-only fundamental admission layer.
+
+Discovery consumes normalized ranking output when available. It never
+converts a valuation discount into a catalyst and never enables live orders.
+Candidates that have verified valuation/catalyst evidence but do not meet the
+high-conviction score remain visible as WATCHLIST rather than being silently
+lost in a binary rejection.
+"""
 from pathlib import Path
 import csv
 from src.high_conviction_gate import evaluate
+from src.catalyst_engine import verify_catalyst
 
 CANDIDATE_FILE = Path("data/hidden_value_candidates.csv")
+RANKED_FILE = Path("data/hidden_value_ranked.csv")
 REQUIRED = {
-    "symbol","market_cap_cr","estimated_nav_cr","listed_investments_cr",
-    "corporate_action","regulatory_catalyst","special_auction",
+    "symbol", "market_cap_cr", "estimated_nav_cr", "listed_investments_cr",
+    "corporate_action", "regulatory_catalyst", "special_auction",
     "restructuring_event"
 }
 
+
 def truthy(v):
-    return str(v or "").strip().lower() in {"1","true","yes","y"}
+    return str(v or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _load_rows(path):
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _normalized_row(row):
+    """Fill discovery inputs from normalized ranking fields when available."""
+    out = dict(row)
+    if not out.get("market_cap_cr"):
+        try:
+            out["market_cap_cr"] = float(out.get("shares_outstanding") or 0) * float(out.get("market_price") or 0) / 1e7
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _watchlist_eligible(result):
+    """Allow verified valuation/catalyst candidates into a non-trading watchlist."""
+    return (
+        float(result.get("nav_discount_pct") or 0) >= 50.0
+        and float(result.get("asset_ratio") or 0) >= 3.0
+        and result.get("catalyst_verified") is True
+        and result.get("ORDERS_ENABLED") is False
+    )
+
 
 def discover(path=CANDIDATE_FILE):
-    passed, rejected = [], []
+    passed, watchlist, rejected = [], [], []
+    source_rows = _load_rows(Path(path))
+    if not source_rows:
+        return [], [], [{"symbol": "*", "reason": "CANDIDATE_FILE_MISSING"}]
 
-    if not Path(path).exists():
-        return [], [{"symbol":"*","reason":"CANDIDATE_FILE_MISSING"}]
+    ranked = {str(r.get("symbol") or "").strip().upper(): r for r in _load_rows(RANKED_FILE)}
 
-    with Path(path).open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            symbol=(row.get("symbol") or "").strip().upper()
+    for raw in source_rows:
+        symbol = (raw.get("symbol") or "").strip().upper()
+        row = _normalized_row({**raw, **ranked.get(symbol, {})})
 
-            if not symbol:
-                rejected.append({"symbol":"*","reason":"MISSING_SYMBOL"})
+        if not symbol:
+            rejected.append({"symbol": "*", "reason": "MISSING_SYMBOL"})
+            continue
+        if not REQUIRED.issubset(row):
+            rejected.append({"symbol": symbol, "reason": "MISSING_REQUIRED_FIELDS"})
+            continue
+
+        try:
+            market_cap = float(row.get("market_cap_cr") or 0)
+            nav = float(row.get("estimated_nav_cr") or 0)
+            listed = float(row.get("listed_investments_cr") or 0)
+            if market_cap <= 0 or nav <= 0:
+                rejected.append({"symbol": symbol, "reason": "MISSING_NAV_OR_MARKET_CAP"})
                 continue
-
-            if not REQUIRED.issubset(row):
-                rejected.append({"symbol":symbol,"reason":"MISSING_REQUIRED_FIELDS"})
+            if listed <= 0:
+                rejected.append({"symbol": symbol, "reason": "INSUFFICIENT_ASSET_COVERAGE"})
                 continue
+        except (TypeError, ValueError):
+            rejected.append({"symbol": symbol, "reason": "INVALID_FUNDAMENTAL_VALUE"})
+            continue
 
-            try:
-                if any(float(row.get(k) or 0) <= 0 for k in (
-                    "market_cap_cr","estimated_nav_cr","listed_investments_cr"
-                )):
-                    rejected.append({"symbol":symbol,"reason":"MISSING_NAV_OR_ASSETS"})
-                    continue
-            except ValueError:
-                rejected.append({"symbol":symbol,"reason":"INVALID_FUNDAMENTAL_VALUE"})
-                continue
+        catalyst_check = verify_catalyst(row)
+        if not catalyst_check["verified"]:
+            rejected.append({
+                "symbol": symbol,
+                "reason": catalyst_check["reason"],
+                "nav_discount_pct": row.get("nav_discount_pct", ""),
+                "classification": row.get("classification", ""),
+                "catalyst_types": catalyst_check.get("types", []),
+            })
+            continue
 
-            catalyst=any(truthy(row.get(k)) for k in (
-                "corporate_action","regulatory_catalyst",
-                "special_auction","restructuring_event"
-            ))
+        try:
+            clean = {
+                "symbol": symbol,
+                "market_cap_cr": market_cap,
+                "estimated_nav_cr": nav,
+                "listed_investments_cr": listed,
+                "cash_cr": float(row.get("cash_cr") or 0),
+                "debt_cr": float(row.get("debt_cr") or 0),
+                "promoter_holding_pct": float(row.get("promoter_holding_pct") or 0),
+                "free_float_pct": float(row.get("free_float_pct") or 0),
+                "avg_daily_value_cr": float(row.get("avg_daily_value_cr") or 0),
+                "corporate_action": truthy(row.get("corporate_action")),
+                "regulatory_catalyst": truthy(row.get("regulatory_catalyst")),
+                "special_auction": truthy(row.get("special_auction")),
+                "restructuring_event": truthy(row.get("restructuring_event")),
+                "revenue_growth_pct": float(row.get("revenue_growth_pct") or 0),
+                "profit_growth_pct": float(row.get("profit_growth_pct") or 0),
+            }
+            result = evaluate(clean)
+            result["catalyst_verified"] = True
+            result["catalyst_types"] = catalyst_check["types"]
+            result["catalyst_source"] = catalyst_check["source_url"]
+            result["catalyst_as_of_date"] = catalyst_check["as_of_date"]
+        except (TypeError, ValueError, KeyError) as e:
+            rejected.append({"symbol": symbol, "reason": f"INVALID_INPUT:{type(e).__name__}:{e}"})
+            continue
 
-            if not catalyst:
-                rejected.append({"symbol":symbol,"reason":"MISSING_CATALYST"})
-                continue
+        if result["HIGH_CONVICTION"] and result["ORDERS_ENABLED"] is False:
+            passed.append(result)
+        elif _watchlist_eligible(result):
+            result["classification"] = "VERIFIED_VALUE_WATCHLIST"
+            result["trade_eligible"] = False
+            watchlist.append(result)
+        else:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "STRICT_GATE_REJECT",
+                "score": result["score"]
+            })
 
-            try:
-                clean = {
-                    "symbol": symbol,
-                    "market_cap_cr": float(row.get("market_cap_cr") or 0),
-                    "estimated_nav_cr": float(row.get("estimated_nav_cr") or 0),
-                    "listed_investments_cr": float(row.get("listed_investments_cr") or 0),
-                    "cash_cr": float(row.get("cash_cr") or 0),
-                    "debt_cr": float(row.get("debt_cr") or 0),
-                    "promoter_holding_pct": float(row.get("promoter_holding_pct") or 0),
-                    "free_float_pct": float(row.get("free_float_pct") or 0),
-                    "avg_daily_value_cr": float(row.get("avg_daily_value_cr") or 0),
-                    "corporate_action": truthy(row.get("corporate_action")),
-                    "regulatory_catalyst": truthy(row.get("regulatory_catalyst")),
-                    "special_auction": truthy(row.get("special_auction")),
-                    "restructuring_event": truthy(row.get("restructuring_event")),
-                    "revenue_growth_pct": float(row.get("revenue_growth_pct") or 0),
-                    "profit_growth_pct": float(row.get("profit_growth_pct") or 0),
-                }
-                result=evaluate(clean)
-            except (TypeError,ValueError,KeyError) as e:
-                rejected.append({
-                    "symbol":symbol,
-                    "reason":f"INVALID_INPUT:{type(e).__name__}:{e}"
-                })
-                continue
+    return (
+        sorted(passed, key=lambda x: x["score"], reverse=True),
+        sorted(watchlist, key=lambda x: x["score"], reverse=True),
+        rejected,
+    )
 
-            if result["HIGH_CONVICTION"] and result["ORDERS_ENABLED"] is False:
-                passed.append(result)
-            else:
-                rejected.append({
-                    "symbol":symbol,
-                    "reason":"STRICT_GATE_REJECT",
-                    "score":result["score"]
-                })
 
-    return sorted(passed,key=lambda x:x["score"],reverse=True),rejected
-
-if __name__=="__main__":
-    passed,rejected=discover()
-
-    print("="*72)
+if __name__ == "__main__":
+    passed, watchlist, rejected = discover()
+    print("=" * 72)
     print("PEREZ AI — HIGH-CONVICTION FUNDAMENTAL DISCOVERY")
-    print("="*72)
+    print("=" * 72)
     print("MODE              : READ ONLY")
     print("PAPER TRADING     : ENABLED")
     print("LIVE ORDERS       : DISABLED")
     print(f"ADMITTED          : {len(passed)}")
+    print(f"WATCHLIST         : {len(watchlist)}")
     print(f"REJECTED          : {len(rejected)}")
-    print("-"*72)
-
+    print("-" * 72)
     for x in passed:
-        print(
-            f"ADMITTED {x['symbol']} | "
-            f"SCORE {x['score']}/100 | "
-            f"NAV DISCOUNT {x['nav_discount_pct']}% | "
-            f"ASSET RATIO {x['asset_ratio']}x"
-        )
-
+        print(f"ADMITTED {x['symbol']} | SCORE {x['score']}/100 | NAV DISCOUNT {x['nav_discount_pct']}% | ASSET RATIO {x['asset_ratio']}x")
+    for x in watchlist:
+        print(f"WATCHLIST {x['symbol']} | SCORE {x['score']}/100 | NAV DISCOUNT {x['nav_discount_pct']}% | ASSET RATIO {x['asset_ratio']}x | TRADE ELIGIBLE FALSE")
     for x in rejected:
         print(f"REJECTED {x['symbol']} | {x['reason']}")
-
-    print("-"*72)
+    print("-" * 72)
     print("ORDERS ENABLED     : FALSE")
