@@ -3,8 +3,8 @@
 The monitor uses the existing AngelClient for read-only LTP polling. It never
 calls an order endpoint and always remains paper-only. The long-running mode
 is designed for systemd: transient broker/API failures are retried by the
-AngelClient and unexpected monitor failures are isolated so the service can
-continue operating.
+AngelClient and malformed legacy rows are isolated so one bad record can never
+break monitoring for valid paper trades.
 """
 from __future__ import annotations
 
@@ -33,6 +33,25 @@ class PaperTrade:
     status: str = "OPEN"
 
 
+def _safe_float(value, field: str, trade_id: str) -> float | None:
+    """Return a finite float or None for malformed legacy tracker values."""
+    try:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("empty value")
+        number = float(text)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("non-finite value")
+        return number
+    except (TypeError, ValueError):
+        print(
+            f"[MONITOR] Skipping malformed trade {trade_id}: "
+            f"{field}={value!r}",
+            flush=True,
+        )
+        return None
+
+
 def check_trade(trade: PaperTrade, ltp: float) -> PaperTrade:
     """Close an open paper trade at its stop or target via the tracker."""
     if trade.status != "OPEN":
@@ -54,15 +73,29 @@ def check_trade(trade: PaperTrade, ltp: float) -> PaperTrade:
 
 def monitor_trade(trade_row: dict, ltp: float) -> dict:
     """Monitor one tracker row and close it when a trigger is reached."""
+    trade_id = str(trade_row.get("trade_id") or "UNKNOWN")
+    symbol = str(trade_row.get("symbol") or "")
+    entry = _safe_float(trade_row.get("entry"), "entry", trade_id)
+    stop_loss = _safe_float(trade_row.get("stop_loss"), "stop_loss", trade_id)
+    target = _safe_float(trade_row.get("target"), "target", trade_id)
+    status = str(trade_row.get("status") or "")
+
+    if entry is None or stop_loss is None or target is None or not symbol or status != "OPEN":
+        return trade_row
+
+    safe_ltp = _safe_float(ltp, "ltp", trade_id)
+    if safe_ltp is None:
+        return trade_row
+
     trade = PaperTrade(
-        trade_id=trade_row["trade_id"],
-        symbol=trade_row["symbol"],
-        entry=float(trade_row["entry"]),
-        stop_loss=float(trade_row["stop_loss"]),
-        target=float(trade_row["target"]),
-        status=trade_row["status"],
+        trade_id=trade_id,
+        symbol=symbol,
+        entry=entry,
+        stop_loss=stop_loss,
+        target=target,
+        status=status,
     )
-    check_trade(trade, float(ltp))
+    check_trade(trade, safe_ltp)
     return trade_row
 
 
@@ -82,6 +115,7 @@ def monitor_with_angel_client(angel_client, instrument_lookup: dict, once: bool 
     """Monitor open paper trades using the existing AngelClient.get_ltp().
 
     No order API is used. ``once=False`` keeps polling until interrupted.
+    Malformed rows are skipped instead of terminating the monitor.
     """
     while True:
         rows = [r for r in _rows() if r.get("status") == "OPEN"]
@@ -89,20 +123,29 @@ def monitor_with_angel_client(angel_client, instrument_lookup: dict, once: bool 
             return []
 
         for row in rows:
-            instrument = instrument_lookup.get(row["symbol"])
+            symbol = str(row.get("symbol") or "")
+            trade_id = str(row.get("trade_id") or "UNKNOWN")
+            if not symbol:
+                print(f"[MONITOR] Skipping malformed trade {trade_id}: missing symbol", flush=True)
+                continue
+            if any(_safe_float(row.get(field), field, trade_id) is None for field in ("entry", "stop_loss", "target")):
+                continue
+
+            instrument = instrument_lookup.get(symbol)
             if not instrument:
-                print(f"[MONITOR] Instrument not found: {row['symbol']}", flush=True)
+                print(f"[MONITOR] Instrument not found: {symbol}", flush=True)
                 continue
             exchange, token = instrument
-            response = angel_client.get_ltp(exchange, row["symbol"], str(token))
+            response = angel_client.get_ltp(exchange, symbol, str(token))
             if not response:
-                print(f"[MONITOR] No LTP response: {row['symbol']}", flush=True)
+                print(f"[MONITOR] No LTP response: {symbol}", flush=True)
                 continue
             data = response.get("data") if isinstance(response, dict) else None
             ltp = data.get("ltp") if isinstance(data, dict) else None
-            if ltp is not None:
-                print(f"[MONITOR] {row['symbol']} LTP={float(ltp):.2f}", flush=True)
-                monitor_trade(row, float(ltp))
+            safe_ltp = _safe_float(ltp, "ltp", trade_id)
+            if safe_ltp is not None:
+                print(f"[MONITOR] {symbol} LTP={safe_ltp:.2f}", flush=True)
+                monitor_trade(row, safe_ltp)
 
         if once:
             return rows
