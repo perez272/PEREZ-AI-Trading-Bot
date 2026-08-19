@@ -3,8 +3,8 @@
 Discovery consumes the canonical normalized candidate file produced by
 ``hidden_value_data_pipeline``. If that file is missing or empty, it safely
 falls back to the normalized source file rather than silently reporting a
-missing universe. It never converts valuation discount into a catalyst and
-never enables live orders.
+missing universe. Ranking output is informational only and is never allowed
+to overwrite canonical fundamental inputs during admission.
 """
 from pathlib import Path
 import csv
@@ -14,7 +14,6 @@ from src.catalyst_engine import verify_catalyst
 
 CANDIDATE_FILE = Path("data/hidden_value_candidates.csv")
 SOURCE_FILE = Path("data/hidden_value_source.csv")
-RANKED_FILE = Path("data/hidden_value_ranked.csv")
 REQUIRED = {
     "symbol", "market_cap_cr", "estimated_nav_cr", "listed_investments_cr",
     "corporate_action", "regulatory_catalyst", "special_auction",
@@ -34,7 +33,7 @@ def _load_rows(path):
 
 
 def _normalized_row(row):
-    """Fill discovery inputs from normalized ranking/source fields when available."""
+    """Fill discovery inputs from canonical source fields when available."""
     out = dict(row)
     if not out.get("market_cap_cr"):
         try:
@@ -70,10 +69,9 @@ def discover(path=CANDIDATE_FILE):
     if not source_rows:
         return [], [], [{"symbol": "*", "reason": "CANDIDATE_UNIVERSE_MISSING"}]
 
-    ranked = {str(r.get("symbol") or "").strip().upper(): r for r in _load_rows(RANKED_FILE)}
     for raw in source_rows:
         symbol = (raw.get("symbol") or "").strip().upper()
-        row = _normalized_row({**raw, **ranked.get(symbol, {})})
+        row = _normalized_row(raw)
         if not symbol:
             rejected.append({"symbol": "*", "reason": "MISSING_SYMBOL"})
             continue
