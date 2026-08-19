@@ -1,9 +1,10 @@
 """Refresh the read-only hidden-value research universe.
 
-The source bridge keeps ELCID on the verified live NAV engine and adds a small
-curated holding-company watchlist from recent public market data. Watchlist
-NAVs are explicitly screening NAVs derived from reported book value / P-B,
-not audited SOTP NAVs. No catalyst is invented and no order API is called.
+ELCID keeps its verified live SOTP NAV. Other holding-company rows are
+screening rows: their NAV is book-value based and must never be presented as
+an audited SOTP. The bridge derives shares outstanding from the supplied
+market-cap/price snapshot so downstream ranking can normalize NAV/share.
+No catalyst is invented and no order API is called.
 """
 from __future__ import annotations
 
@@ -35,9 +36,6 @@ FIELDS = [
     "as_of_date",
 ]
 
-# Public-data screening universe. estimated_nav_cr is derived as
-# market_cap_cr / price_to_book, so it represents book-value NAV for screening,
-# not a liquidation/SOTP valuation. These rows intentionally have no catalyst.
 WATCHLIST = [
     {"symbol": "KALYANIINV", "market_cap_cr": 2420.0, "market_price": 5537.0, "price_to_book": 0.21,
      "source_url": "https://www.screener.in/company/id/1697/consolidated/", "source_name": "Screener public snapshot — book-value NAV screen"},
@@ -53,11 +51,14 @@ WATCHLIST = [
 
 
 def _screening_row(item: dict, as_of: str) -> dict:
-    nav = item["market_cap_cr"] / item["price_to_book"]
+    market_cap = float(item["market_cap_cr"])
+    price = float(item["market_price"])
+    nav = market_cap / float(item["price_to_book"])
+    shares = market_cap * 1e7 / price
     return {
         "symbol": item["symbol"],
-        "shares_outstanding": "",
-        "market_price": item["market_price"],
+        "shares_outstanding": round(shares, 4),
+        "market_price": price,
         "estimated_nav_cr": round(nav, 2),
         "listed_investments_cr": "",
         "cash_cr": "", "debt_cr": "", "deferred_tax_cr": "",
@@ -80,7 +81,7 @@ def _verified_elcid_row(as_of: str) -> dict:
         "uncalled_commitment_cr": 0.0, "other_liabilities_cr": 0.0,
         "promoter_holding_pct": "", "free_float_pct": "", "avg_daily_value_cr": "",
         "corporate_action": "", "regulatory_catalyst": "", "special_auction": "",
-        "restructuring_event": "", "revenue_growth_pct": "", "profit_growth_pct": "",
+        "revenue_growth_pct": "", "profit_growth_pct": "",
         "source_url": "src/elcid_live_nav.py", "source_name": "PEREZ AI verified live ELCID NAV engine",
         "as_of_date": as_of,
     }
