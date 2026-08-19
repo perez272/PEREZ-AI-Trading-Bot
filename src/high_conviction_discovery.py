@@ -2,6 +2,9 @@
 
 Discovery consumes normalized ranking output when available. It never
 converts a valuation discount into a catalyst and never enables live orders.
+Candidates that have verified valuation/catalyst evidence but do not meet the
+high-conviction score remain visible as WATCHLIST rather than being silently
+lost in a binary rejection.
 """
 from pathlib import Path
 import csv
@@ -39,11 +42,21 @@ def _normalized_row(row):
     return out
 
 
+def _watchlist_eligible(result):
+    """Allow verified valuation/catalyst candidates into a non-trading watchlist."""
+    return (
+        float(result.get("nav_discount_pct") or 0) >= 50.0
+        and float(result.get("asset_ratio") or 0) >= 3.0
+        and result.get("catalyst_verified") is True
+        and result.get("ORDERS_ENABLED") is False
+    )
+
+
 def discover(path=CANDIDATE_FILE):
-    passed, rejected = [], []
+    passed, watchlist, rejected = [], [], []
     source_rows = _load_rows(Path(path))
     if not source_rows:
-        return [], [{"symbol": "*", "reason": "CANDIDATE_FILE_MISSING"}]
+        return [], [], [{"symbol": "*", "reason": "CANDIDATE_FILE_MISSING"}]
 
     ranked = {str(r.get("symbol") or "").strip().upper(): r for r in _load_rows(RANKED_FILE)}
 
@@ -112,6 +125,10 @@ def discover(path=CANDIDATE_FILE):
 
         if result["HIGH_CONVICTION"] and result["ORDERS_ENABLED"] is False:
             passed.append(result)
+        elif _watchlist_eligible(result):
+            result["classification"] = "VERIFIED_VALUE_WATCHLIST"
+            result["trade_eligible"] = False
+            watchlist.append(result)
         else:
             rejected.append({
                 "symbol": symbol,
@@ -119,11 +136,15 @@ def discover(path=CANDIDATE_FILE):
                 "score": result["score"]
             })
 
-    return sorted(passed, key=lambda x: x["score"], reverse=True), rejected
+    return (
+        sorted(passed, key=lambda x: x["score"], reverse=True),
+        sorted(watchlist, key=lambda x: x["score"], reverse=True),
+        rejected,
+    )
 
 
 if __name__ == "__main__":
-    passed, rejected = discover()
+    passed, watchlist, rejected = discover()
     print("=" * 72)
     print("PEREZ AI — HIGH-CONVICTION FUNDAMENTAL DISCOVERY")
     print("=" * 72)
@@ -131,10 +152,13 @@ if __name__ == "__main__":
     print("PAPER TRADING     : ENABLED")
     print("LIVE ORDERS       : DISABLED")
     print(f"ADMITTED          : {len(passed)}")
+    print(f"WATCHLIST         : {len(watchlist)}")
     print(f"REJECTED          : {len(rejected)}")
     print("-" * 72)
     for x in passed:
         print(f"ADMITTED {x['symbol']} | SCORE {x['score']}/100 | NAV DISCOUNT {x['nav_discount_pct']}% | ASSET RATIO {x['asset_ratio']}x")
+    for x in watchlist:
+        print(f"WATCHLIST {x['symbol']} | SCORE {x['score']}/100 | NAV DISCOUNT {x['nav_discount_pct']}% | ASSET RATIO {x['asset_ratio']}x | TRADE ELIGIBLE FALSE")
     for x in rejected:
         print(f"REJECTED {x['symbol']} | {x['reason']}")
     print("-" * 72)
