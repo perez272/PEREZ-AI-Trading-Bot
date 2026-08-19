@@ -1,11 +1,12 @@
 """PEREZ AI — strict, read-only fundamental admission layer.
 
-Discovery consumes the normalized ranking output when available. It never
+Discovery consumes normalized ranking output when available. It never
 converts a valuation discount into a catalyst and never enables live orders.
 """
 from pathlib import Path
 import csv
 from src.high_conviction_gate import evaluate
+from src.catalyst_engine import verify_catalyst
 
 CANDIDATE_FILE = Path("data/hidden_value_candidates.csv")
 RANKED_FILE = Path("data/hidden_value_ranked.csv")
@@ -28,11 +29,7 @@ def _load_rows(path):
 
 
 def _normalized_row(row):
-    """Fill discovery inputs from normalized ranking fields when available.
-
-    NAV/share and discount are derived valuation outputs; they are not treated
-    as catalysts or as a substitute for asset coverage.
-    """
+    """Fill discovery inputs from normalized ranking fields when available."""
     out = dict(row)
     if not out.get("market_cap_cr"):
         try:
@@ -48,8 +45,6 @@ def discover(path=CANDIDATE_FILE):
     if not source_rows:
         return [], [{"symbol": "*", "reason": "CANDIDATE_FILE_MISSING"}]
 
-    # Prefer normalized ranking data, but retain the candidate file as the
-    # authoritative source for fundamental fields.
     ranked = {str(r.get("symbol") or "").strip().upper(): r for r in _load_rows(RANKED_FILE)}
 
     for raw in source_rows:
@@ -59,7 +54,6 @@ def discover(path=CANDIDATE_FILE):
         if not symbol:
             rejected.append({"symbol": "*", "reason": "MISSING_SYMBOL"})
             continue
-
         if not REQUIRED.issubset(row):
             rejected.append({"symbol": symbol, "reason": "MISSING_REQUIRED_FIELDS"})
             continue
@@ -78,16 +72,14 @@ def discover(path=CANDIDATE_FILE):
             rejected.append({"symbol": symbol, "reason": "INVALID_FUNDAMENTAL_VALUE"})
             continue
 
-        catalyst = any(truthy(row.get(k)) for k in (
-            "corporate_action", "regulatory_catalyst",
-            "special_auction", "restructuring_event"
-        ))
-        if not catalyst:
+        catalyst_check = verify_catalyst(row)
+        if not catalyst_check["verified"]:
             rejected.append({
                 "symbol": symbol,
-                "reason": "MISSING_CATALYST",
+                "reason": catalyst_check["reason"],
                 "nav_discount_pct": row.get("nav_discount_pct", ""),
-                "classification": row.get("classification", "")
+                "classification": row.get("classification", ""),
+                "catalyst_types": catalyst_check.get("types", []),
             })
             continue
 
@@ -110,6 +102,10 @@ def discover(path=CANDIDATE_FILE):
                 "profit_growth_pct": float(row.get("profit_growth_pct") or 0),
             }
             result = evaluate(clean)
+            result["catalyst_verified"] = True
+            result["catalyst_types"] = catalyst_check["types"]
+            result["catalyst_source"] = catalyst_check["source_url"]
+            result["catalyst_as_of_date"] = catalyst_check["as_of_date"]
         except (TypeError, ValueError, KeyError) as e:
             rejected.append({"symbol": symbol, "reason": f"INVALID_INPUT:{type(e).__name__}:{e}"})
             continue
