@@ -1,0 +1,22 @@
+[Unit]
+Description=PEREZ AI paper trade LTP monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PEREZ_PAPER_MONITOR_INTERVAL=10
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.paper_trade_monitor
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Never enable live order execution from this service.
+Environment=ORDERS_ENABLED=false
+
+[Install]
+WantedBy=multi-user.target
