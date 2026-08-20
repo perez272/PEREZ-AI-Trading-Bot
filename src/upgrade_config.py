@@ -6,6 +6,15 @@ RESCAN_DELAY_SECONDS = 60
 PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
+# Coverage controls. The Angel One master can contain 100k+ derivative rows;
+# scanning every contract every minute is neither necessary nor API-safe.
+# We therefore build the universe from NSE equities with NFO contracts and
+# cap the active underlying scan to a controlled, deterministic size.
+MAX_SCAN_SYMBOLS = 150
+UNIVERSE_REQUIRE_FNO = True
+
+# Kept as a fallback for environments where the local instrument master is
+# unavailable. The runtime scanner prefers the dynamic optionable universe.
 SYMBOLS = {
     "NIFTY": ("NSE", "99926000"),
     "BANKNIFTY": ("NSE", "99926009"),
@@ -25,9 +34,6 @@ MAX_DAILY_LOSS = 300.0
 MAX_DAILY_DRAWDOWN_PCT = 2.0
 MAX_CONSECUTIVE_LOSSES = 2
 
-# 60 is deliberate: the current evidence adapter can supply strong live
-# participation/liquidity evidence, but IV/Greeks and genuine OI-change are
-# fail-closed at zero until a trusted source is available.
 OPTIONS_MIN_SCORE = 60
 MAX_SPREAD_PCT = 1.50
 MAX_SLIPPAGE_PCT = 1.00
