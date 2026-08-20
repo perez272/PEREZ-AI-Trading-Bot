@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
@@ -20,6 +21,7 @@ from src.upgrade_config import (
 )
 
 IST = ZoneInfo("Asia/Kolkata")
+PAPER_MODE = os.getenv("PAPER_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def wait_for_0915_ist():
@@ -42,8 +44,9 @@ def main():
         wait_for_0915_ist()
         print("=" * 72)
         print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
-        print("Paper mode only — no real orders are placed.")
-        print("Capital source: Angel One RMS available cash")
+        print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
+        print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
+        print(f"Capital source: {'PAPER_CAPITAL virtual balance' if PAPER_MODE else 'Angel One RMS available cash'}")
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
         print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
@@ -53,7 +56,7 @@ def main():
         while True:
             write_heartbeat("capital_check")
             try:
-                capital = get_available_capital(get_client())
+                capital = get_available_capital(get_client(), paper_mode=PAPER_MODE)
             except Exception as exc:
                 write_heartbeat("capital_error", error=str(exc))
                 print(f"CAPITAL CHECK FAILED — no scan/trade allowed: {exc}")
@@ -61,7 +64,7 @@ def main():
                 continue
 
             daily_loss_limit = capital * 0.02
-            print(f"Available capital: Rs {capital:.2f} | Dynamic 2% daily loss limit: Rs {daily_loss_limit:.2f}")
+            print(f"{'Virtual' if PAPER_MODE else 'Available'} capital: Rs {capital:.2f} | Dynamic 2% daily loss limit: Rs {daily_loss_limit:.2f}")
             allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, None, capital)
             print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
 
@@ -79,9 +82,6 @@ def main():
             admitted, rejected = discover()
             print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
 
-            # Fundamental discovery is additional evidence, not a hard block.
-            # The options scanner may pursue a strong live market candidate even
-            # when the fundamental adapter has no candidate that cycle.
             candidate = select_best_candidate(results, MINIMUM_SCORE)
             if not candidate:
                 print("No qualifying underlying market signal.")
