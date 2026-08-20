@@ -1,0 +1,19 @@
+[Unit]
+Description=PEREZ AI Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python /home/ubuntu/PEREZ-AI-Trading-Bot/main.py
+Environment=PYTHONUNBUFFERED=1
+Environment=ORDERS_ENABLED=false
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

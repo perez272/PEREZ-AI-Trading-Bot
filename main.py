@@ -19,13 +19,13 @@ from src.upgrade_config import (
 )
 
 CAPITAL = 50000
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def wait_for_0915_ist():
-    tz = ZoneInfo("Asia/Kolkata")
     start = dt_time(9, 15)
     while True:
-        now = datetime.now(tz)
+        now = datetime.now(IST)
         if now.time() >= start:
             print("09:15 IST reached — starting market-data initialization and live-data scan.")
             return
@@ -52,10 +52,15 @@ def main():
             write_heartbeat("scanning")
             allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL)
             print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
+
             if not allowed:
                 write_heartbeat("blocked", reason=reason)
-                print(f"Bot stopped: {reason}")
-                return
+                print(f"Bot waiting: {reason}")
+                # Being outside the entry window is normal. Keep the service
+                # alive so systemd does not restart it continuously, and allow
+                # the next trading session to begin without manual intervention.
+                time.sleep(min(60, RESCAN_DELAY_SECONDS))
+                continue
 
             results = scan_market()
             print_results(results)
