@@ -5,8 +5,10 @@ from zoneinfo import ZoneInfo
 from src.live_trade_monitor import run_monitor
 from src.market_scanner import print_results, scan_market, select_best_candidate
 from src.options_scanner import scan_top_options, select_best_option
+from src.elcid_scanner import scan_elcid
+from src.scan_telemetry import build_scan_report
 from src.risk_manager import can_open_new_trade, is_entry_window, now_ist
-from src.telegram_alert import send_entry_alert
+from src.telegram_alert import send_entry_alert, send_scan_report
 from src.trade_engine import create_trade
 from src.high_conviction_discovery import discover
 from src.upgrade_config import (
@@ -42,8 +44,11 @@ def main():
     print("09:15 IST — fresh-data scanning enabled.")
     print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
     print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
-    print("SEPARATE SCANS: TOP SHARES -> TOP OPTIONS")
+    print("SEPARATE SCANS: TOP SHARES -> TOP OPTIONS -> ELCID")
+    print("TELEGRAM: ONE CONSOLIDATED REPORT PER SCAN CYCLE")
     print("=" * 72)
+
+    scan_number = 0
 
     while True:
         if not is_entry_window():
@@ -55,6 +60,37 @@ def main():
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
+        scan_number += 1
+
+        # Scanner stages are deliberately independent from execution.
+        # No stage creates, modifies, or submits an order.
+        share_results = scan_market()
+        print_results(share_results)
+
+        option_results = scan_top_options(share_results, max_underlyings=10)
+        best_option = select_best_option(option_results)
+        if best_option:
+            print(
+                f"BEST OPTION: {best_option.get('symbol')} {best_option.get('option_type')} "
+                f"score={best_option.get('options_score', 0)}/100 "
+                f"paper={best_option.get('paper_trade_candidate', False)}"
+            )
+        else:
+            print("BEST OPTION: none passed the options gate")
+
+        # ELCID is a separate read-only valuation/portfolio stage.
+        elcid_result = scan_elcid()
+        print(
+            f"ELCID SCAN: LTP=Rs {elcid_result['ltp']:.2f} | "
+            f"reported NAV/share=Rs {elcid_result['reported_nav_per_share']:.2f} | "
+            f"orders_enabled={elcid_result['orders_enabled']}"
+        )
+
+        # Exactly one consolidated report is emitted for this scanner cycle.
+        report = build_scan_report(share_results, option_results, elcid_result, scan_number)
+        send_scan_report(report)
+
+        # Existing risk/execution path starts only after the read-only scans.
         allowed, reason, summary = can_open_new_trade(
             MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL
         )
@@ -66,24 +102,6 @@ def main():
             print(f"Trading paused by risk gate: {reason}")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
-
-        # Stage 1: scan and rank underlying shares/indices only.
-        share_results = scan_market()
-        print_results(share_results)
-
-        # Stage 2: separately resolve/enrich/rank only the strongest option
-        # contracts implied by the top-share signals. This keeps the NFO scan
-        # small and auditable instead of scanning the entire option master.
-        option_results = scan_top_options(share_results, max_underlyings=10)
-        best_option = select_best_option(option_results)
-        if best_option:
-            print(
-                f"BEST OPTION: {best_option.get('symbol')} {best_option.get('option_type')} "
-                f"score={best_option.get('options_score', 0)}/100 "
-                f"paper={best_option.get('paper_trade_candidate', False)}"
-            )
-        else:
-            print("BEST OPTION: none passed the options gate")
 
         admitted, rejected = discover()
         print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
