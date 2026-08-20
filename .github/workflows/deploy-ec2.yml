@@ -41,6 +41,18 @@ jobs:
           venv/bin/python -m pip install -r requirements.txt
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           venv/bin/python -m pytest -q
+
+          # The main service owns the scanner and the per-trade live paper
+          # monitor. The old standalone paper-monitor unit referenced a module
+          # that no longer exists and caused a restart storm.
+          sudo systemctl disable --now perez-paper-monitor.service 2>/dev/null || true
+          sudo rm -f /etc/systemd/system/perez-paper-monitor.service
+
+          sudo install -m 0644 deploy/systemd/perez-ai.service /etc/systemd/system/perez-ai.service
+          sudo systemctl daemon-reload
+          sudo systemctl enable perez-ai.service
+          sudo systemctl restart perez-ai.service
+
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
           echo "COMMIT=$(git rev-parse --short HEAD)"
@@ -94,6 +106,14 @@ jobs:
           fi
           if journalctl --no-pager -u perez-ai.service -u perez-ai-bot.service -u perez-paper-monitor.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
             echo "ERROR: legacy remaining_quantity monitor failure detected"
+            exit 1
+          fi
+          if systemctl is-active --quiet perez-paper-monitor.service; then
+            echo "ERROR: obsolete perez-paper-monitor.service is still active"
+            exit 1
+          fi
+          if ! systemctl is-active --quiet perez-ai.service; then
+            echo "ERROR: perez-ai.service is not active"
             exit 1
           fi
           echo "RUNTIME_ERROR_CHECK_COMPLETE"
