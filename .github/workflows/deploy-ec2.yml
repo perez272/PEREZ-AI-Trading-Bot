@@ -42,11 +42,13 @@ jobs:
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           venv/bin/python -m pytest -q
 
-          # The main service owns the scanner and the per-trade live paper
-          # monitor. The old standalone paper-monitor unit referenced a module
-          # that no longer exists and caused a restart storm.
-          sudo systemctl disable --now perez-paper-monitor.service 2>/dev/null || true
-          sudo rm -f /etc/systemd/system/perez-paper-monitor.service
+          # One production owner only. main.py owns scanning, paper execution,
+          # and the per-trade LTP monitor. Legacy market-open/bot/monitor units
+          # are retired so they cannot create duplicate processes or restart loops.
+          for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
+            sudo systemctl disable --now "$unit" 2>/dev/null || true
+          done
+          sudo rm -f /etc/systemd/system/perez-market-open.service /etc/systemd/system/perez-ai-bot.service /etc/systemd/system/perez-paper-monitor.service
 
           sudo install -m 0644 deploy/systemd/perez-ai.service /etc/systemd/system/perez-ai.service
           sudo systemctl daemon-reload
@@ -70,7 +72,7 @@ jobs:
             echo "ERROR: live trading flag appears enabled"
             exit 1
           fi
-          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src 2>/dev/null | head -20 || true
+          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src --exclude-dir=__pycache__ | head -20 || true
           echo "PAPER_SAFETY_CHECK_COMPLETE"
 
       - name: Check runtime services and duplicate processes
@@ -85,8 +87,6 @@ jobs:
           if test -f data/runtime/heartbeat.json; then cat data/runtime/heartbeat.json; else echo "HEARTBEAT_NOT_YET_CREATED"; fi
           echo "--- recent journal ---"
           journalctl --no-pager -n 80 -u perez-ai.service 2>/dev/null || true
-          journalctl --no-pager -n 80 -u perez-ai-bot.service 2>/dev/null || true
-          journalctl --no-pager -n 80 -u perez-paper-monitor.service 2>/dev/null || true
 
       - name: Check freshness and runtime errors
         run: |
@@ -104,14 +104,16 @@ jobs:
               raise SystemExit('STALE_HEARTBEAT')
           PY
           fi
-          if journalctl --no-pager -u perez-ai.service -u perez-ai-bot.service -u perez-paper-monitor.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
+          if journalctl --no-pager -u perez-ai.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
             echo "ERROR: legacy remaining_quantity monitor failure detected"
             exit 1
           fi
-          if systemctl is-active --quiet perez-paper-monitor.service; then
-            echo "ERROR: obsolete perez-paper-monitor.service is still active"
-            exit 1
-          fi
+          for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
+            if systemctl is-active --quiet "$unit"; then
+              echo "ERROR: retired $unit is still active"
+              exit 1
+            fi
+          done
           if ! systemctl is-active --quiet perez-ai.service; then
             echo "ERROR: perez-ai.service is not active"
             exit 1

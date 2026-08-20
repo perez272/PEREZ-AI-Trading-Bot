@@ -3,8 +3,9 @@ from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
-from src.market_scanner import print_results, scan_market, select_best_candidate
+from src.market_scanner import print_results, scan_market, select_best_candidate, get_client
 from src.production_guard import acquire_single_instance, release_single_instance, write_heartbeat
+from src.capital_manager import get_available_capital
 from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
@@ -14,11 +15,10 @@ from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
     MINIMUM_SCORE,
     MAX_TRADES_PER_DAY,
-    MAX_DAILY_LOSS,
     OPTIONS_MIN_SCORE,
+    OPTION_MAX_PREMIUM,
 )
 
-CAPITAL = 50000
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -41,53 +41,66 @@ def main():
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — PRODUCTION HARDENED")
+        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
         print("Paper mode only — no real orders are placed.")
-        print("09:15 IST — fresh-data scanning enabled.")
+        print("Capital source: Angel One RMS available cash")
+        print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
+        print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("=" * 72)
 
         while True:
-            write_heartbeat("scanning")
-            allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL)
+            write_heartbeat("capital_check")
+            try:
+                capital = get_available_capital(get_client())
+            except Exception as exc:
+                write_heartbeat("capital_error", error=str(exc))
+                print(f"CAPITAL CHECK FAILED — no scan/trade allowed: {exc}")
+                time.sleep(30)
+                continue
+
+            daily_loss_limit = capital * 0.02
+            print(f"Available capital: Rs {capital:.2f} | Dynamic 2% daily loss limit: Rs {daily_loss_limit:.2f}")
+            allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, None, capital)
             print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
 
             if not allowed:
-                write_heartbeat("blocked", reason=reason)
+                write_heartbeat("blocked", reason=reason, capital=capital)
                 print(f"Bot waiting: {reason}")
-                # Being outside the entry window is normal. Keep the service
-                # alive so systemd does not restart it continuously, and allow
-                # the next trading session to begin without manual intervention.
                 time.sleep(min(60, RESCAN_DELAY_SECONDS))
                 continue
 
+            write_heartbeat("scanning", capital=capital)
             results = scan_market()
             print_results(results)
-            write_heartbeat("scanned", candidates=len(results))
+            write_heartbeat("scanned", candidates=len(results), capital=capital)
+
             admitted, rejected = discover()
             print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
 
-            if not admitted:
-                print("No HIGH-CONVICTION fundamental candidate. No paper trade will be created.")
-                time.sleep(RESCAN_DELAY_SECONDS)
-                continue
-
-            admitted_symbols = {x["symbol"] for x in admitted}
-            eligible_market = [x for x in results if x.get("symbol", "").upper() in admitted_symbols]
-            candidate = select_best_candidate(eligible_market, MINIMUM_SCORE)
+            # Fundamental discovery is additional evidence, not a hard block.
+            # The options scanner may pursue a strong live market candidate even
+            # when the fundamental adapter has no candidate that cycle.
+            candidate = select_best_candidate(results, MINIMUM_SCORE)
             if not candidate:
-                print("High-conviction fundamental candidate exists, but no qualifying market signal.")
+                print("No qualifying underlying market signal.")
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
-            print(f"HIGH-CONVICTION PAPER CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
+            print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
             option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
             contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
             if contract_probe.get("status") != "CONTRACT VALID":
-                print("Options contract/LTP validation rejected candidate:", contract_probe)
+                print("Affordable options scanner rejected underlying:", contract_probe)
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
+
+            print(
+                f"AFFORDABLE OPTION: {contract_probe['contract']} "
+                f"Strike={contract_probe['strike']} LTP=Rs {contract_probe['ltp']:.2f} "
+                f"Expiry={contract_probe['expiry']} Lotsize={contract_probe['lotsize']}"
+            )
 
             gate_candidate = {
                 "symbol": candidate["symbol"],
@@ -121,13 +134,17 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
-            write_heartbeat("creating_trade", symbol=candidate["symbol"])
-            trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], CAPITAL)
+            write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
+            trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
             if trade.get("status") != "PAPER TRADE ACTIVE":
                 print("Trade was not created:", trade)
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
+            print(
+                f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | "
+                f"investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%"
+            )
             send_entry_alert(trade)
             write_heartbeat("monitoring", symbol=trade.get("symbol"), contract=trade.get("contract"))
             result = run_monitor(trade)
