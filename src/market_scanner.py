@@ -1,14 +1,14 @@
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
-from src.ai_scoring import calculate_score
 from src.indicators import calculate_indicators
-from src.trade_decision import get_trade_decision
+from src.pro_engine import evaluate
 from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
-from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS
+from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS, MAX_WORKERS
 
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
@@ -44,7 +44,7 @@ def _validate_candle_freshness(candles, symbol):
             print(f"{symbol}: FUTURE CANDLE — SKIP")
             return False
         if MARKET_OPEN <= now.time() <= MARKET_CLOSE and age_seconds > FRESHNESS_MAX_AGE_MINUTES * 60:
-            print(f"{symbol}: STALE CANDLE — age={age_seconds / 60:.1f}m (max={FRESHNESS_MAX_AGE_MINUTES}m) — SKIP")
+            print(f"{symbol}: STALE CANDLE — age={age_seconds / 60:.1f}m — SKIP")
             return False
         for value in last[1:6]:
             if float(value) < 0:
@@ -62,36 +62,53 @@ def _validate_candle_freshness(candles, symbol):
 def _scan_one(symbol, exchange, token):
     to_date = datetime.now(IST)
     from_date = to_date - timedelta(days=5)
-    params = {"exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE", "fromdate": from_date.strftime("%Y-%m-%d %H:%M"), "todate": to_date.strftime("%Y-%m-%d %H:%M")}
+    params = {
+        "exchange": exchange,
+        "symboltoken": token,
+        "interval": "FIVE_MINUTE",
+        "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
+        "todate": to_date.strftime("%Y-%m-%d %H:%M"),
+    }
     try:
         response = get_client().get_candles(params)
         if not response or not response.get("status"):
-            print(f"{symbol}: API returned no valid data")
             return None
         candles = response.get("data")
         if not _validate_candle_freshness(candles, symbol):
             return None
         df = calculate_indicators(candles)
         if df.empty or len(df) < 30:
-            print(f"{symbol}: Insufficient indicator data")
             return None
+        decision = evaluate(df)
         last = df.iloc[-1]
-        score = calculate_score(df)
-        signal, trend = get_trade_decision(score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
-        return {"symbol": symbol, "score": score, "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0)}
+        return {
+            "symbol": symbol,
+            "score": decision["score"],
+            "close": float(last["close"]),
+            "rsi": float(last["RSI"]),
+            "signal": decision["direction"],
+            "trend": decision["regime"],
+            "volume_ratio": decision["volume_ratio"],
+            "structure": decision["structure"],
+            "reasons": decision["reasons"],
+        }
     except Exception as exc:
         print(f"{symbol}: {exc}")
         return None
 
 
 def scan_market():
+    """Fast parallel first-pass scan; weak/invalid symbols are discarded."""
     results = []
-    for symbol, (exchange, token) in SYMBOLS.items():
-        item = _scan_one(symbol, exchange, token)
-        if item:
-            results.append(item)
+    workers = max(1, min(int(MAX_WORKERS), len(SYMBOLS)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_scan_one, symbol, exchange, token) for symbol, (exchange, token) in SYMBOLS.items()]
+        for future in as_completed(futures):
+            item = future.result()
+            if item:
+                results.append(item)
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
@@ -101,15 +118,19 @@ def select_best_candidate(results, minimum_score=65):
 
 
 def print_results(results):
-    print("\nAI Ranking")
-    print("-" * 72)
-    for item in results:
-        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']}")
-    print("-" * 72)
+    print("\nPEREZ PRO AI — OPPORTUNITY RANKING")
+    print("-" * 100)
+    for rank, item in enumerate(results, 1):
+        print(
+            f"#{rank:<2} {item['symbol']:<12} Score={item['score']:>5.1f} "
+            f"Signal={item['signal']:<8} Regime={item['trend']:<18} "
+            f"Structure={item['structure']:<18} Vol={item['volume_ratio']:.2f}x"
+        )
+    print("-" * 100)
 
 
 if __name__ == "__main__":
-    print("=" * 72)
-    print("PEREZ AI MARKET SCANNER — UPGRADED UNIVERSE")
-    print("=" * 72)
+    print("=" * 100)
+    print("PEREZ AI PRO MARKET SCANNER — FAST MULTI-FACTOR ENGINE")
+    print("=" * 100)
     print_results(scan_market())
