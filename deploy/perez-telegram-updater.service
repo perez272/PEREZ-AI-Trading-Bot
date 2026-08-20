@@ -1,0 +1,17 @@
+[Unit]
+Description=PEREZ AI Telegram Live Updater
+After=network-online.target perez-ai.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+EnvironmentFile=/home/ubuntu/PEREZ-AI-Trading-Bot/.env
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.live_telegram_updater
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
