@@ -9,6 +9,7 @@ from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
 from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS
+from src.multi_timeframe import confirm as confirm_multi_timeframe
 
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
@@ -77,11 +78,15 @@ def _scan_one(symbol, exchange, token):
             print(f"{symbol}: Insufficient indicator data")
             return None
         last = df.iloc[-1]
-        score = calculate_score(df)
-        signal, trend = get_trade_decision(score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
+        base_score = calculate_score(df)
+        signal, trend = get_trade_decision(base_score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
+        mtf = confirm_multi_timeframe(candles)
+        score = max(0, min(100, int(base_score) + int(mtf["quality"])))
+        if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
+            signal = "NO TRADE"
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
-        return {"symbol": symbol, "score": score, "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1), "data_source": "Angel One live candles"}
+        return {"symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1), "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"], "data_source": "Angel One live candles / local MTF resample"}
     except Exception as exc:
         print(f"{symbol}: {exc}")
         return None
@@ -90,7 +95,7 @@ def _scan_one(symbol, exchange, token):
 def scan_market():
     results = []
     # Keep broker requests serialized: Angel One API protection is more
-    # important than marginal parallelism for this small production universe.
+    # important than marginal parallelism for this production universe.
     for symbol, (exchange, token) in SYMBOLS.items():
         item = _scan_one(symbol, exchange, token)
         if item:
@@ -99,20 +104,20 @@ def scan_market():
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE")]
+    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True]
     return eligible[0] if eligible else None
 
 
 def print_results(results):
     print("\nAI Ranking")
-    print("-" * 88)
+    print("-" * 112)
     for item in results:
-        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} DataAge={item.get('candle_age_seconds', '?')}s")
-    print("-" * 88)
+        print(f"{item['symbol']:<12} Score={item['score']}/100 Base={item.get('base_score', '?')} Close={item['close']:.2f} Signal={item['signal']} 15m={item.get('m15_trend', '?')} 1h={item.get('h1_trend', '?')} DataAge={item.get('candle_age_seconds', '?')}s")
+    print("-" * 112)
 
 
 if __name__ == "__main__":
     print("=" * 72)
-    print("PEREZ AI MARKET SCANNER — UPGRADED UNIVERSE")
+    print("PEREZ AI MARKET SCANNER — UPGRADED MULTI-TIMEFRAME UNIVERSE")
     print("=" * 72)
     print_results(scan_market())
