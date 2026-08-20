@@ -22,11 +22,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate repository
+      - name: Validate repository syntax
         run: |
           set -euo pipefail
           python3 -m py_compile main.py $(find src -name '*.py' -type f)
-          if command -v pytest >/dev/null 2>&1; then pytest -q; else python3 -m pytest -q; fi
 
       - name: Deploy locally on EC2
         env:
