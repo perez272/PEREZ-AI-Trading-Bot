@@ -13,7 +13,6 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -90,7 +89,6 @@ def fetch_news() -> list[NewsItem]:
             _CACHE[url] = (now, parsed)
             output.extend(parsed)
         except Exception:
-            # Keep stale cache as evidence only if it exists; never fabricate.
             if cached:
                 output.extend(cached[1])
     return output
@@ -108,11 +106,11 @@ def score_symbol(symbol: str, items: Iterable[NewsItem] | None = None) -> Dict[s
     for item in items:
         if item.published_epoch and now - item.published_epoch > MAX_NEWS_AGE_SECONDS:
             continue
-        text = f"{item.title} {item.summary}".upper()
-        if symbol not in text:
+        text = f"{item.title} {item.summary}".lower()
+        if symbol.lower() not in text:
             continue
         matched.append(item)
-        words = set(re.findall(r"[A-Z][A-Z0-9-]{2,}", text.lower()))
+        words = set(re.findall(r"[a-z][a-z0-9-]{2,}", text))
         pos = len(words & positive)
         neg = len(words & negative)
         score += (pos - neg) * 6.0
