@@ -8,6 +8,7 @@ import boto3
 
 TABLE_NAME = os.environ["STATE_TABLE"]
 TELEGRAM_TOKEN_SECRET = os.environ["TELEGRAM_TOKEN_SECRET"]
+REMOTE_STATUS_TOKEN = os.getenv("REMOTE_STATUS_TOKEN", "")
 HEARTBEAT_TTL = int(os.getenv("HEARTBEAT_TTL_SECONDS", "180"))
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
@@ -41,6 +42,14 @@ def get(kind):
 
 def reply(chat_id, text):
     return telegram("sendMessage", chat_id=str(chat_id), text=text[:4000])
+
+
+def authorized(event):
+    if not REMOTE_STATUS_TOKEN:
+        return False
+    headers = event.get("headers") or {}
+    supplied = headers.get("authorization") or headers.get("Authorization") or ""
+    return supplied == f"Bearer {REMOTE_STATUS_TOKEN}"
 
 
 def handle_update(update):
@@ -78,7 +87,6 @@ def handle_update(update):
 
 
 def lambda_handler(event, context):
-    # POST /state from EC2 or POST /telegram from Telegram webhook.
     path = event.get("rawPath") or event.get("path") or "/"
     body = event.get("body") or "{}"
     if event.get("isBase64Encoded"):
@@ -87,6 +95,8 @@ def lambda_handler(event, context):
     payload = json.loads(body)
 
     if path.endswith("/state"):
+        if not authorized(event):
+            return {"statusCode": 401, "body": "unauthorized"}
         kind = payload.get("kind")
         if kind not in {"heartbeat", "forecast", "trade"}:
             return {"statusCode": 400, "body": "invalid state kind"}
