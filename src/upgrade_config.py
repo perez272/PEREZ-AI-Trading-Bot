@@ -21,13 +21,12 @@ SYMBOLS = {
 
 MINIMUM_SCORE = 65
 MAX_TRADES_PER_DAY = 3
-MAX_DAILY_LOSS = 300.0
 MAX_DAILY_DRAWDOWN_PCT = 2.0
 MAX_CONSECUTIVE_LOSSES = 2
 
-# 60 is deliberate: the current evidence adapter can supply strong live
-# participation/liquidity evidence, but IV/Greeks and genuine OI-change are
-# fail-closed at zero until a trusted source is available.
+# Preferred affordable-option universe. A cheap premium is a discovery filter,
+# never a trade signal by itself.
+OPTION_MAX_PREMIUM = 100.0
 OPTIONS_MIN_SCORE = 60
 MAX_SPREAD_PCT = 1.50
 MAX_SLIPPAGE_PCT = 1.00
