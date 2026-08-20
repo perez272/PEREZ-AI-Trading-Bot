@@ -4,10 +4,10 @@ from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
 from src.market_scanner import print_results, scan_market, select_best_candidate
+from src.options_scanner import scan_top_options, select_best_option
 from src.risk_manager import can_open_new_trade, is_entry_window, now_ist
 from src.telegram_alert import send_entry_alert
-from src.trade_engine import create_trade, resolve_option_contract
-from src.options_engine_adapter import evaluate_option_candidate
+from src.trade_engine import create_trade
 from src.high_conviction_discovery import discover
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
@@ -42,12 +42,10 @@ def main():
     print("09:15 IST — fresh-data scanning enabled.")
     print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
     print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
+    print("SEPARATE SCANS: TOP SHARES -> TOP OPTIONS")
     print("=" * 72)
 
     while True:
-        # Keep the process alive outside the entry window. The previous
-        # implementation returned here, which caused systemd Restart=always
-        # to launch a new process every few seconds after 14:45 IST.
         if not is_entry_window():
             current = now_ist()
             print(
@@ -65,15 +63,28 @@ def main():
             f"Today's P/L: Rs {summary['pnl']:.2f}"
         )
         if not allowed:
-            # Risk limits are a trading gate, not a process-failure condition.
-            # Stay alive and re-check on the next cycle; daily limits naturally
-            # reset with the next trading day's summary.
             print(f"Trading paused by risk gate: {reason}")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
-        results = scan_market()
-        print_results(results)
+        # Stage 1: scan and rank underlying shares/indices only.
+        share_results = scan_market()
+        print_results(share_results)
+
+        # Stage 2: separately resolve/enrich/rank only the strongest option
+        # contracts implied by the top-share signals. This keeps the NFO scan
+        # small and auditable instead of scanning the entire option master.
+        option_results = scan_top_options(share_results, max_underlyings=10)
+        best_option = select_best_option(option_results)
+        if best_option:
+            print(
+                f"BEST OPTION: {best_option.get('symbol')} {best_option.get('option_type')} "
+                f"score={best_option.get('options_score', 0)}/100 "
+                f"paper={best_option.get('paper_trade_candidate', False)}"
+            )
+        else:
+            print("BEST OPTION: none passed the options gate")
+
         admitted, rejected = discover()
         print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
 
@@ -83,49 +94,33 @@ def main():
             continue
 
         admitted_symbols = {x["symbol"] for x in admitted}
-        eligible_market = [x for x in results if x.get("symbol", "").upper() in admitted_symbols]
+        eligible_market = [x for x in share_results if x.get("symbol", "").upper() in admitted_symbols]
         candidate = select_best_candidate(eligible_market, MINIMUM_SCORE)
         if not candidate:
             print("High-conviction fundamental candidate exists, but no qualifying market signal.")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
-        print(f"HIGH-CONVICTION PAPER CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
-        option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
-        contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
-        if contract_probe.get("status") != "CONTRACT VALID":
-            print("Options contract/LTP validation rejected candidate:", contract_probe)
+        print(f"HIGH-CONVICTION PAPER SHARE CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
+
+        matching_options = [
+            x for x in option_results
+            if x.get("symbol", "").upper() == candidate["symbol"].upper()
+            and x.get("option_type", "").upper() == ("CE" if candidate["signal"] == "BUY CE" else "PE")
+        ]
+        if not matching_options:
+            print("No separately scanned option contract for the selected share candidate.")
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
 
-        gate_candidate = {
-            "symbol": candidate["symbol"],
-            "option_type": option_type,
-            "expiry": contract_probe.get("expiry", ""),
-            "ltp": contract_probe.get("ltp", 0),
-            "exchange": contract_probe.get("exchange", "NFO"),
-            "token": contract_probe.get("token", ""),
-            "trend_score": candidate.get("score", 0),
-            "momentum_score": candidate.get("score", 0),
-            "volume_score": candidate.get("volume_ratio", 0),
-            "vwap_score": candidate.get("score", 0),
-            "index_confirmation": 8 if candidate.get("trend") else 0,
-            "oi_score": 0,
-            "oi_change_score": 0,
-            "iv_score": 0,
-            "liquidity_score": 0,
-            "volatility_score": 0,
-            "structure_score": 0,
-            "news_confirmation": 0,
-            "event_risk_penalty": 0,
-            "spread_pct": 0,
-            "slippage_pct": 0,
-        }
-
-        options_result = evaluate_option_candidate(gate_candidate)
+        options_result = max(matching_options, key=lambda x: x.get("options_score", 0))
         gate = options_result.get("options_gate", {})
-        print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')}")
-        if not options_result.get("paper_trade_candidate"):
+        print(
+            f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | "
+            f"{gate.get('decision', 'NO TRADE')} | "
+            f"{candidate['symbol']} {options_result.get('option_type', '')}"
+        )
+        if options_result.get("options_score", 0) < OPTIONS_MIN_SCORE or not options_result.get("paper_trade_candidate"):
             print("Options gate rejected candidate:", gate.get("reasons", []))
             time.sleep(RESCAN_DELAY_SECONDS)
             continue
