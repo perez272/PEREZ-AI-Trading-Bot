@@ -75,9 +75,6 @@ def _dynamic_symbols():
     if not universe:
         return dict(SYMBOLS)
 
-    # Always retain the configured index/large-cap symbols first, then add
-    # additional F&O underlyings from the local Angel One master. This avoids
-    # losing NIFTY/BANKNIFTY/FINNIFTY when the dynamic equity universe loads.
     selected = dict(SYMBOLS)
     remaining = [
         (name, item)
@@ -124,7 +121,7 @@ def _scan_one(symbol, exchange, token):
             float(last["EMA50"]),
             float(last["close"]),
         )
-        item = {
+        return {
             "symbol": symbol,
             "status": "OK",
             "age_minutes": age_minutes,
@@ -137,9 +134,6 @@ def _scan_one(symbol, exchange, token):
             "candles": len(df),
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
-        if PER_SYMBOL_DELAY_SECONDS:
-            time.sleep(PER_SYMBOL_DELAY_SECONDS)
-        return item
     except Exception as exc:
         return {"symbol": symbol, "status": "ERROR", "error": str(exc), "latency_ms": int((time.monotonic() - started) * 1000)}
 
@@ -147,9 +141,9 @@ def _scan_one(symbol, exchange, token):
 def scan_market():
     symbols = _dynamic_symbols()
     started = time.monotonic()
-    print("\nPEREZ AI SCAN TELEMETRY")
-    print("=" * 92)
-    print(f"SCAN_START={datetime.now(IST).isoformat(timespec='seconds')} | UNIVERSE={len(symbols)} | MAX_WORKERS={MAX_WORKERS} | PAPER_ONLY=YES")
+    print("\nPEREZ AI SHARE SCAN TELEMETRY")
+    print("=" * 110)
+    print(f"SHARE_SCAN_START={datetime.now(IST).isoformat(timespec='seconds')} | UNIVERSE={len(symbols)} | MAX_WORKERS={MAX_WORKERS} | PAPER_ONLY=YES")
     results = []
     counts = {"OK": 0, "STALE_OR_INVALID": 0, "API_NO_DATA": 0, "INSUFFICIENT_DATA": 0, "ERROR": 0}
     with ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS)) as pool:
@@ -161,32 +155,39 @@ def scan_market():
             if status == "OK":
                 results.append(item)
                 print(
-                    f"SCAN {item['symbol']:<14} status=FRESH age={item['age_minutes']:.2f}m "
+                    f"SHARE {item['symbol']:<14} status=FRESH age={item['age_minutes']:.2f}m "
                     f"close={item['close']:.2f} RSI={item['rsi']:.1f} score={item['score']:>3} "
                     f"signal={item['signal']:<7} trend={item['trend']:<8} candles={item['candles']} latency={item['latency_ms']}ms"
                 )
             else:
                 extra = f" age={item['age_minutes']:.2f}m" if item.get("age_minutes") is not None else ""
-                print(f"SCAN {item['symbol']:<14} status={status}{extra}")
+                print(f"SHARE {item['symbol']:<14} status={status}{extra}")
     elapsed = time.monotonic() - started
     results.sort(key=lambda x: x["score"], reverse=True)
-    print("-" * 92)
+    print("-" * 110)
     print(
-        "SCAN_SUMMARY "
+        "SHARE_SCAN_SUMMARY "
         f"universe={len(symbols)} fresh={counts.get('OK', 0)} "
         f"stale_invalid={counts.get('STALE_OR_INVALID', 0)} "
         f"api_no_data={counts.get('API_NO_DATA', 0)} "
         f"insufficient={counts.get('INSUFFICIENT_DATA', 0)} "
         f"errors={counts.get('ERROR', 0)} results={len(results)} elapsed={elapsed:.1f}s"
     )
-    print("TOP_CANDIDATES")
-    for item in results[:10]:
+    print_top_shares(results)
+    return results
+
+
+def print_top_shares(results, limit=10):
+    print("\nTOP SHARES")
+    print("-" * 110)
+    if not results:
+        print("No fresh share candidates.")
+    for item in results[:limit]:
         print(
-            f"TOP {item['symbol']:<14} score={item['score']:>3} close={item['close']:.2f} "
+            f"SHARE_TOP {item['symbol']:<14} score={item['score']:>3} close={item['close']:.2f} "
             f"RSI={item['rsi']:.1f} signal={item['signal']} trend={item['trend']} age={item['age_minutes']:.2f}m"
         )
-    print("=" * 92)
-    return results
+    print("-" * 110)
 
 
 def select_best_candidate(results, minimum_score=65):
@@ -195,14 +196,14 @@ def select_best_candidate(results, minimum_score=65):
 
 
 def print_results(results):
-    print("\nAI Ranking")
-    print("-" * 92)
+    print("\nAI Ranking — TOP SHARES")
+    print("-" * 110)
     for item in results:
         print(
             f"{item['symbol']:<14} Score={item['score']:>3}/100 Close={item['close']:.2f} "
             f"RSI={item['rsi']:.1f} Signal={item['signal']:<7} Trend={item['trend']:<8} Age={item['age_minutes']:.2f}m"
         )
-    print("-" * 92)
+    print("-" * 110)
 
 
 if __name__ == "__main__":
