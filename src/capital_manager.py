@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -12,13 +13,11 @@ def _to_float(value: Any) -> float | None:
 
 
 def extract_available_capital(response: Any) -> float:
-    """Extract usable cash from Angel One RMS data without a hard-coded capital."""
+    """Extract usable cash from Angel One RMS data without a hard-coded live capital."""
     data = response.get("data", {}) if isinstance(response, dict) else {}
     if not isinstance(data, dict):
         raise RuntimeError("Angel One RMS response has no usable data")
 
-    # Prefer free cash. Margin/net values are only fallbacks because they can
-    # include collateral or other non-cash buying power.
     for key in (
         "availablecash",
         "availableCash",
@@ -33,8 +32,23 @@ def extract_available_capital(response: Any) -> float:
     raise RuntimeError("Angel One RMS response did not expose available capital")
 
 
-def get_available_capital(client) -> float:
-    """Read the current available Angel One capital before risk/scanning."""
+def get_paper_capital() -> float:
+    """Return explicitly configured virtual capital for paper trading."""
+    raw = os.getenv("PAPER_CAPITAL", "50000")
+    try:
+        capital = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("PAPER_CAPITAL must be a positive number") from exc
+    if capital <= 0:
+        raise RuntimeError("PAPER_CAPITAL must be greater than Rs 0")
+    return round(capital, 2)
+
+
+def get_available_capital(client, paper_mode: bool = False) -> float:
+    """Get capital from virtual paper balance or Angel One RMS in live mode."""
+    if paper_mode:
+        return get_paper_capital()
+
     response = client.get_rms_limit()
     capital = extract_available_capital(response)
     if capital <= 0:
