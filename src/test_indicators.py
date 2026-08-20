@@ -1,52 +1,46 @@
-import os
-import pyotp
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-from SmartApi import SmartConnect
+import numpy as np
 
-from indicators import calculate_indicators
+from src.indicators import calculate_indicators
 
-load_dotenv()
 
-obj = SmartConnect(api_key=os.getenv("ANGEL_API_KEY"))
+def test_calculate_indicators_with_sample_candles():
+    """Indicator calculation must be deterministic and must not call Angel One."""
+    candles = []
+    base_price = 100.0
 
-obj.generateSession(
-    os.getenv("ANGEL_CLIENT_ID"),
-    os.getenv("ANGEL_PASSWORD"),
-    pyotp.TOTP(os.getenv("ANGEL_TOTP_SECRET")).now()
-)
+    for index in range(250):
+        price = base_price + index * 0.25
+        candles.append(
+            [
+                f"2026-08-01 {9 + (index // 60):02d}:{(15 + index) % 60:02d}",
+                price - 0.10,
+                price + 0.50,
+                price - 0.50,
+                price,
+                1000 + index,
+            ]
+        )
 
-to_date = datetime.now()
-from_date = to_date - timedelta(days=5)
+    df = calculate_indicators(candles)
 
-params = {
-    "exchange": "NSE",
-    "symboltoken": "99926000",
-    "interval": "FIVE_MINUTE",
-    "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-    "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-}
-
-response = obj.getCandleData(params)
-
-if not response.get("status"):
-    print("Failed to fetch candle data")
-    exit()
-
-df = calculate_indicators(response["data"])
-
-print("\nLast 10 Candles with Indicators:\n")
-
-print(
-    df[[
-        "time",
-        "close",
+    expected_columns = {
         "EMA20",
         "EMA50",
         "EMA200",
         "RSI",
         "MACD",
         "MACD_SIGNAL",
-        "VWAP"
-    ]].tail(10)
-)
+        "ATR",
+        "VWAP",
+    }
+
+    assert expected_columns.issubset(df.columns)
+    assert len(df) == 250
+    assert df["EMA20"].iloc[-1] > 0
+    assert df["EMA50"].iloc[-1] > 0
+    assert df["EMA200"].iloc[-1] > 0
+    assert np.isfinite(df["RSI"].iloc[-1])
+    assert np.isfinite(df["MACD"].iloc[-1])
+    assert np.isfinite(df["MACD_SIGNAL"].iloc[-1])
+    assert np.isfinite(df["ATR"].iloc[-1])
+    assert np.isfinite(df["VWAP"].iloc[-1])
