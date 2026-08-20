@@ -2,12 +2,11 @@ from datetime import datetime
 
 
 def monitor_trade(trade, current_price):
-    """Monitor a paper trade without requiring optional partial-booking fields."""
+    """Monitor a paper trade with backward-compatible target handling."""
     entry = float(trade["entry"])
     current_price = float(current_price)
 
-    # Backward-compatible quantity handling. Older paper trades may not have
-    # remaining_quantity; fall back to the original quantity and persist it.
+    # Backward-compatible quantity handling.
     if trade.get("remaining_quantity") is None:
         original_quantity = trade.get("quantity", trade.get("qty", 0))
         if not original_quantity:
@@ -20,8 +19,17 @@ def monitor_trade(trade, current_price):
 
     initial_stop = float(trade.get("initial_stop_loss", trade["stop_loss"]))
     stop_loss = float(trade["stop_loss"])
-    target1 = float(trade.get("target1", trade.get("target", current_price)))
-    target2 = float(trade.get("target2", trade.get("target", target1)))
+
+    # Explicit target1/target2 = upgraded two-target trade.
+    # Only legacy "target" = preserve old TARGET behavior.
+    has_explicit_targets = "target1" in trade or "target2" in trade
+
+    if has_explicit_targets:
+        target1 = float(trade.get("target1", trade.get("target", current_price)))
+        target2 = float(trade.get("target2", trade.get("target", target1)))
+    else:
+        target1 = float(trade.get("target", current_price))
+        target2 = target1
 
     target1_hit = False
 
@@ -64,7 +72,7 @@ def monitor_trade(trade, current_price):
         exit_reason = "TARGET2"
     elif current_price <= stop_loss:
         status = "STOP LOSS HIT"
-        exit_reason = "TRAILING_STOP"
+        exit_reason = "STOP_LOSS" if current_price <= initial_stop else "TRAILING_STOP"
 
     return {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
