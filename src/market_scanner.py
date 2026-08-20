@@ -70,18 +70,27 @@ def _validate_candle_freshness(candles, symbol):
 
 
 def _dynamic_symbols():
-    """Build a bounded F&O-underlying universe from the local Angel One master."""
+    """Build a bounded F&O-underlying universe and retain major index coverage."""
     universe = get_optionable_universe() if UNIVERSE_REQUIRE_FNO else {}
-    if universe:
-        # Stable ordering prevents the active set from changing randomly.
-        items = sorted(universe.items(), key=lambda item: item[0])
-        selected = dict(items[:MAX_SCAN_SYMBOLS])
-        return {
-            name: (str(item["exchange"]), str(item["token"]))
-            for name, item in selected.items()
-            if item.get("token")
-        }
-    return dict(SYMBOLS)
+    if not universe:
+        return dict(SYMBOLS)
+
+    # Always retain the configured index/large-cap symbols first, then add
+    # additional F&O underlyings from the local Angel One master. This avoids
+    # losing NIFTY/BANKNIFTY/FINNIFTY when the dynamic equity universe loads.
+    selected = dict(SYMBOLS)
+    remaining = [
+        (name, item)
+        for name, item in sorted(universe.items(), key=lambda pair: pair[0])
+        if name not in selected
+    ]
+    capacity = max(0, MAX_SCAN_SYMBOLS - len(selected))
+    for name, item in remaining[:capacity]:
+        token = item.get("token")
+        exchange = item.get("exchange", "NSE")
+        if token:
+            selected[name] = (str(exchange), str(token))
+    return selected
 
 
 def _scan_one(symbol, exchange, token):
