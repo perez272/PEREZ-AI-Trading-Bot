@@ -4,6 +4,7 @@ from src.market_scanner_v3 import get_client
 
 _PRICE_MAX_AGE_SECONDS = 5
 _price_cache = {}
+_quote_cache = {}
 
 
 def get_option_ltp(exchange, symbol, token):
@@ -25,5 +26,25 @@ def get_option_ltp(exchange, symbol, token):
         print("LTP ERROR:", e)
         time.sleep(2)
 
-    # Fail closed: never reuse an expired quote after an API failure.
+    return None
+
+
+def get_option_quote(exchange, symbol, token):
+    """Fetch fresh FULL quote evidence for an option and fail closed on stale/missing data."""
+    key = (exchange, symbol, str(token))
+    now = datetime.now()
+    cached = _quote_cache.get(key)
+    if cached and (now - cached[1]) < timedelta(seconds=_PRICE_MAX_AGE_SECONDS):
+        return cached[0]
+    try:
+        response = get_client().get_market_data("FULL", {exchange: [str(token)]})
+        data = response.get("data", {}) if isinstance(response, dict) else {}
+        fetched = data.get("fetched", []) if isinstance(data, dict) else []
+        if fetched:
+            quote = fetched[0]
+            if float(quote.get("ltp", 0) or 0) > 0:
+                _quote_cache[key] = (quote, now)
+                return quote
+    except Exception as e:
+        print("FULL QUOTE ERROR:", e)
     return None
