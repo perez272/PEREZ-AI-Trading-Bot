@@ -45,7 +45,7 @@ def release_single_instance(handle):
 
 
 def write_heartbeat(status="running", **extra):
-    """Write a small machine-readable heartbeat for EC2 health checks."""
+    """Write a machine-readable heartbeat and optionally mirror it remotely."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -57,4 +57,12 @@ def write_heartbeat(status="running", **extra):
     temp = HEARTBEAT_PATH.with_suffix(".tmp")
     temp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     temp.replace(HEARTBEAT_PATH)
+
+    # Remote publishing is deliberately best-effort. A cloud/API outage must
+    # never stop the local scanner or paper-trading process.
+    try:
+        from src.remote_status import publish
+        publish("heartbeat", payload)
+    except Exception as exc:  # pragma: no cover - defensive production guard
+        print(f"Remote heartbeat publish failed (non-fatal): {exc}")
     return payload
