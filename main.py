@@ -51,7 +51,7 @@ def main():
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
         print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
-        print("Future Value Engine: ENABLED for selected candidates only")
+        print("Future Value Engine: ENABLED for selected stocks and validated options only")
         print("News evidence: advisory/fail-safe; unavailable news never creates a positive signal")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("=" * 72)
@@ -94,10 +94,9 @@ def main():
             print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
             try:
                 forecast_sent = maybe_send_forecast_alert(candidate, horizon="2h")
-                print(f"FUTURE VALUE ENGINE: {'Telegram alert sent' if forecast_sent else 'no alert (below confidence/cooldown or unavailable evidence)'}")
+                print(f"STOCK FUTURE VALUE: {'Telegram alert sent' if forecast_sent else 'no alert (below confidence/cooldown or unavailable evidence)'}")
             except Exception as exc:
-                # Forecast/news is advisory; it must never stop the trading scanner.
-                print(f"Future Value Engine non-fatal error: {exc}")
+                print(f"Future Value Engine stock forecast non-fatal error: {exc}")
 
             option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
             contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
@@ -135,6 +134,18 @@ def main():
                 "spread_pct": 0,
                 "slippage_pct": 0,
             }
+
+            try:
+                option_forecast = dict(gate_candidate)
+                option_forecast.update({
+                    "asset_type": "option",
+                    "contract": contract_probe.get("contract", ""),
+                    "ltp": contract_probe.get("ltp", 0),
+                })
+                forecast_sent = maybe_send_forecast_alert(option_forecast, horizon="2h")
+                print(f"OPTION FUTURE VALUE: {'Telegram alert sent' if forecast_sent else 'no alert (below confidence/cooldown or unavailable evidence)'}")
+            except Exception as exc:
+                print(f"Future Value Engine option forecast non-fatal error: {exc}")
 
             options_result = evaluate_option_candidate(gate_candidate)
             gate = options_result.get("options_gate", {})
