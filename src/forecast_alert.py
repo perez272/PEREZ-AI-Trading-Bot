@@ -33,16 +33,20 @@ def maybe_send_forecast_alert(candidate: Dict[str, Any], *, horizon: str = "2h")
     if f["confidence"] < MIN_CONFIDENCE or edge < MIN_DIRECTIONAL_EDGE:
         return False
 
-    key = f"{f['symbol']}:{f['direction']}:{horizon}"
+    asset_type = str(f.get("asset_type", "equity"))
+    key = f"{f['symbol']}:{asset_type}:{candidate.get('option_type', '')}:{f['direction']}:{horizon}"
     now = time.time()
     if now - _LAST.get(key, 0.0) < COOLDOWN_SECONDS:
         return False
 
     drivers = ", ".join(f["drivers"]) or "none"
     blockers = ", ".join(f["blockers"]) or "none"
+    contract = str(candidate.get("contract") or "").strip()
+    contract_line = f"Contract: {contract}\n" if contract else ""
     message = (
         "PEREZ AI FUTURE VALUE ALERT\n\n"
         f"Selected: {f['symbol']} ({f['asset_type']})\n"
+        f"{contract_line}"
         f"Horizon: {f['horizon']}\n"
         f"Direction: {f['direction']}\n"
         f"Current: Rs {f['current_price']:.2f}\n"
