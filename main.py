@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
 from src.market_scanner import print_results, scan_market, select_best_candidate
-from src.risk_manager import can_open_new_trade
+from src.risk_manager import can_open_new_trade, is_entry_window, now_ist
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
@@ -45,11 +45,32 @@ def main():
     print("=" * 72)
 
     while True:
-        allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL)
-        print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
+        # Keep the process alive outside the entry window. The previous
+        # implementation returned here, which caused systemd Restart=always
+        # to launch a new process every few seconds after 14:45 IST.
+        if not is_entry_window():
+            current = now_ist()
+            print(
+                f"Waiting — outside entry window: {current.strftime('%H:%M:%S')} IST | "
+                "entry window 09:30-14:45 IST"
+            )
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
+
+        allowed, reason, summary = can_open_new_trade(
+            MAX_TRADES_PER_DAY, MAX_DAILY_LOSS, CAPITAL
+        )
+        print(
+            f"Today's closed trades: {summary['closed_trades']} | "
+            f"Today's P/L: Rs {summary['pnl']:.2f}"
+        )
         if not allowed:
-            print(f"Bot stopped: {reason}")
-            return
+            # Risk limits are a trading gate, not a process-failure condition.
+            # Stay alive and re-check on the next cycle; daily limits naturally
+            # reset with the next trading day's summary.
+            print(f"Trading paused by risk gate: {reason}")
+            time.sleep(RESCAN_DELAY_SECONDS)
+            continue
 
         results = scan_market()
         print_results(results)
