@@ -7,6 +7,9 @@ Parameters:
     Type: String
   TelegramChatId:
     Type: String
+  RemoteStatusToken:
+    Type: String
+    NoEcho: true
 
 Globals:
   Function:
@@ -36,6 +39,7 @@ Resources:
           STATE_TABLE: !Ref StateTable
           TELEGRAM_TOKEN_SECRET: !Ref TelegramTokenSecretArn
           TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          REMOTE_STATUS_TOKEN: !Ref RemoteStatusToken
           HEARTBEAT_TTL_SECONDS: '180'
       Policies:
         - DynamoDBCrudPolicy:
