@@ -1,7 +1,20 @@
+import contextlib
+import io
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from src.elcid_full_valuation import LTP, CATEGORIES, NOTE6_NET, results as SCENARIO_RESULTS, ACCOUNTING_NAV, per_share
+# The legacy valuation module prints a detailed report at import time. Suppress
+# that output here so the dedicated ELCID stage owns its telemetry.
+with contextlib.redirect_stdout(io.StringIO()):
+    from src.elcid_full_valuation import (
+        LTP,
+        CATEGORIES,
+        NOTE6_NET,
+        results as SCENARIO_RESULTS,
+        ACCOUNTING_NAV,
+        per_share,
+    )
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -10,14 +23,12 @@ def scan_elcid():
     """Read-only ELCID portfolio/NAV scan. Never creates or modifies trades."""
     reported_nav_per_share = per_share(ACCOUNTING_NAV)
     market_price = LTP
-    discount_to_reported_nav = (DecimalOne - (market_price / reported_nav_per_share)) * DecimalHundred
-    base = SCENARIO_RESULTS["BASE"]
-    bear = SCENARIO_RESULTS["BEAR"]
-    bull = SCENARIO_RESULTS["BULL"]
+    discount_to_reported_nav = (Decimal("1") - (market_price / reported_nav_per_share)) * Decimal("100")
 
-    categories = []
-    for name, value in CATEGORIES:
-        categories.append({"name": name, "value_cr": float(value)})
+    categories = [
+        {"name": name, "value_cr": float(value)}
+        for name, value in CATEGORIES
+    ]
 
     return {
         "stage": "ELCID",
@@ -30,18 +41,7 @@ def scan_elcid():
         "market_discount_to_reported_nav_pct": float(discount_to_reported_nav),
         "categories": categories,
         "scenarios": {
-            "BULL": {"nav_per_share": float(bull["value_per_share"])},
-            "BASE": {"nav_per_share": float(base["value_per_share"])},
-            "BEAR": {"nav_per_share": float(bear["value_per_share"])},
+            name: {"nav_per_share": float(data["value_per_share"])}
+            for name, data in SCENARIO_RESULTS.items()
         },
     }
-
-
-class _DecimalCompat:
-    pass
-
-
-# Keep arithmetic explicit without changing the valuation engine's constants.
-from decimal import Decimal
-DecimalOne = Decimal("1")
-DecimalHundred = Decimal("100")
