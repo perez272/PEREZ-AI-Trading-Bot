@@ -1,23 +1,50 @@
+import os
+import time
+import threading
+
 import requests
 from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
+_LOCK = threading.Lock()
+_LAST_SENT = 0.0
+_MIN_INTERVAL = max(0.5, float(os.getenv("TELEGRAM_MIN_INTERVAL_SECONDS", "1.0")))
+_TIMEOUT = max(3, int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "8")))
 
-def send_alert(message):
+
+def send_alert(message, *, force=False):
+    global _LAST_SENT
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured")
         return False
 
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-            timeout=15,
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as error:
-        print(f"Telegram alert failed: {error}")
-        return False
+    with _LOCK:
+        wait = _MIN_INTERVAL - (time.monotonic() - _LAST_SENT)
+        if not force and wait > 0:
+            time.sleep(wait)
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": str(message)[:4000]},
+                timeout=_TIMEOUT,
+            )
+            if response.status_code == 429:
+                retry_after = 2
+                try:
+                    retry_after = int(response.json().get("parameters", {}).get("retry_after", 2))
+                except Exception:
+                    pass
+                time.sleep(min(30, max(1, retry_after)))
+                response = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "text": str(message)[:4000]},
+                    timeout=_TIMEOUT,
+                )
+            response.raise_for_status()
+            _LAST_SENT = time.monotonic()
+            return response.json()
+        except requests.RequestException as error:
+            print(f"Telegram alert failed (non-fatal): {error}")
+            return False
 
 
 def send_entry_alert(trade):
