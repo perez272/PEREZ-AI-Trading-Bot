@@ -20,6 +20,11 @@ def send_alert(message):
         return False
 
 
+def send_scan_report(message):
+    """Send exactly one consolidated report for a scanner cycle."""
+    return send_alert(message)
+
+
 def send_entry_alert(trade):
     return send_alert(
         "PAPER TRADE OPENED\n\n"
