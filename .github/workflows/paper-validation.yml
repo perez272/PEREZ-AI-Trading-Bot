@@ -1,0 +1,25 @@
+name: Paper-only validation
+
+on:
+  push:
+    branches:
+      - fix/scanner-coverage-telemetry-2026-08-20
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      PEREZ_PAPER_TRADING: "1"
+      PEREZ_LIVE_ORDERS_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q main.py src tests
+      - name: Paper-only tests
+        run: python -m pytest -q
