@@ -12,6 +12,7 @@ from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover
+from src.forecast_alert import maybe_send_forecast_alert
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
     MINIMUM_SCORE,
@@ -43,13 +44,15 @@ def main():
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
+        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS / FUTURE VALUE")
         print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
         print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
         print(f"Capital source: {'PAPER_CAPITAL virtual balance' if PAPER_MODE else 'Angel One RMS available cash'}")
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
         print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
+        print("Future Value Engine: ENABLED for selected candidates only")
+        print("News evidence: advisory/fail-safe; unavailable news never creates a positive signal")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("=" * 72)
 
@@ -89,6 +92,13 @@ def main():
                 continue
 
             print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
+            try:
+                forecast_sent = maybe_send_forecast_alert(candidate, horizon="2h")
+                print(f"FUTURE VALUE ENGINE: {'Telegram alert sent' if forecast_sent else 'no alert (below confidence/cooldown or unavailable evidence)'}")
+            except Exception as exc:
+                # Forecast/news is advisory; it must never stop the trading scanner.
+                print(f"Future Value Engine non-fatal error: {exc}")
+
             option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
             contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
             if contract_probe.get("status") != "CONTRACT VALID":
