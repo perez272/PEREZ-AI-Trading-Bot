@@ -16,13 +16,13 @@ permissions:
 jobs:
   deploy:
     runs-on: [self-hosted, linux, x64, perez-ai-ec2]
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate repository
+      - name: Validate repository syntax
         run: |
           set -euo pipefail
           python3 -m py_compile main.py $(find src -name '*.py' -type f)
@@ -40,6 +40,7 @@ jobs:
           test -x venv/bin/python
           venv/bin/python -m pip install -r requirements.txt
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
+          venv/bin/python -m pytest -q
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
           echo "COMMIT=$(git rev-parse --short HEAD)"
@@ -53,5 +54,46 @@ jobs:
             echo "ERROR: live-order API usage detected"
             exit 1
           fi
+          if grep -RniE 'LIVE ORDERS.*(TRUE|ENABLED)' main.py src 2>/dev/null; then
+            echo "ERROR: live trading flag appears enabled"
+            exit 1
+          fi
           grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src 2>/dev/null | head -20 || true
           echo "PAPER_SAFETY_CHECK_COMPLETE"
+
+      - name: Check runtime services and duplicate processes
+        run: |
+          set -euo pipefail
+          echo "--- PEREZ systemd services ---"
+          systemctl list-units --all --type=service --no-legend 'perez*' || true
+          echo "--- PEREZ processes ---"
+          pgrep -af 'PEREZ-AI-Trading-Bot.*main.py|python.*main.py' || true
+          echo "--- runtime heartbeat ---"
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          if test -f data/runtime/heartbeat.json; then cat data/runtime/heartbeat.json; else echo "HEARTBEAT_NOT_YET_CREATED"; fi
+          echo "--- recent journal ---"
+          journalctl --no-pager -n 80 -u perez-ai.service 2>/dev/null || true
+          journalctl --no-pager -n 80 -u perez-ai-bot.service 2>/dev/null || true
+          journalctl --no-pager -n 80 -u perez-paper-monitor.service 2>/dev/null || true
+
+      - name: Check freshness and runtime errors
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          if test -f data/runtime/heartbeat.json; then
+            python3 - <<'PY'
+          import json, time
+          from pathlib import Path
+          p = Path('data/runtime/heartbeat.json')
+          data = json.loads(p.read_text())
+          age = time.time() - float(data['epoch'])
+          print(f"HEARTBEAT_AGE_SECONDS={age:.1f}")
+          if age > 120:
+              raise SystemExit('STALE_HEARTBEAT')
+          PY
+          fi
+          if journalctl --no-pager -u perez-ai.service -u perez-ai-bot.service -u perez-paper-monitor.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
+            echo "ERROR: legacy remaining_quantity monitor failure detected"
+            exit 1
+          fi
+          echo "RUNTIME_ERROR_CHECK_COMPLETE"

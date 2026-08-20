@@ -28,12 +28,12 @@ def get_client():
 def _validate_candle_freshness(candles, symbol):
     if not isinstance(candles, list) or not candles:
         print(f"{symbol}: NO CANDLE DATA")
-        return False
+        return None
     try:
         last = candles[-1]
         if not isinstance(last, (list, tuple)) or len(last) < 6:
             print(f"{symbol}: INVALID LAST CANDLE")
-            return False
+            return None
         timestamp = datetime.fromisoformat(str(last[0]).strip().replace("Z", "+00:00"))
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=IST)
@@ -42,21 +42,21 @@ def _validate_candle_freshness(candles, symbol):
         age_seconds = (now - timestamp).total_seconds()
         if age_seconds < -60:
             print(f"{symbol}: FUTURE CANDLE — SKIP")
-            return False
+            return None
         if MARKET_OPEN <= now.time() <= MARKET_CLOSE and age_seconds > FRESHNESS_MAX_AGE_MINUTES * 60:
             print(f"{symbol}: STALE CANDLE — age={age_seconds / 60:.1f}m (max={FRESHNESS_MAX_AGE_MINUTES}m) — SKIP")
-            return False
+            return None
         for value in last[1:6]:
             if float(value) < 0:
                 print(f"{symbol}: INVALID CANDLE VALUE — SKIP")
-                return False
+                return None
         if float(last[4]) <= 0:
             print(f"{symbol}: INVALID CLOSE — SKIP")
-            return False
-        return True
+            return None
+        return age_seconds
     except (TypeError, ValueError, IndexError) as exc:
         print(f"{symbol}: INVALID CANDLE TIMESTAMP/DATA — {exc}")
-        return False
+        return None
 
 
 def _scan_one(symbol, exchange, token):
@@ -69,7 +69,8 @@ def _scan_one(symbol, exchange, token):
             print(f"{symbol}: API returned no valid data")
             return None
         candles = response.get("data")
-        if not _validate_candle_freshness(candles, symbol):
+        freshness_age = _validate_candle_freshness(candles, symbol)
+        if freshness_age is None:
             return None
         df = calculate_indicators(candles)
         if df.empty or len(df) < 30:
@@ -80,7 +81,7 @@ def _scan_one(symbol, exchange, token):
         signal, trend = get_trade_decision(score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
-        return {"symbol": symbol, "score": score, "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0)}
+        return {"symbol": symbol, "score": score, "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1), "data_source": "Angel One live candles"}
     except Exception as exc:
         print(f"{symbol}: {exc}")
         return None
@@ -88,6 +89,8 @@ def _scan_one(symbol, exchange, token):
 
 def scan_market():
     results = []
+    # Keep broker requests serialized: Angel One API protection is more
+    # important than marginal parallelism for this small production universe.
     for symbol, (exchange, token) in SYMBOLS.items():
         item = _scan_one(symbol, exchange, token)
         if item:
@@ -102,10 +105,10 @@ def select_best_candidate(results, minimum_score=65):
 
 def print_results(results):
     print("\nAI Ranking")
-    print("-" * 72)
+    print("-" * 88)
     for item in results:
-        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']}")
-    print("-" * 72)
+        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} DataAge={item.get('candle_age_seconds', '?')}s")
+    print("-" * 88)
 
 
 if __name__ == "__main__":
