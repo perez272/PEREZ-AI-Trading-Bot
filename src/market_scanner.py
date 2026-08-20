@@ -1,5 +1,4 @@
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -9,7 +8,7 @@ from src.trade_decision import get_trade_decision
 from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
-from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS, MAX_WORKERS
+from src.upgrade_config import SYMBOLS, FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS
 
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
@@ -90,12 +89,12 @@ def _scan_one(symbol, exchange, token):
 
 def scan_market():
     results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="perez-scan") as executor:
-        futures = [executor.submit(_scan_one, symbol, exchange, token) for symbol, (exchange, token) in SYMBOLS.items()]
-        for future in as_completed(futures):
-            item = future.result()
-            if item:
-                results.append(item)
+    # Keep broker requests serialized: Angel One API protection is more
+    # important than marginal parallelism for this small production universe.
+    for symbol, (exchange, token) in SYMBOLS.items():
+        item = _scan_one(symbol, exchange, token)
+        if item:
+            results.append(item)
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
