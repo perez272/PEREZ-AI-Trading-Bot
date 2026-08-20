@@ -7,7 +7,8 @@ def _candles(direction="up"):
     start = pd.Timestamp("2026-08-20 09:15")
     rows = []
     price = 100.0
-    for i in range(360):
+    # 600 x 5-minute candles = 50 hourly bars, enough for EMA50 on H1.
+    for i in range(600):
         if direction == "up":
             price += 0.20
         else:
