@@ -2,19 +2,23 @@ import time
 
 
 class AngelClient:
+    # Keep historical-candle traffic conservative. A single scan can contain
+    # several symbols, so pacing is deliberately slower than the old client.
+    CANDLE_REQUEST_INTERVAL = 3.0
+    MARKET_DATA_REQUEST_INTERVAL = 2.0
 
-    # Conservative pacing for historical candle requests.
-    CANDLE_REQUEST_INTERVAL = 1.2
-    MARKET_DATA_REQUEST_INTERVAL = 1.5
-
-    # Do not keep hammering Angel One after an explicit rate-limit response.
-    RATE_LIMIT_BACKOFF = 15
+    # After Angel One explicitly rate-limits us, do not send another request
+    # until this cooldown expires. This prevents a 10-symbol scan from turning
+    # one rejection into ten consecutive rejected requests.
+    RATE_LIMIT_BACKOFF = 30
+    RATE_LIMIT_COOLDOWN = 90
 
     def __init__(self, smartapi, session_manager=None):
         self.api = smartapi
         self.session_manager = session_manager
         self._last_candle_request = 0.0
         self._last_market_data_request = 0.0
+        self._rate_limit_until = 0.0
 
     def _is_invalid_token(self, response=None, error=None):
         text = ""
@@ -45,6 +49,12 @@ class AngelClient:
             or "exceeding access rate" in text
         )
 
+    def _rate_limited_now(self):
+        return time.monotonic() < self._rate_limit_until
+
+    def _set_rate_limit_cooldown(self):
+        self._rate_limit_until = time.monotonic() + self.RATE_LIMIT_COOLDOWN
+
     def refresh_session(self):
         if not self.session_manager:
             return False
@@ -58,11 +68,16 @@ class AngelClient:
             return False
 
     def _retry(self, func, *args, **kwargs):
-        """Call SmartAPI defensively without turning rate limits into a crash loop."""
+        """Call SmartAPI defensively and never turn rate limits into a crash loop."""
+        if self._rate_limited_now():
+            remaining = max(0, int(self._rate_limit_until - time.monotonic()))
+            print(f"[API RATE LIMIT] Cooldown active — skipping request ({remaining}s remaining).")
+            return None
+
         delay = 4
         token_refresh_attempted = False
 
-        for attempt in range(4):
+        for attempt in range(2):
             try:
                 response = func(*args, **kwargs)
                 if response is None:
@@ -95,25 +110,26 @@ class AngelClient:
                     return None
 
                 if self._is_rate_limited(error=e):
-                    # A rate-limit response is a service condition, not a reason
-                    # to retry the same request five times. Back off once and let
-                    # the scanner skip this symbol. This prevents restart loops.
+                    self._set_rate_limit_cooldown()
                     print(
-                        f"[API RATE LIMIT] Angel One rejected request "
-                        f"(attempt {attempt + 1}/4). Backing off {self.RATE_LIMIT_BACKOFF}s."
+                        "[API RATE LIMIT] Angel One rejected request. "
+                        f"Backing off {self.RATE_LIMIT_BACKOFF}s and cooling down "
+                        f"new requests for {self.RATE_LIMIT_COOLDOWN}s."
                     )
                     time.sleep(self.RATE_LIMIT_BACKOFF)
                     return None
 
-                print(f"[API attempt {attempt + 1}/4] {e}")
-                if attempt < 3:
+                print(f"[API attempt {attempt + 1}/2] {e}")
+                if attempt == 0:
                     time.sleep(delay)
-                    delay = min(delay * 2, 16)
 
         print("[API] Request failed after retries — skipping.")
         return None
 
     def get_candles(self, params):
+        if self._rate_limited_now():
+            self._retry(lambda: None)
+            return None
         elapsed = time.monotonic() - self._last_candle_request
         wait = self.CANDLE_REQUEST_INTERVAL - elapsed
         if wait > 0:
@@ -122,6 +138,9 @@ class AngelClient:
         return self._retry(self.api.getCandleData, params)
 
     def get_ltp(self, exchange, symbol, token):
+        if self._rate_limited_now():
+            self._retry(lambda: None)
+            return None
         elapsed = time.monotonic() - self._last_market_data_request
         wait = self.MARKET_DATA_REQUEST_INTERVAL - elapsed
         if wait > 0:
@@ -133,6 +152,9 @@ class AngelClient:
         return self._retry(self.api.rmsLimit)
 
     def get_market_data(self, mode, exchange_tokens):
+        if self._rate_limited_now():
+            self._retry(lambda: None)
+            return None
         elapsed = time.monotonic() - self._last_market_data_request
         wait = self.MARKET_DATA_REQUEST_INTERVAL - elapsed
         if wait > 0:
