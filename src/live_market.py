@@ -1,32 +1,22 @@
+"""Explicit Angel One profile helper; importing performs no network I/O."""
 import os
 import pyotp
 from dotenv import load_dotenv
 from SmartApi import SmartConnect
 
-load_dotenv()
 
-API_KEY = os.getenv("ANGEL_API_KEY")
-CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
-PASSWORD = os.getenv("ANGEL_PASSWORD")
-TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
+def get_profile():
+    load_dotenv()
+    values = [os.getenv(k) for k in ("ANGEL_API_KEY", "ANGEL_CLIENT_ID", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET")]
+    if not all(values):
+        raise RuntimeError("Angel One credentials are not configured")
+    api_key, client_id, password, secret = values
+    obj = SmartConnect(api_key=api_key)
+    session = obj.generateSession(client_id, password, pyotp.TOTP(secret).now())
+    if not session.get("status"):
+        raise RuntimeError(f"Angel One login failed: {session}")
+    return obj.getProfile(session["data"]["refreshToken"])
 
-obj = SmartConnect(api_key=API_KEY)
 
-session = obj.generateSession(
-    CLIENT_ID,
-    PASSWORD,
-    pyotp.TOTP(TOTP_SECRET).now()
-)
-
-if not session.get("status"):
-    print("Login Failed")
-    print(session)
-    raise SystemExit(1)
-
-print("✅ Login Successful")
-
-print("\nFetching Profile...\n")
-
-profile = obj.getProfile(session["data"]["refreshToken"])
-
-print(profile)
+if __name__ == "__main__":
+    print(get_profile())
