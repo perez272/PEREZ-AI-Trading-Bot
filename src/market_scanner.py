@@ -18,9 +18,9 @@ CANDLE_INTERVAL_MINUTES = 5
 _session = None
 _client = None
 
-# Cache is keyed by the last CLOSED 5-minute candle bucket.  A cache entry
-# never gets reused merely because it is young; it must belong to the exact
-# closed bucket required for the current scan.
+# Cache is keyed by the last CLOSED 5-minute candle bucket.  The API commonly
+# returns the currently forming candle as its final row; that row is never
+# used for indicators, scoring, or trading.
 _CANDLE_CACHE = {}
 
 
@@ -39,6 +39,14 @@ def _parse_candle_timestamp(raw):
     return timestamp.astimezone(IST)
 
 
+def _bucket_start(timestamp):
+    return timestamp.replace(
+        minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES,
+        second=0,
+        microsecond=0,
+    )
+
+
 def _closed_candle_bucket(now=None):
     now = now or datetime.now(IST)
     minute = (now.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES
@@ -46,45 +54,73 @@ def _closed_candle_bucket(now=None):
     return current_bucket - timedelta(minutes=CANDLE_INTERVAL_MINUTES)
 
 
-def _candle_bucket(candles):
-    try:
-        ts = _parse_candle_timestamp(candles[-1][0])
-        return ts.replace(
-            minute=(ts.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES,
-            second=0,
-            microsecond=0,
-        )
-    except (TypeError, ValueError, IndexError):
-        return None
+def _normalize_closed_candles(candles, symbol):
+    """Return candles containing only fully closed 5-minute bars.
 
-
-def _validate_candle_freshness(candles, symbol, require_current_closed=True):
+    Angel One historical candle responses can end with the currently forming
+    5-minute bar.  During market hours we explicitly remove that bar and use
+    the latest bar whose bucket is strictly before the current bucket.
+    """
     if not isinstance(candles, list) or not candles:
         print(f"{symbol}: NO CANDLE DATA — SKIP")
         return None
-    try:
-        last = candles[-1]
-        if not isinstance(last, (list, tuple)) or len(last) < 6:
-            print(f"{symbol}: INVALID LAST CANDLE — SKIP")
-            return None
 
-        timestamp = _parse_candle_timestamp(last[0])
+    valid = []
+    for row in candles:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            ts = _parse_candle_timestamp(row[0])
+            values = [float(x) for x in row[1:6]]
+            if any(x < 0 for x in values) or values[3] <= 0:
+                continue
+            valid.append((ts, list(row)))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if not valid:
+        print(f"{symbol}: INVALID CANDLE DATA — SKIP")
+        return None
+
+    valid.sort(key=lambda item: item[0])
+    now = datetime.now(IST)
+    required_bucket = _closed_candle_bucket(now)
+
+    # Keep only bars up to the latest expected closed bucket. This strips the
+    # currently forming 13:40 bar when the expected closed bar is 13:35.
+    closed = [row for ts, row in valid if _bucket_start(ts) <= required_bucket]
+    if not closed:
+        print(f"{symbol}: NO CLOSED 5-MINUTE CANDLE AVAILABLE — SKIP")
+        return None
+
+    actual_bucket = _bucket_start(_parse_candle_timestamp(closed[-1][0]))
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and actual_bucket != required_bucket:
+        print(
+            f"{symbol}: STALE/UNEXPECTED CLOSED CANDLE — "
+            f"actual={actual_bucket.strftime('%H:%M')} "
+            f"expected={required_bucket.strftime('%H:%M')} — SKIP"
+        )
+        return None
+
+    return closed
+
+
+def _validate_candle_freshness(candles, symbol, require_current_closed=True):
+    normalized = _normalize_closed_candles(candles, symbol)
+    if normalized is None:
+        return None
+
+    try:
+        timestamp = _parse_candle_timestamp(normalized[-1][0])
         now = datetime.now(IST)
         age_seconds = (now - timestamp).total_seconds()
         if age_seconds < -60:
             print(f"{symbol}: FUTURE CANDLE — SKIP")
             return None
 
-        actual_bucket = timestamp.replace(
-            minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES,
-            second=0,
-            microsecond=0,
-        )
-
-        # During the live market session, only the exact latest CLOSED
-        # 5-minute bucket is tradable. Older data is never silently accepted.
-        if MARKET_OPEN <= now.time() <= MARKET_CLOSE and require_current_closed:
+        if require_current_closed and MARKET_OPEN <= now.time() <= MARKET_CLOSE:
             expected_bucket = _closed_candle_bucket(now)
+            actual_bucket = _bucket_start(timestamp)
             if actual_bucket != expected_bucket:
                 print(
                     f"{symbol}: STALE/UNEXPECTED CLOSED CANDLE — "
@@ -92,18 +128,16 @@ def _validate_candle_freshness(candles, symbol, require_current_closed=True):
                     f"expected={expected_bucket.strftime('%H:%M')} — SKIP"
                 )
                 return None
-
-        for value in last[1:6]:
-            if float(value) < 0:
-                print(f"{symbol}: INVALID CANDLE VALUE — SKIP")
-                return None
-        if float(last[4]) <= 0:
-            print(f"{symbol}: INVALID CLOSE — SKIP")
-            return None
-
         return age_seconds
     except (TypeError, ValueError, IndexError) as exc:
         print(f"{symbol}: INVALID CANDLE TIMESTAMP/DATA — {exc}")
+        return None
+
+
+def _candle_bucket(candles):
+    try:
+        return _bucket_start(_parse_candle_timestamp(candles[-1][0]))
+    except (TypeError, ValueError, IndexError):
         return None
 
 
@@ -120,17 +154,17 @@ def _cached_candles(symbol):
 
     now = datetime.now(IST)
     required_bucket = _closed_candle_bucket(now)
-
-    # Never reuse an older 5-minute candle during market hours. This is the
-    # key invariant that prevents a stale cache from producing a trade.
     if MARKET_OPEN <= now.time() <= MARKET_CLOSE and entry_bucket != required_bucket:
         return None
 
-    if _validate_candle_freshness(candles, symbol, require_current_closed=True) is None:
+    normalized = _normalize_closed_candles(candles, symbol)
+    if normalized is None:
         _CANDLE_CACHE.pop(symbol, None)
         return None
-
-    return candles
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _candle_bucket(normalized) != required_bucket:
+        _CANDLE_CACHE.pop(symbol, None)
+        return None
+    return normalized
 
 
 def _scan_one(symbol, exchange, token):
@@ -158,7 +192,10 @@ def _scan_one(symbol, exchange, token):
             print(f"{symbol}: candle API unavailable — SKIP")
             return None, False
 
-        candles = response.get("data")
+        candles = _normalize_closed_candles(response.get("data"), symbol)
+        if candles is None:
+            return None, False
+
         freshness_age = _validate_candle_freshness(candles, symbol, require_current_closed=True)
         if freshness_age is None:
             return None, False
@@ -176,22 +213,17 @@ def _scan_one(symbol, exchange, token):
             )
             return None, False
 
-        _CANDLE_CACHE[symbol] = {
-            "candles": candles,
-            "bucket": bucket,
-        }
+        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket}
     else:
         freshness_age = _validate_candle_freshness(candles, symbol, require_current_closed=True)
         if freshness_age is None:
             return None, cache_hit
 
     if not isinstance(candles, list) or len(candles) < 30:
-        print(f"{symbol}: Insufficient/invalid candle data — SKIP")
+        print(f"{symbol}: Insufficient/invalid closed candle data — SKIP")
         return None, cache_hit
 
     # Final freshness assertion immediately before indicators/scoring.
-    # This keeps an old cache from becoming a trade candidate at a 5-minute
-    # boundary even if the scan started just before the boundary.
     required_bucket = _closed_candle_bucket(datetime.now(IST))
     cached_bucket = _candle_bucket(candles)
     if MARKET_OPEN <= datetime.now(IST).time() <= MARKET_CLOSE and cached_bucket != required_bucket:
