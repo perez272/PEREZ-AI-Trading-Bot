@@ -18,9 +18,7 @@ _session = None
 _client = None
 
 # Historical candles are reused for the current 5-minute candle bucket.
-# This prevents the 60-second main loop from downloading the same 5-day
-# history repeatedly. A refresh is needed only when the candle bucket changes
-# or when cached data fails freshness validation.
+# This prevents the main loop from downloading the same 5-day history repeatedly.
 _CANDLE_CACHE = {}
 _CANDLE_CACHE_MAX_AGE_SECONDS = 330
 
@@ -33,6 +31,24 @@ def get_client():
     return _client
 
 
+def _parse_candle_timestamp(raw):
+    timestamp = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=IST)
+    return timestamp.astimezone(IST)
+
+
+def _closed_candle_bucket(now=None):
+    """Return the most recent completed 5-minute candle bucket."""
+    now = now or datetime.now(IST)
+    minute = (now.minute // 5) * 5
+    bucket = now.replace(minute=minute, second=0, microsecond=0)
+    # Angel One's latest candle can represent the currently forming bucket.
+    # Treat the previous bucket as the latest safely closed candle until the
+    # current 5-minute interval has completed.
+    return bucket - timedelta(minutes=5)
+
+
 def _validate_candle_freshness(candles, symbol):
     if not isinstance(candles, list) or not candles:
         print(f"{symbol}: NO CANDLE DATA")
@@ -42,18 +58,36 @@ def _validate_candle_freshness(candles, symbol):
         if not isinstance(last, (list, tuple)) or len(last) < 6:
             print(f"{symbol}: INVALID LAST CANDLE")
             return None
-        timestamp = datetime.fromisoformat(str(last[0]).strip().replace("Z", "+00:00"))
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=IST)
-        timestamp = timestamp.astimezone(IST)
+
+        timestamp = _parse_candle_timestamp(last[0])
         now = datetime.now(IST)
         age_seconds = (now - timestamp).total_seconds()
         if age_seconds < -60:
             print(f"{symbol}: FUTURE CANDLE — SKIP")
             return None
-        if MARKET_OPEN <= now.time() <= MARKET_CLOSE and age_seconds > FRESHNESS_MAX_AGE_MINUTES * 60:
-            print(f"{symbol}: STALE CANDLE — age={age_seconds / 60:.1f}m (max={FRESHNESS_MAX_AGE_MINUTES}m) — SKIP")
-            return None
+
+        # During market hours, accept the latest completed 5-minute candle.
+        # The old strict age check rejected valid candles around bucket changes
+        # and caused repeated None -> .iloc failures in the scanner.
+        if MARKET_OPEN <= now.time() <= MARKET_CLOSE:
+            expected_bucket = _closed_candle_bucket(now)
+            actual_bucket = timestamp.replace(
+                minute=(timestamp.minute // 5) * 5,
+                second=0,
+                microsecond=0,
+            )
+            if actual_bucket < expected_bucket:
+                stale_limit_seconds = max(FRESHNESS_MAX_AGE_MINUTES * 60, 600)
+                if age_seconds > stale_limit_seconds:
+                    print(
+                        f"{symbol}: STALE CANDLE — age={age_seconds / 60:.1f}m "
+                        f"(max={stale_limit_seconds / 60:.0f}m) — SKIP"
+                    )
+                    return None
+            elif actual_bucket > expected_bucket + timedelta(minutes=5):
+                print(f"{symbol}: FUTURE/UNEXPECTED CANDLE BUCKET — SKIP")
+                return None
+
         for value in last[1:6]:
             if float(value) < 0:
                 print(f"{symbol}: INVALID CANDLE VALUE — SKIP")
@@ -70,11 +104,7 @@ def _validate_candle_freshness(candles, symbol):
 def _candle_bucket(candles):
     """Return the 5-minute bucket of the latest candle timestamp."""
     try:
-        raw = str(candles[-1][0]).strip().replace("Z", "+00:00")
-        ts = datetime.fromisoformat(raw)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=IST)
-        ts = ts.astimezone(IST)
+        ts = _parse_candle_timestamp(candles[-1][0])
         return ts.replace(minute=(ts.minute // 5) * 5, second=0, microsecond=0)
     except (TypeError, ValueError, IndexError):
         return None
@@ -87,20 +117,22 @@ def _cached_candles(symbol):
     if time.monotonic() - entry["fetched_at"] > _CANDLE_CACHE_MAX_AGE_SECONDS:
         _CANDLE_CACHE.pop(symbol, None)
         return None
+
     candles = entry.get("candles")
     if _validate_candle_freshness(candles, symbol) is None:
         _CANDLE_CACHE.pop(symbol, None)
         return None
-    # Reuse only while the market is still in the same 5-minute candle bucket.
-    # Outside market hours this still safely avoids unnecessary requests.
-    current_bucket = datetime.now(IST).replace(
-        minute=(datetime.now(IST).minute // 5) * 5,
-        second=0,
-        microsecond=0,
-    )
-    if entry.get("bucket") != current_bucket:
+
+    # Reuse within the same data bucket. Once a newer completed bucket is
+    # expected, refresh once rather than repeatedly hammering the API.
+    now = datetime.now(IST)
+    current_bucket = _closed_candle_bucket(now)
+    entry_bucket = entry.get("bucket")
+    if entry_bucket is None:
         return None
-    return candles
+    if entry_bucket >= current_bucket:
+        return candles
+    return None
 
 
 def _scan_one(symbol, exchange, token):
@@ -125,6 +157,9 @@ def _scan_one(symbol, exchange, token):
             if freshness_age is None:
                 return None
             bucket = _candle_bucket(candles)
+            if bucket is None:
+                print(f"{symbol}: INVALID CANDLE BUCKET")
+                return None
             _CANDLE_CACHE[symbol] = {
                 "candles": candles,
                 "bucket": bucket,
@@ -138,9 +173,14 @@ def _scan_one(symbol, exchange, token):
         if freshness_age is None:
             return None
 
+    # Defensive guard: no indicator processing can occur without valid candles.
+    if not isinstance(candles, list) or len(candles) < 30:
+        print(f"{symbol}: Insufficient/invalid candle data")
+        return None
+
     try:
         df = calculate_indicators(candles)
-        if df.empty or len(df) < 30:
+        if df is None or df.empty or len(df) < 30:
             print(f"{symbol}: Insufficient indicator data")
             return None
         last = df.iloc[-1]
@@ -180,8 +220,6 @@ def _scan_one(symbol, exchange, token):
 
 def scan_market():
     results = []
-    # Keep broker requests serialized. Cached scans perform zero broker candle
-    # requests until the 5-minute candle bucket changes.
     refreshed = 0
     cached = 0
     for symbol, (exchange, token) in SYMBOLS.items():
@@ -199,7 +237,12 @@ def scan_market():
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True]
+    eligible = [
+        x for x in results
+        if x["score"] >= minimum_score
+        and x["signal"] in ("BUY CE", "BUY PE")
+        and x.get("mtf_aligned") is True
+    ]
     return eligible[0] if eligible else None
 
 
@@ -207,7 +250,12 @@ def print_results(results):
     print("\nAI Ranking")
     print("-" * 112)
     for item in results:
-        print(f"{item['symbol']:<12} Score={item['score']}/100 Base={item.get('base_score', '?')} Close={item['close']:.2f} Signal={item['signal']} 15m={item.get('m15_trend', '?')} 1h={item.get('h1_trend', '?')} DataAge={item.get('candle_age_seconds', '?')}s")
+        print(
+            f"{item['symbol']:<12} Score={item['score']}/100 "
+            f"Base={item.get('base_score', '?')} Close={item['close']:.2f} "
+            f"Signal={item['signal']} 15m={item.get('m15_trend', '?')} "
+            f"1h={item.get('h1_trend', '?')} DataAge={item.get('candle_age_seconds', '?')}s"
+        )
     print("-" * 112)
 
 
