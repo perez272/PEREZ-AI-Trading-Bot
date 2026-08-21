@@ -14,7 +14,59 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Pre-deploy tests and safety gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PAPER_MODE: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile repository
+        run: python -m py_compile main.py $(find src tests -name '*.py' -type f)
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Enforce paper-only safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' main.py src --include='*.py'; then
+            echo 'ERROR: live-order API primitive detected'
+            exit 1
+          fi
+          python - <<'PY'
+          import main
+          assert main.PAPER_MODE is True, 'PAPER_MODE must default to true'
+          print('PAPER_MODE_DEFAULT_SAFE=true')
+          PY
+
+      - name: Check tracked secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(\.env|.*\.pem|.*\.key)$'; then
+            echo 'ERROR: credential/private-key file is tracked'
+            exit 1
+          fi
+          echo 'TRACKED_SECRET_FILE_CHECK=PASS'
+
   deploy:
+    needs: preflight
     runs-on: [self-hosted, linux, x64, perez-ai-ec2]
     timeout-minutes: 20
 
@@ -43,8 +95,8 @@ jobs:
           venv/bin/python -m pytest -q
 
           # One production owner only. main.py owns scanning, paper execution,
-          # and the per-trade LTP monitor. Legacy market-open/bot/monitor units
-          # are retired so they cannot create duplicate processes or restart loops.
+          # and the per-trade LTP monitor. Legacy units are retired so they
+          # cannot create duplicate processes or restart loops.
           for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
             sudo systemctl disable --now "$unit" 2>/dev/null || true
           done
@@ -64,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
-          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
+          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py --include='*.py'; then
             echo "ERROR: live-order API usage detected"
             exit 1
           fi
@@ -72,7 +124,6 @@ jobs:
             echo "ERROR: live trading flag appears enabled"
             exit 1
           fi
-          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src --exclude-dir=__pycache__ | head -20 || true
           echo "PAPER_SAFETY_CHECK_COMPLETE"
 
       - name: Check runtime services and duplicate processes
