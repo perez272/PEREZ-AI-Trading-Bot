@@ -75,11 +75,23 @@ def main():
                 continue
 
             write_heartbeat("scanning", capital=capital)
-            results = scan_market()
+            try:
+                results = scan_market()
+            except Exception as exc:
+                write_heartbeat("scan_error", error=str(exc), capital=capital)
+                print(f"MARKET SCAN FAILED — skipping this cycle: {exc}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
             print_results(results)
             write_heartbeat("scanned", candidates=len(results), capital=capital)
 
-            admitted, rejected = discover()
+            try:
+                admitted, rejected = discover()
+            except Exception as exc:
+                admitted, rejected = [], []
+                write_heartbeat("discovery_error", error=str(exc), capital=capital)
+                print(f"FUNDAMENTAL DISCOVERY FAILED — continuing with market-only scan: {exc}")
             print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
 
             candidate = select_best_candidate(results, MINIMUM_SCORE)
@@ -90,7 +102,13 @@ def main():
 
             print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
             option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
-            contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
+            try:
+                contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
+            except Exception as exc:
+                print(f"OPTION CONTRACT LOOKUP FAILED — skipping candidate: {exc}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
             if contract_probe.get("status") != "CONTRACT VALID":
                 print("Affordable options scanner rejected underlying:", contract_probe)
                 time.sleep(RESCAN_DELAY_SECONDS)
@@ -126,7 +144,13 @@ def main():
                 "slippage_pct": 0,
             }
 
-            options_result = evaluate_option_candidate(gate_candidate)
+            try:
+                options_result = evaluate_option_candidate(gate_candidate)
+            except Exception as exc:
+                print(f"OPTIONS GATE FAILED — skipping candidate: {exc}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
             gate = options_result.get("options_gate", {})
             print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')}")
             if not options_result.get("paper_trade_candidate"):
@@ -135,7 +159,13 @@ def main():
                 continue
 
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
-            trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
+            try:
+                trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
+            except Exception as exc:
+                print(f"TRADE CREATION FAILED — no trade opened: {exc}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
             if trade.get("status") != "PAPER TRADE ACTIVE":
                 print("Trade was not created:", trade)
                 time.sleep(RESCAN_DELAY_SECONDS)
@@ -145,9 +175,18 @@ def main():
                 f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | "
                 f"investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%"
             )
-            send_entry_alert(trade)
+            try:
+                send_entry_alert(trade)
+            except Exception as exc:
+                print(f"TELEGRAM ALERT FAILED — trade remains paper-managed: {exc}")
+
             write_heartbeat("monitoring", symbol=trade.get("symbol"), contract=trade.get("contract"))
-            result = run_monitor(trade)
+            try:
+                result = run_monitor(trade)
+            except Exception as exc:
+                print(f"TRADE MONITOR FAILED — returning to scanner: {exc}")
+                result = True
+
             if result is None:
                 write_heartbeat("stopped")
                 print("Bot stopped manually.")
