@@ -122,6 +122,7 @@ def _cached_candles(symbol):
 
 def _scan_one(symbol, exchange, token):
     candles = _cached_candles(symbol)
+    freshness_age = None
 
     if candles is None:
         to_date = datetime.now(IST)
@@ -144,7 +145,8 @@ def _scan_one(symbol, exchange, token):
             return None
 
         candles = response.get("data")
-        if _validate_candle_freshness(candles, symbol) is None:
+        freshness_age = _validate_candle_freshness(candles, symbol)
+        if freshness_age is None:
             return None
 
         bucket = _candle_bucket(candles)
