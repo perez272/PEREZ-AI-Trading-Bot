@@ -6,4 +6,5 @@ python-dotenv>=1.0,<2
 requests>=2.31,<3
 smartapi-python==1.5.5
 logzero>=1.7,<2
+websocket-client>=1.8,<2
 pytest>=9,<10
