@@ -79,12 +79,38 @@ jobs:
           set -euo pipefail
           python3 -m py_compile main.py $(find src -name '*.py' -type f)
 
-      - name: Deploy locally on EC2
+      - name: Transactional deploy with automatic rollback
         env:
           DEPLOY_BRANCH: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
+
+          PREV_SHA=$(git rev-parse HEAD)
+          BACKUP_DIR="data/runtime/deploy-backup-${GITHUB_RUN_ID}"
+          mkdir -p "$BACKUP_DIR"
+          printf '%s\n' "$PREV_SHA" > "$BACKUP_DIR/previous_sha"
+          if test -f /etc/systemd/system/perez-ai.service; then
+            sudo cp /etc/systemd/system/perez-ai.service "$BACKUP_DIR/perez-ai.service"
+          fi
+
+          rollback() {
+            echo "DEPLOY_FAILED — starting automatic rollback to $PREV_SHA"
+            git reset --hard "$PREV_SHA" || true
+            if test -f "$BACKUP_DIR/perez-ai.service"; then
+              sudo install -m 0644 "$BACKUP_DIR/perez-ai.service" /etc/systemd/system/perez-ai.service || true
+              sudo systemctl daemon-reload || true
+            fi
+            sudo systemctl restart perez-ai.service || true
+            sleep 8
+            if systemctl is-active --quiet perez-ai.service; then
+              echo "ROLLBACK_OK=true"
+            else
+              echo "ROLLBACK_OK=false"
+            fi
+          }
+          trap rollback ERR
+
           git fetch origin
           git checkout "$DEPLOY_BRANCH"
           git reset --hard "origin/$DEPLOY_BRANCH"
@@ -94,9 +120,6 @@ jobs:
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           venv/bin/python -m pytest -q
 
-          # One production owner only. main.py owns scanning, paper execution,
-          # and the per-trade LTP monitor. Legacy units are retired so they
-          # cannot create duplicate processes or restart loops.
           for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
             sudo systemctl disable --now "$unit" 2>/dev/null || true
           done
@@ -106,11 +129,28 @@ jobs:
           sudo systemctl daemon-reload
           sudo systemctl enable perez-ai.service
           sudo systemctl restart perez-ai.service
+          sleep 8
 
+          systemctl is-active --quiet perez-ai.service
+          if test -f data/runtime/heartbeat.json; then
+            python3 - <<'PY'
+          import json, time
+          from pathlib import Path
+          p = Path('data/runtime/heartbeat.json')
+          data = json.loads(p.read_text())
+          age = time.time() - float(data['epoch'])
+          print(f"CANARY_HEARTBEAT_AGE_SECONDS={age:.1f}")
+          if age > 120:
+              raise SystemExit('CANARY_STALE_HEARTBEAT')
+          PY
+          fi
+
+          trap - ERR
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
-          echo "COMMIT=$(git rev-parse --short HEAD)"
-          echo "STATIC_IP_NOT_REQUIRED=true"
+          echo "PREVIOUS_COMMIT=$PREV_SHA"
+          echo "CURRENT_COMMIT=$(git rev-parse HEAD)"
+          echo "ROLLBACK_CAPABLE=true"
 
       - name: Verify paper safety
         run: |
