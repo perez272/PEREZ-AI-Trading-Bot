@@ -4,6 +4,7 @@ pandas-ta>=0.3.14b0
 pyotp>=2.9,<3
 python-dotenv>=1.0,<2
 requests>=2.31,<3
+beautifulsoup4>=4.12,<5
 smartapi-python==1.5.5
 logzero>=1.7,<2
 websocket-client>=1.8,<2
