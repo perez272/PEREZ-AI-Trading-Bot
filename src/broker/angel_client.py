@@ -1,7 +1,6 @@
 import json
 import os
 import time
-from collections import deque
 from contextlib import contextmanager
 from threading import Lock
 
@@ -16,17 +15,14 @@ class AngelClient:
     CANDLE_REQUEST_INTERVAL = 3.0
     MARKET_DATA_REQUEST_INTERVAL = 3.0
 
-    # Global rolling market-data budget. The in-process deque is supplemented
-    # by a file-backed ledger so the budget is shared by perez-ai.service,
-    # telegram/live updater processes, and any other local AngelClient process.
+    # One global rolling budget for all local processes using this client.
     MARKET_DATA_BUDGET_WINDOW = 60.0
     MARKET_DATA_BUDGET_MAX_REQUESTS = 12
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
-    _GLOBAL_MARKET_DATA_REQUESTS = deque()
     _GLOBAL_MARKET_DATA_LOCK = Lock()
 
-    # Shared cooldown prevents another process from immediately hammering
-    # Angel One after any process receives a rate-limit response.
+    # Shared cooldown prevents any process from hammering Angel One after a
+    # rate-limit response from another process.
     RATE_LIMIT_COOLDOWN = 90.0
 
     def __init__(self, smartapi, session_manager=None):
@@ -37,7 +33,9 @@ class AngelClient:
 
     @contextmanager
     def _budget_file_lock(self):
-        os.makedirs(os.path.dirname(self.MARKET_DATA_BUDGET_FILE), exist_ok=True)
+        directory = os.path.dirname(self.MARKET_DATA_BUDGET_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         with open(self.MARKET_DATA_BUDGET_FILE, "a+", encoding="utf-8") as handle:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -54,9 +52,8 @@ class AngelClient:
             return {"requests": [], "cooldown_until": 0.0}
         try:
             state = json.loads(raw)
-            requests = [float(x) for x in state.get("requests", [])]
             return {
-                "requests": requests,
+                "requests": [float(x) for x in state.get("requests", [])],
                 "cooldown_until": float(state.get("cooldown_until", 0.0)),
             }
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -73,16 +70,14 @@ class AngelClient:
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
-            remaining = max(0.0, float(state.get("cooldown_until", 0.0)) - now)
-            return remaining
+            return max(0.0, state["cooldown_until"] - now)
 
     def _set_rate_limit_cooldown(self):
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
             state["cooldown_until"] = max(
-                float(state.get("cooldown_until", 0.0)),
-                now + self.RATE_LIMIT_COOLDOWN,
+                state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
             )
             self._write_shared_state(handle, state)
 
@@ -128,10 +123,10 @@ class AngelClient:
             return False
 
     def _retry(self, func, *args, **kwargs):
-        """Call SmartAPI defensively without creating a rate-limit crash loop."""
-        remaining = self._shared_cooldown_remaining()
-        if remaining > 0:
-            print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
+        """Call SmartAPI defensively without a rate-limit retry storm."""
+        if self._shared_cooldown_remaining() > 0:
+            remaining = int(self._shared_cooldown_remaining())
+            print(f"[API RATE LIMIT] Global cooldown active — skipping request ({remaining}s remaining).")
             return None
 
         token_refresh_attempted = False
@@ -162,7 +157,6 @@ class AngelClient:
                     return None
 
                 return response
-
             except Exception as e:
                 if self._is_invalid_token(error=e):
                     if self.session_manager and not token_refresh_attempted:
@@ -190,29 +184,44 @@ class AngelClient:
         print("[API] Request failed after retries — skipping.")
         return None
 
-    @classmethod
-    def _prune_global_market_data_budget(cls, now=None):
-        now = time.monotonic() if now is None else now
-        cutoff = now - cls.MARKET_DATA_BUDGET_WINDOW
-        with cls._GLOBAL_MARKET_DATA_LOCK:
-            while cls._GLOBAL_MARKET_DATA_REQUESTS and cls._GLOBAL_MARKET_DATA_REQUESTS[0] <= cutoff:
-                cls._GLOBAL_MARKET_DATA_REQUESTS.popleft()
+    def _reserve_market_data_request(self, last_request_attr, interval):
+        """Atomically pace and reserve one global market-data request.
 
-    def _market_data_budget_available(self):
+        The old implementation checked the shared budget and then recorded
+        the request in two separate critical sections. Two processes could
+        therefore both observe spare capacity and overshoot the global limit.
+        This method performs cooldown, rolling-window pruning, budget check,
+        reservation, and local pacing under one file lock.
+        """
         now = time.monotonic()
+        last_request = getattr(self, last_request_attr)
+        local_remaining = interval - (now - last_request)
+        if local_remaining > 0:
+            print(
+                f"[MARKET DATA PACE] Request skipped — "
+                f"{local_remaining:.1f}s until next permitted request."
+            )
+            return False
+
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
+            cooldown_remaining = max(0.0, state["cooldown_until"] - now)
+            if cooldown_remaining > 0:
+                print(
+                    f"[API RATE LIMIT] Global cooldown active — "
+                    f"skipping request ({int(cooldown_remaining)}s remaining)."
+                )
+                self._write_shared_state(handle, state)
+                return False
+
             cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
             requests = [x for x in state["requests"] if x > cutoff]
             state["requests"] = requests
-            remaining_cooldown = max(0.0, state["cooldown_until"] - now)
-            if remaining_cooldown > 0:
-                print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining_cooldown)}s remaining).")
-                self._write_shared_state(handle, state)
-                return False
+
             if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
-                oldest = requests[0]
-                retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - oldest)))
+                retry_in = max(
+                    0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0]))
+                )
                 print(
                     "[MARKET DATA BUDGET] Global request budget exhausted — "
                     f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
@@ -220,46 +229,26 @@ class AngelClient:
                 )
                 self._write_shared_state(handle, state)
                 return False
-            return True
 
-    def _record_market_data_request(self):
-        now = time.monotonic()
-        with self._budget_file_lock() as handle:
-            state = self._read_shared_state(handle)
-            cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
-            state["requests"] = [x for x in state["requests"] if x > cutoff]
+            # Reserve capacity before touching Angel One. This is the single
+            # atomic operation shared by every local AngelClient process.
             state["requests"].append(now)
             self._write_shared_state(handle, state)
 
-    def _prepare_market_data_request(self, last_request_attr, interval):
-        remaining = self._shared_cooldown_remaining()
-        if remaining > 0:
-            print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
-            return False
-
-        last_request = getattr(self, last_request_attr)
-        elapsed = time.monotonic() - last_request
-        if elapsed < interval:
-            print(
-                f"[MARKET DATA PACE] Request skipped — "
-                f"{interval - elapsed:.1f}s until next permitted request."
-            )
-            return False
-
-        # Reserve the global budget atomically before making the API call.
-        if not self._market_data_budget_available():
-            return False
-        self._record_market_data_request()
-        setattr(self, last_request_attr, time.monotonic())
+        setattr(self, last_request_attr, now)
         return True
 
     def get_candles(self, params):
-        if not self._prepare_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
+        if not self._reserve_market_data_request(
+            "_last_candle_request", self.CANDLE_REQUEST_INTERVAL
+        ):
             return None
         return self._retry(self.api.getCandleData, params)
 
     def get_ltp(self, exchange, symbol, token):
-        if not self._prepare_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
+        if not self._reserve_market_data_request(
+            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
+        ):
             return None
         return self._retry(self.api.ltpData, exchange, symbol, token)
 
@@ -267,6 +256,8 @@ class AngelClient:
         return self._retry(self.api.rmsLimit)
 
     def get_market_data(self, mode, exchange_tokens):
-        if not self._prepare_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
+        if not self._reserve_market_data_request(
+            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
+        ):
             return None
         return self._retry(self.api.getMarketData, mode, exchange_tokens)
