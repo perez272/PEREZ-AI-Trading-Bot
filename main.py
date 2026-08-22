@@ -12,6 +12,7 @@ from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover
+from src.ai_memory import remember_observation, remember_outcome
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
     MINIMUM_SCORE,
@@ -51,6 +52,7 @@ def main():
         print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
+        print("Persistent AI learning memory: ENABLED")
         print("=" * 72)
 
         while True:
@@ -151,6 +153,11 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
+            try:
+                remember_observation(candidate, options_result)
+            except Exception as exc:
+                print(f"AI MEMORY WARNING — observation not stored: {exc}")
+
             gate = options_result.get("options_gate", {})
             print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')}")
             if not options_result.get("paper_trade_candidate"):
@@ -160,7 +167,6 @@ def main():
 
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
             try:
-                # Reuse the exact contract that passed the affordability + options gate.
                 trade = create_trade(
                     candidate["symbol"],
                     candidate["close"],
@@ -178,6 +184,9 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
+            trade["score"] = candidate.get("score", 0)
+            trade["options_score"] = options_result.get("options_score", 0)
+            trade["ai_memory_enabled"] = True
             print(
                 f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | "
                 f"investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%"
@@ -198,6 +207,14 @@ def main():
                 write_heartbeat("stopped")
                 print("Bot stopped manually.")
                 return
+
+            if isinstance(result, dict) and result.get("closed"):
+                try:
+                    remember_outcome(trade, result)
+                    print("AI MEMORY: paper-trade outcome stored for future learning.")
+                except Exception as exc:
+                    print(f"AI MEMORY WARNING — outcome not stored: {exc}")
+
             print("Trade cycle complete. Returning to scanner.")
             write_heartbeat("trade_complete", symbol=trade.get("symbol"))
             time.sleep(RESCAN_DELAY_SECONDS)
