@@ -40,7 +40,14 @@ def _candidates(symbol: str, spot: float, option_type: str):
     return rows
 
 
-def find_affordable_contract(symbol: str, spot: float, option_type: str, ltp_getter, max_premium: float = OPTION_MAX_PREMIUM):
+def find_affordable_contract(
+    symbol: str,
+    spot: float,
+    option_type: str,
+    ltp_getter,
+    max_premium: float = OPTION_MAX_PREMIUM,
+    batch_ltp_getter=None,
+):
     """Find a liquid-ish, affordable contract without assuming the ATM option is best."""
     rows = _candidates(symbol, spot, option_type)
     if not rows:
@@ -54,10 +61,27 @@ def find_affordable_contract(symbol: str, spot: float, option_type: str, ltp_get
     rows = rows[:24]
 
     affordable = []
+
+    quotes = {}
+    if batch_ltp_getter is not None:
+        try:
+            quotes = batch_ltp_getter("NFO", rows) or {}
+        except Exception as exc:
+            print(f"[OPTION BATCH] {type(exc).__name__}: {exc}")
+
     for row in rows:
         try:
-            ltp = float(ltp_getter(row["exchange"], row["symbol"], row["token"]))
-        except Exception:
+            if batch_ltp_getter is not None:
+                ltp = float(quotes.get(row["symbol"]))
+            else:
+                ltp = float(
+                    ltp_getter(
+                        row["exchange"],
+                        row["symbol"],
+                        row["token"],
+                    )
+                )
+        except (TypeError, ValueError, Exception):
             continue
         if ltp <= 0 or ltp > max_premium:
             continue

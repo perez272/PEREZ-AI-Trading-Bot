@@ -1,5 +1,5 @@
 from src.affordable_options import find_affordable_contract
-from src.live_option_price import get_option_ltp
+from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
 STOP_LOSS_PCT = 0.02
@@ -13,7 +13,14 @@ def resolve_option_contract(symbol, spot, signal):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
 
     option_type = "CE" if signal == "BUY CE" else "PE"
-    affordable = find_affordable_contract(symbol, spot, option_type, get_option_ltp, OPTION_MAX_PREMIUM)
+    affordable = find_affordable_contract(
+        symbol,
+        spot,
+        option_type,
+        get_option_ltp,
+        OPTION_MAX_PREMIUM,
+        batch_ltp_getter=get_option_ltp_batch,
+    )
     if affordable.get("status") in ("NO CONTRACT", "NO AFFORDABLE OPTION"):
         return affordable
 

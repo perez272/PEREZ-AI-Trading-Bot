@@ -48,3 +48,55 @@ def get_option_quote(exchange, symbol, token):
     except Exception as e:
         print("FULL QUOTE ERROR:", e)
     return None
+
+
+def get_option_ltp_batch(exchange, contracts):
+    """Fetch multiple option LTPs with one paced FULL market-data request."""
+    if not contracts:
+        return {}
+
+    from src.market_scanner_v3 import get_client
+
+    tokens = []
+    symbols = {}
+
+    for contract in contracts:
+        symbol = contract.get("symbol") or contract.get("tradingsymbol")
+        token = str(contract.get("token", ""))
+
+        if symbol and token:
+            tokens.append(token)
+            symbols[token] = symbol
+
+    if not tokens:
+        return {}
+
+    try:
+        response = get_client().get_market_data(
+            "FULL",
+            {exchange: tokens},
+        )
+
+        data = response.get("data", {}) if isinstance(response, dict) else {}
+        fetched = data.get("fetched", []) if isinstance(data, dict) else []
+
+        result = {}
+
+        for quote in fetched:
+            token = str(quote.get("symbolToken", ""))
+            symbol = quote.get("tradingSymbol") or symbols.get(token)
+            ltp = quote.get("ltp")
+
+            if symbol and ltp is not None:
+                try:
+                    price = float(ltp)
+                    if price > 0:
+                        result[symbol] = price
+                except (TypeError, ValueError):
+                    pass
+
+        return result
+
+    except Exception as exc:
+        print(f"[OPTION BATCH] {type(exc).__name__}: {exc}")
+        return {}
