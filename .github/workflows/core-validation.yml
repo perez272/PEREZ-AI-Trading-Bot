@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   core:
-    name: Core bot tests and paper safety
+    name: Full core validation and paper safety
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -35,16 +35,32 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Compile core runtime
-        run: python -m py_compile main.py $(find src -name '*.py' -type f)
+      - name: Compile every Python module
+        run: python -m py_compile main.py $(find src tests -name '*.py' -type f)
 
-      - name: Run core tests
-        run: >-
-          python -m pytest -q
-          tests/test_core_smoke.py
-          tests/test_upgrades.py
-          tests/test_paper_exit.py
-          tests/test_multi_timeframe.py
+      - name: Validate every repository source import
+        run: |
+          python - <<'PY'
+          import importlib
+          from pathlib import Path
+
+          failures = []
+          for path in sorted(Path('src').rglob('*.py')):
+              if path.name.startswith('test_'):
+                  continue
+              module = '.'.join(path.with_suffix('').parts)
+              try:
+                  importlib.import_module(module)
+              except Exception as exc:
+                  failures.append(f'{module}: {type(exc).__name__}: {exc}')
+
+          if failures:
+              raise SystemExit('Broken repository imports:\n' + '\n'.join(failures))
+          print('ALL_SOURCE_IMPORTS=PASS')
+          PY
+
+      - name: Run full pytest suite
+        run: python -m pytest -q
 
       - name: Enforce paper-only safety
         shell: bash
@@ -69,36 +85,3 @@ jobs:
             exit 1
           fi
           echo 'TRACKED_SECRET_FILE_CHECK=PASS'
-
-  legacy-audit:
-    name: Legacy module audit (non-blocking)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install -r requirements.txt
-      - name: Report legacy import failures
-        run: |
-          python - <<'PY'
-          import importlib
-          modules = [
-              'src.candles', 'src.check_contract', 'src.elcid_live_nav',
-              'src.fundamental_research_engine', 'src.live_market',
-              'src.live_quote', 'src.live_scanner',
-              'src.market_scanner_backup', 'src.market_scanner_v2',
-              'src.refresh_hidden_value_source', 'src.scanner',
-              'src.web_research',
-          ]
-          failed = []
-          for name in modules:
-              try:
-                  importlib.import_module(name)
-              except Exception as exc:
-                  failed.append((name, type(exc).__name__, str(exc)))
-          print(f'LEGACY_IMPORT_FAILURES={len(failed)}')
-          for row in failed:
-              print(row)
-          PY
