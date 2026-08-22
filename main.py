@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
@@ -39,13 +39,9 @@ def _in_entry_window(now):
 def _next_weekday_0915(now):
     candidate = now.replace(hour=9, minute=15, second=0, microsecond=0)
     if now.time() >= MARKET_CLOSE or not _is_weekday(now):
-        candidate = candidate.replace(hour=9, minute=15)
-        days = 1
-        if _is_weekday(now) and now.time() < MARKET_CLOSE:
-            days = 0
-        candidate = candidate.fromordinal(candidate.toordinal() + days)
+        candidate += timedelta(days=1)
         while candidate.weekday() >= 5:
-            candidate = candidate.fromordinal(candidate.toordinal() + 1)
+            candidate += timedelta(days=1)
     return candidate
 
 
@@ -59,8 +55,6 @@ def wait_for_0915_ist():
         target = now.replace(hour=9, minute=15, second=0, microsecond=0)
         if _is_weekday(now) and now.time() < MARKET_OPEN:
             pass
-        elif _is_weekday(now) and now.time() >= MARKET_CLOSE:
-            target = _next_weekday_0915(now)
         else:
             target = _next_weekday_0915(now)
 
