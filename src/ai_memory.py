@@ -2,7 +2,8 @@
 
 Adaptive statistical memory only: it never edits strategy code and cannot
 bypass risk/execution gates. Rejected candidates are remembered too, so the
-system learns when *not* to trade.
+system learns when *not* to trade. Options surge observations are persisted
+for 5/10/15-minute event learning and expiry-aware pattern analysis.
 """
 import json
 import sqlite3
@@ -69,15 +70,55 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _rich_features(candidate, options_result):
+    """Capture all available evidence without fabricating unavailable fields."""
+    features = {}
+    keys = (
+        "close", "open", "high", "low", "volume", "volume_ratio", "trend",
+        "score", "breakout_score", "momentum_score", "mean_reversion_score",
+        "RSI", "rsi", "EMA20", "EMA50", "EMA200", "MACD", "VWAP", "ATR", "ADX",
+        "volatility_score", "vwap_score", "regime", "structure",
+    )
+    for source in (candidate or {}, options_result or {}):
+        for key in keys:
+            if key in source and source[key] is not None:
+                features[key] = source[key]
+    option_keys = (
+        "contract", "option_type", "expiry", "strike", "ltp", "volume",
+        "open_interest", "oi_volume_ratio", "buy_quantity", "sell_quantity",
+        "last_trade_qty", "avg_price", "net_change", "percent_change",
+        "best_bid", "best_ask", "spread_pct", "slippage_pct", "iv", "delta",
+        "gamma", "theta", "vega", "iv_available", "greeks_available",
+        "oi_change_available", "live_market_data", "live_data_error",
+    )
+    for key in option_keys:
+        if key in (options_result or {}) and options_result[key] is not None:
+            features[key] = options_result[key]
+    return features
+
+
 def remember_observation(candidate, options_result=None, regime="unknown"):
     options_result = options_result or {}
-    features = {
-        "trend": candidate.get("trend"),
-        "volume_ratio": candidate.get("volume_ratio"),
-        "close": candidate.get("close"),
-        "options_score": options_result.get("options_score", 0),
-        "expiry": options_result.get("expiry"),
-    }
+    features = _rich_features(candidate, options_result)
+    features["expiry"] = options_result.get("expiry", features.get("expiry"))
+    # The surge engine is deliberately observational only. It never creates
+    # orders and fails closed when live option data is unavailable.
+    surge_events = []
+    expiry_learning = None
+    try:
+        from src.options_surge_engine import observe_option
+        from src.expiry_learning_engine import learn_from_surge
+        surge_events = observe_option(candidate, options_result, regime=regime)
+        for event in surge_events:
+            learned = learn_from_surge(event)
+            event["expiry_learning"] = learned
+        if surge_events:
+            expiry_learning = surge_events[-1].get("expiry_learning")
+            options_result["surge_events"] = surge_events
+            options_result["expiry_learning"] = expiry_learning
+    except Exception as exc:
+        features["surge_engine_error"] = repr(exc)
+
     with _connect() as conn:
         conn.execute(
             "INSERT INTO observations VALUES (NULL,?,?,?,?,?,?)",
@@ -85,11 +126,17 @@ def remember_observation(candidate, options_result=None, regime="unknown"):
              float(candidate.get("score", 0)), float(options_result.get("options_score", 0)),
              regime, json.dumps(features, default=str)),
         )
+        if surge_events:
+            conn.execute(
+                "INSERT INTO lessons(ts,category,lesson,evidence_json) VALUES(?,?,?,?)",
+                (_now(), "OPTIONS_SURGE", "Detected option premium surge; retain event and expiry context for later outcome learning.",
+                 json.dumps(surge_events, default=str)),
+            )
 
 
 def remember_rejection(candidate, reason, options_result=None, regime="unknown"):
     options_result = options_result or {}
-    features = {"trend": candidate.get("trend"), "volume_ratio": candidate.get("volume_ratio"), "close": candidate.get("close")}
+    features = _rich_features(candidate, options_result)
     with _connect() as conn:
         conn.execute(
             "INSERT INTO rejections VALUES (NULL,?,?,?,?,?,?,?)",
@@ -105,7 +152,8 @@ def remember_outcome(trade, result, regime="unknown"):
     features = {
         "expiry": trade.get("expiry"), "strike": trade.get("strike"),
         "entry": trade.get("entry"), "quantity": trade.get("quantity"),
-        "investment": trade.get("investment"),
+        "investment": trade.get("investment"), "ensemble_score": trade.get("ensemble_score"),
+        "options_score": trade.get("options_score"), "ai_confidence": trade.get("ai_confidence"),
     }
     with _connect() as conn:
         conn.execute(
@@ -113,6 +161,12 @@ def remember_outcome(trade, result, regime="unknown"):
             (_now(), trade.get("symbol"), trade.get("signal"), trade.get("contract"),
              float(trade.get("score", 0)), regime, pnl, pnl_pct,
              result.get("exit_reason", "UNKNOWN"), json.dumps(features, default=str)),
+        )
+        conn.execute(
+            "INSERT INTO lessons(ts,category,lesson,evidence_json) VALUES(?,?,?,?)",
+            (_now(), "TRADE_OUTCOME",
+             "Completed paper trade outcome stored for adaptive confidence; no strategy code is auto-modified.",
+             json.dumps({"trade": trade, "result": result}, default=str)),
         )
 
 
@@ -166,4 +220,9 @@ def ai_suggestion(symbol=None, score=0, signal="", regime=None):
 def memory_status():
     summary = learning_summary()
     n = int(summary["overall"]["n"])
-    return f"Memory: {n} completed paper trades | persistent SQLite learning"
+    try:
+        from src.options_surge_engine import surge_summary
+        surge_count = len(surge_summary(500))
+    except Exception:
+        surge_count = 0
+    return f"Memory: {n} completed paper trades | {surge_count} recent option-surge events | persistent SQLite learning"
