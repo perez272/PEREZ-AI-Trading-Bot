@@ -2,7 +2,12 @@
 
 from datetime import time
 
-RESCAN_DELAY_SECONDS = 60
+# FAST SURGE MODE: keep paper-market observation responsive while preserving
+# the existing fail-closed trading gates. 30s is deliberately conservative
+# enough for Angel One API protection while materially faster than 60s.
+FAST_SURGE_MODE = True
+FAST_SURGE_SCAN_SECONDS = 30
+RESCAN_DELAY_SECONDS = FAST_SURGE_SCAN_SECONDS if FAST_SURGE_MODE else 60
 PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
