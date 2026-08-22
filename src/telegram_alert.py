@@ -30,6 +30,27 @@ def _learning_text(symbol, regime=None):
     return "🧠 Learned history: collecting first paper-trade outcomes"
 
 
+def _surge_text(symbol=None, contract=None):
+    try:
+        from src.options_surge_engine import surge_summary
+        from src.expiry_learning_engine import expiry_learning_summary
+        events = surge_summary(20)
+        if symbol:
+            events = [e for e in events if e.get("symbol") == symbol or (contract and e.get("contract") == contract)]
+        lines = []
+        for e in events[:4]:
+            lines.append(
+                f"⚡ +{e['change_pct']:.1f}% | {e['window_minutes']}m | {e['contract']} | "
+                f"₹{e['start_ltp']:.2f}→₹{e['end_ltp']:.2f} | {e.get('expiry_bucket','UNKNOWN')}"
+            )
+        profile = expiry_learning_summary()
+        if lines:
+            return "\n⚡ OPTIONS SURGE LEARNING\n" + "\n".join(lines) + "\n" + f"Expiry profiles: {profile or 'collecting'}\n"
+        return "\n⚡ OPTIONS SURGE LEARNING\nNo +5/+10/+15% surge event recorded for this contract yet.\n"
+    except Exception as exc:
+        return f"\n⚠️ Surge-learning status unavailable: {exc}\n"
+
+
 def _analysis_text(trade):
     symbol = trade.get("symbol", "UNKNOWN")
     regime = trade.get("regime") or "unknown"
@@ -41,7 +62,8 @@ def _analysis_text(trade):
         f"Learned confidence: {confidence:.0f}%\n"
         f"Market regime: {regime}\n"
         f"💡 Suggestion: {ai_suggestion(symbol, trade.get('score', 0), trade.get('signal', ''), regime)}\n"
-        f"{_learning_text(symbol, regime)}\n"
+        + _surge_text(symbol, trade.get("contract"))
+        + _learning_text(symbol, regime) + "\n"
     )
 
 
@@ -56,6 +78,26 @@ def send_entry_alert(trade):
         f"🎯 Target: Rs {trade.get('target', 0):.2f}\n"
         + _analysis_text(trade)
         + "\n🔒 PAPER ONLY — no real order placed"
+    )
+
+
+def send_options_surge_alert(event, learning=None):
+    """Human-readable surge alert. A surge is an event, never a BUY command."""
+    event = event or {}
+    learning = learning or {}
+    suggestion = learning.get("suggestion", "Do not chase the move; wait for confirmation.")
+    return send_alert(
+        "⚡ PEREZ AI — OPTIONS SURGE DETECTED\n\n"
+        f"📌 {event.get('symbol', 'UNKNOWN')} {event.get('option_type', '')}\n"
+        f"🎯 {event.get('contract', 'N/A')}\n"
+        f"⏱ Window: {event.get('window_minutes', 0)} min\n"
+        f"📈 Move: +{float(event.get('change_pct', 0)):.2f}%\n"
+        f"💰 Premium: Rs {float(event.get('start_ltp', 0)):.2f} → Rs {float(event.get('end_ltp', 0)):.2f}\n"
+        f"📅 Expiry profile: {event.get('expiry_bucket', 'UNKNOWN')}\n"
+        f"🧠 Samples: {learning.get('same_window_samples', 0)} same-window events\n"
+        f"💡 AI suggestion: {suggestion}\n"
+        "🔎 Event only — NOT an automatic trade signal.\n"
+        "🔒 PAPER ONLY — no real order placed"
     )
 
 
@@ -81,6 +123,7 @@ def send_exit_alert(trade, result):
         f"📝 Reason: {result.get('exit_reason', 'UNKNOWN')}\n\n"
         f"🧠 Learning: {n} completed trades | {win_rate:.0f}% win rate\n"
         f"💡 Suggestion: {ai_suggestion(symbol, trade.get('score', 0), trade.get('signal', ''), regime)}\n"
-        f"{memory_status()}\n\n"
+        + _surge_text(symbol, trade.get("contract"))
+        + f"{memory_status()}\n\n"
         "🔒 PAPER ONLY — no real order placed"
     )
