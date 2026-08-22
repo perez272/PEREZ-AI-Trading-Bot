@@ -9,6 +9,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
 ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python /home/ubuntu/PEREZ-AI-Trading-Bot/main.py
 Environment=PYTHONUNBUFFERED=1
+Environment=PAPER_MODE=true
+Environment=PAPER_CAPITAL=50000
 Environment=ORDERS_ENABLED=false
 Restart=on-failure
 RestartSec=10

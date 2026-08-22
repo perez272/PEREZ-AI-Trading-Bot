@@ -1,0 +1,42 @@
+name: PEREZ AI CI
+
+on:
+  push:
+    branches: [main, 'iq-200-*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile all Python sources
+        run: python -m py_compile main.py $(find src tests -name '*.py' -type f)
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Paper-trading safety gate
+        run: |
+          set -euo pipefail
+          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
+            echo 'ERROR: live-order API usage detected'
+            exit 1
+          fi
+          grep -RniE 'PAPER_MODE|ORDERS_ENABLED' main.py src deploy/systemd/perez-ai.service | head -30

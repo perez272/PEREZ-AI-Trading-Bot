@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
@@ -18,22 +18,70 @@ from src.upgrade_config import (
     MAX_TRADES_PER_DAY,
     OPTIONS_MIN_SCORE,
     OPTION_MAX_PREMIUM,
+    ENTRY_START,
+    LAST_ENTRY,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = dt_time(9, 15)
+MARKET_CLOSE = dt_time(15, 30)
 PAPER_MODE = os.getenv("PAPER_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _is_weekday(now):
+    return now.weekday() < 5
+
+
+def _in_entry_window(now):
+    return _is_weekday(now) and ENTRY_START <= now.time() <= LAST_ENTRY
+
+
+def _next_weekday_0915(now):
+    candidate = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now.time() >= MARKET_CLOSE or not _is_weekday(now):
+        candidate += timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+    return candidate
+
+
 def wait_for_0915_ist():
-    start = dt_time(9, 15)
     while True:
         now = datetime.now(IST)
-        if now.time() >= start:
+        if _is_weekday(now) and MARKET_OPEN <= now.time() < MARKET_CLOSE:
             print("09:15 IST reached — starting market-data initialization and live-data scan.")
             return
+
         target = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        if _is_weekday(now) and now.time() < MARKET_OPEN:
+            pass
+        else:
+            target = _next_weekday_0915(now)
+
         seconds = max(1, int((target - now).total_seconds()))
-        print(f"WAITING FOR 09:15 IST — {seconds}s remaining")
+        print(f"WAITING FOR NEXT MARKET SESSION — {seconds}s remaining")
+        time.sleep(min(seconds, 60))
+
+
+def wait_for_entry_window():
+    while True:
+        now = datetime.now(IST)
+        if _in_entry_window(now):
+            return
+
+        if _is_weekday(now) and now.time() < ENTRY_START:
+            target = now.replace(
+                hour=ENTRY_START.hour,
+                minute=ENTRY_START.minute,
+                second=0,
+                microsecond=0,
+            )
+        else:
+            target = _next_weekday_0915(now)
+
+        seconds = max(1, int((target - now).total_seconds()))
+        write_heartbeat("waiting_entry_window", next_entry=target.isoformat())
+        print(f"WAITING FOR ENTRY WINDOW — {seconds}s remaining")
         time.sleep(min(seconds, 60))
 
 
@@ -50,10 +98,14 @@ def main():
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
         print("Full available capital: used for whole affordable lots when a trade passes all gates")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
+        print(f"Entry window: {ENTRY_START.strftime('%H:%M')}-{LAST_ENTRY.strftime('%H:%M')} IST, weekdays only")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("=" * 72)
 
         while True:
+            # Never scan or create trades from stale Friday/after-hours data.
+            wait_for_entry_window()
+
             write_heartbeat("capital_check")
             try:
                 capital = get_available_capital(get_client(), paper_mode=PAPER_MODE)
