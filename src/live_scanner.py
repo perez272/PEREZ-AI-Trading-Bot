@@ -1,8 +1,8 @@
 """Optional read-only Angel One live quote scanner.
 
-Importing this module does not log in, call the broker, print output, or start
-a loop. Call ``scan_once()`` explicitly for one pass or ``run_forever()`` for
-the legacy five-second polling behavior.
+Importing this module does not load the broker SDK, log in, call the broker,
+print output, or start a loop. Call ``scan_once()`` explicitly for one pass or
+``run_forever()`` for the legacy five-second polling behavior.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from functools import lru_cache
 
 import pyotp
 from dotenv import load_dotenv
-from SmartApi import SmartConnect
 
 from src.watchlist import WATCHLIST
 
@@ -21,6 +20,8 @@ load_dotenv()
 
 @lru_cache(maxsize=1)
 def _get_client():
+    from SmartApi import SmartConnect
+
     api_key = os.getenv("ANGEL_API_KEY")
     client_id = os.getenv("ANGEL_CLIENT_ID")
     password = os.getenv("ANGEL_PASSWORD")
