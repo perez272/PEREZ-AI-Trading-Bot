@@ -1,8 +1,8 @@
 """Persistent, auditable learning memory for PEREZ AI.
 
-This is an adaptive statistical memory, not an autonomous code/strategy editor.
-It records observations and outcomes in SQLite so knowledge survives restarts.
-Safety/risk gates remain outside this module and cannot be bypassed by learning.
+Adaptive statistical memory only: it never edits strategy code and cannot
+bypass risk/execution gates. Rejected candidates are remembered too, so the
+system learns when *not* to trade.
 """
 import json
 import sqlite3
@@ -42,6 +42,17 @@ def _connect():
             exit_reason TEXT,
             features_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            symbol TEXT,
+            signal TEXT,
+            score REAL,
+            options_score REAL,
+            regime TEXT,
+            reason TEXT NOT NULL,
+            features_json TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,
@@ -54,6 +65,10 @@ def _connect():
     return conn
 
 
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def remember_observation(candidate, options_result=None, regime="unknown"):
     options_result = options_result or {}
     features = {
@@ -61,14 +76,26 @@ def remember_observation(candidate, options_result=None, regime="unknown"):
         "volume_ratio": candidate.get("volume_ratio"),
         "close": candidate.get("close"),
         "options_score": options_result.get("options_score", 0),
+        "expiry": options_result.get("expiry"),
     }
     with _connect() as conn:
         conn.execute(
             "INSERT INTO observations VALUES (NULL,?,?,?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(), candidate.get("symbol"),
-             candidate.get("signal"), float(candidate.get("score", 0)),
-             float(options_result.get("options_score", 0)), regime,
-             json.dumps(features, default=str)),
+            (_now(), candidate.get("symbol"), candidate.get("signal"),
+             float(candidate.get("score", 0)), float(options_result.get("options_score", 0)),
+             regime, json.dumps(features, default=str)),
+        )
+
+
+def remember_rejection(candidate, reason, options_result=None, regime="unknown"):
+    options_result = options_result or {}
+    features = {"trend": candidate.get("trend"), "volume_ratio": candidate.get("volume_ratio"), "close": candidate.get("close")}
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO rejections VALUES (NULL,?,?,?,?,?,?,?)",
+            (_now(), candidate.get("symbol"), candidate.get("signal"),
+             float(candidate.get("score", 0)), float(options_result.get("options_score", 0)),
+             regime, str(reason), json.dumps(features, default=str)),
         )
 
 
@@ -76,17 +103,14 @@ def remember_outcome(trade, result, regime="unknown"):
     pnl = float(result.get("pnl", 0))
     pnl_pct = float(result.get("pnl_percent", 0))
     features = {
-        "expiry": trade.get("expiry"),
-        "strike": trade.get("strike"),
-        "entry": trade.get("entry"),
-        "quantity": trade.get("quantity"),
+        "expiry": trade.get("expiry"), "strike": trade.get("strike"),
+        "entry": trade.get("entry"), "quantity": trade.get("quantity"),
         "investment": trade.get("investment"),
     }
     with _connect() as conn:
         conn.execute(
             "INSERT INTO outcomes VALUES (NULL,?,?,?,?,?,?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(), trade.get("symbol"),
-             trade.get("signal"), trade.get("contract"),
+            (_now(), trade.get("symbol"), trade.get("signal"), trade.get("contract"),
              float(trade.get("score", 0)), regime, pnl, pnl_pct,
              result.get("exit_reason", "UNKNOWN"), json.dumps(features, default=str)),
         )
@@ -95,41 +119,51 @@ def remember_outcome(trade, result, regime="unknown"):
 def _stats(conn, where="", params=()):
     row = conn.execute(
         f"SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END),0) wins, "
-        f"COALESCE(SUM(pnl),0) pnl, COALESCE(AVG(pnl_percent),0) avg_pct FROM outcomes {where}",
-        params,
+        f"COALESCE(SUM(pnl),0) pnl, COALESCE(AVG(pnl_percent),0) avg_pct FROM outcomes {where}", params
     ).fetchone()
     return dict(row)
 
 
-def learning_summary(symbol=None):
+def learning_summary(symbol=None, regime=None):
     with _connect() as conn:
+        clauses, params = [], []
+        if symbol:
+            clauses.append("symbol = ?"); params.append(symbol)
+        if regime:
+            clauses.append("regime = ?"); params.append(regime)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        scoped = _stats(conn, where, tuple(params))
         overall = _stats(conn)
-        scoped = _stats(conn, "WHERE symbol = ?", (symbol,)) if symbol else None
-        recent = conn.execute(
-            "SELECT symbol, signal, pnl, pnl_percent, exit_reason, ts FROM outcomes ORDER BY id DESC LIMIT 8"
-        ).fetchall()
-    return {
-        "overall": overall,
-        "symbol": scoped,
-        "recent": [dict(r) for r in recent],
-    }
+        recent = conn.execute("SELECT symbol, signal, pnl, pnl_percent, exit_reason, regime, ts FROM outcomes ORDER BY id DESC LIMIT 8").fetchall()
+    return {"overall": overall, "scope": scoped, "recent": [dict(r) for r in recent]}
 
 
-def ai_suggestion(symbol=None, score=0, signal=""):
-    summary = learning_summary(symbol)
-    s = summary["symbol"] or summary["overall"]
+def learned_confidence(symbol=None, regime=None):
+    stats = learning_summary(symbol, regime)["scope"]
+    n = int(stats["n"])
+    if n == 0:
+        return 50.0
+    win_rate = stats["wins"] / n * 100
+    edge_bonus = max(-20.0, min(20.0, float(stats["avg_pct"]) * 4.0))
+    sample_weight = min(1.0, n / 30.0)
+    return round(50.0 + ((win_rate - 50.0) * sample_weight) + edge_bonus * sample_weight, 2)
+
+
+def ai_suggestion(symbol=None, score=0, signal="", regime=None):
+    summary = learning_summary(symbol, regime)
+    s = summary["scope"]
     n = int(s["n"])
     if n < 5:
-        return "Learning: collecting evidence (need 5+ completed paper trades before adapting confidence)."
+        return "Collecting evidence — keep confidence neutral until at least 5 completed paper trades exist."
     win_rate = s["wins"] / n * 100
     if win_rate < 40:
-        return f"AI suggestion: {symbol or 'this setup'} has weak recent evidence ({win_rate:.0f}% wins). Prefer waiting for stronger confirmation."
+        return f"Weak learned evidence ({win_rate:.0f}% wins). Prefer waiting for stronger confirmation."
     if win_rate >= 60 and float(s["avg_pct"]) > 0:
-        return f"AI suggestion: {symbol or 'this setup'} has positive learned evidence ({win_rate:.0f}% wins). Keep risk gates strict and favor confirmed signals."
-    return f"AI suggestion: evidence is mixed ({win_rate:.0f}% wins). Do not increase risk; wait for confirmation."
+        return f"Positive learned evidence ({win_rate:.0f}% wins). Favor confirmed setups; keep risk gates strict."
+    return f"Mixed evidence ({win_rate:.0f}% wins). Do not increase risk; wait for confirmation."
 
 
 def memory_status():
     summary = learning_summary()
     n = int(summary["overall"]["n"])
-    return f"Memory: {n} completed paper trades stored | persistent SQLite learning"
+    return f"Memory: {n} completed paper trades | persistent SQLite learning"
