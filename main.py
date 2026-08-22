@@ -160,7 +160,14 @@ def main():
 
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
             try:
-                trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
+                # Reuse the exact contract that passed the affordability + options gate.
+                trade = create_trade(
+                    candidate["symbol"],
+                    candidate["close"],
+                    candidate["signal"],
+                    capital,
+                    resolved=contract_probe,
+                )
             except Exception as exc:
                 print(f"TRADE CREATION FAILED — no trade opened: {exc}")
                 time.sleep(RESCAN_DELAY_SECONDS)
