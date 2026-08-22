@@ -43,7 +43,12 @@ def create_trade(symbol, spot, signal, capital):
 
     lot_size = resolved["lotsize"]
     ltp = resolved["ltp"]
-    lots = int(float(capital) // (ltp * lot_size))
+
+    # Keep a 10% capital reserve for slippage, fees, and future risk-managed
+    # actions. Never size a paper position against 100% of available capital.
+    MAX_CAPITAL_UTILIZATION = 0.90
+    deployable_capital = float(capital) * MAX_CAPITAL_UTILIZATION
+    lots = int(deployable_capital // (ltp * lot_size))
     if lots < 1:
         return {"status": "LOW CAPITAL", "reason": f"One lot needs Rs {ltp * lot_size:.2f}"}
 
