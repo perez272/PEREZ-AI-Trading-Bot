@@ -1,6 +1,6 @@
 """Deterministic trade decision gate.
 
-The gate intentionally prefers ``NO TRADE`` when evidence conflicts.  It does
+The gate intentionally prefers ``NO TRADE`` when evidence conflicts. It does
 not place orders; it only converts validated market evidence into a decision.
 """
 
@@ -25,11 +25,7 @@ def get_trade_decision(
     previous_low=None,
     volume_ratio=None,
 ):
-    """Return ``(decision, reason)`` using trend, momentum and risk gates.
-
-    Legacy arguments remain accepted.  Breakout and volatility evidence is now
-    used when supplied, while insufficient evidence results in ``NO TRADE``.
-    """
+    """Return ``(decision, reason)`` using trend, momentum and risk gates."""
     try:
         score = float(score)
         rsi = float(rsi)
@@ -42,8 +38,6 @@ def get_trade_decision(
     if not all(_finite_positive(v) for v in (close, ema20, ema50)):
         return "NO TRADE", "INVALID PRICE DATA"
 
-    # Avoid chasing extremely stretched RSI readings unless a breakout has
-    # meaningful volume confirmation.
     volume_ok = False
     if volume_ratio is not None:
         try:
@@ -62,8 +56,18 @@ def get_trade_decision(
         except (TypeError, ValueError):
             return "NO TRADE", "INVALID EMA200"
 
-    breakout_up = previous_high is not None and close > float(previous_high)
-    breakout_down = previous_low is not None and close < float(previous_low)
+    breakout_up = False
+    breakout_down = False
+    if previous_high is not None:
+        try:
+            breakout_up = close > float(previous_high)
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID PREVIOUS HIGH"
+    if previous_low is not None:
+        try:
+            breakout_down = close < float(previous_low)
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID PREVIOUS LOW"
 
     if atr is not None:
         try:
@@ -73,7 +77,13 @@ def get_trade_decision(
         except (TypeError, ValueError):
             return "NO TRADE", "INVALID ATR"
 
-    # Strong setup: aligned trend + momentum + sufficient score.
+    # Hard risk gate: an RSI above 72 (or below 28) is overextended and must
+    # have a volume-confirmed breakout before any directional entry is allowed.
+    if bullish and rsi > 72 and not (breakout_up and volume_ok):
+        return "NO TRADE", "BULLISH BUT OVEREXTENDED"
+    if bearish and rsi < 28 and not (breakout_down and volume_ok):
+        return "NO TRADE", "BEARISH BUT OVEREXTENDED"
+
     if bullish and score >= 72 and 52 <= rsi <= 72:
         if rsi > 68 and not (breakout_up and volume_ok):
             return "NO TRADE", "BULLISH BUT OVEREXTENDED"
@@ -88,7 +98,6 @@ def get_trade_decision(
             return "NO TRADE", "BREAKDOWN WITHOUT VOLUME"
         return "BUY PE", "HIGH-CONVICTION BEARISH"
 
-    # Moderate setups require stronger directional confirmation.
     if bullish and score >= 62 and rsi >= 55:
         return "BUY CE", "CONFIRMED BULLISH"
     if bearish and score >= 62 and rsi <= 45:
