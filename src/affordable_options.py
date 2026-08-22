@@ -48,7 +48,7 @@ def find_affordable_contract(
     max_premium: float = OPTION_MAX_PREMIUM,
     batch_ltp_getter=None,
 ):
-    """Find a liquid-ish, affordable contract without assuming the ATM option is best."""
+    """Find an affordable live-priced option while minimizing market-data calls."""
     rows = _candidates(symbol, spot, option_type)
     if not rows:
         return {"status": "NO CONTRACT", "reason": "No valid NFO contracts"}
@@ -61,7 +61,6 @@ def find_affordable_contract(
     rows = rows[:24]
 
     affordable = []
-
     quotes = {}
     if batch_ltp_getter is not None:
         try:
@@ -71,9 +70,13 @@ def find_affordable_contract(
 
     for row in rows:
         try:
-            if batch_ltp_getter is not None:
-                ltp = float(quotes.get(row["symbol"]))
+            if batch_ltp_getter is not None and row["symbol"] in quotes:
+                ltp = float(quotes[row["symbol"]])
             else:
+                # Batch responses can legitimately omit a contract (unfetched,
+                # stale instrument, or temporary API issue). Fall back to the
+                # paced single-contract getter rather than failing the entire
+                # affordability scan.
                 ltp = float(
                     ltp_getter(
                         row["exchange"],
@@ -85,8 +88,6 @@ def find_affordable_contract(
             continue
         if ltp <= 0 or ltp > max_premium:
             continue
-        # Prefer lower premium but keep a strong preference for strikes close
-        # enough to the underlying to retain meaningful delta.
         distance_ratio = row["difference"] / max(float(spot), 1.0)
         score = (max_premium - ltp) / max_premium * 55.0 + max(0.0, 1.0 - distance_ratio * 12.0) * 45.0
         affordable.append({**row, "ltp": ltp, "affordability_score": round(score, 2)})
