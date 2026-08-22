@@ -32,24 +32,33 @@ def resolve_option_contract(symbol, spot, signal):
     }
 
 
-def create_trade(symbol, spot, signal, capital):
-    """Create a PAPER trade using as much of the current available capital as whole lots allow."""
+def create_trade(symbol, spot, signal, capital, resolved=None):
+    """Create a PAPER trade from one validated option contract.
+
+    If ``resolved`` is supplied, it is reused so the execution path cannot
+    silently select a different contract after the gate has approved one.
+    """
     if capital is None or float(capital) <= 0:
         return {"status": "NO CAPITAL", "reason": "No valid live available capital"}
 
-    resolved = resolve_option_contract(symbol, spot, signal)
+    if resolved is None:
+        resolved = resolve_option_contract(symbol, spot, signal)
+
     if resolved.get("status") != "CONTRACT VALID":
         return resolved
 
-    lot_size = resolved["lotsize"]
-    ltp = resolved["ltp"]
+    lot_size = int(resolved["lotsize"])
+    ltp = float(resolved["ltp"])
+    if lot_size <= 0 or ltp <= 0:
+        return {"status": "INVALID CONTRACT", "reason": "Contract has invalid lot size or LTP"}
+
     lots = int(float(capital) // (ltp * lot_size))
     if lots < 1:
         return {"status": "LOW CAPITAL", "reason": f"One lot needs Rs {ltp * lot_size:.2f}"}
 
     quantity = lots * lot_size
     investment = round(quantity * ltp, 2)
-    entry = float(ltp)
+    entry = ltp
     stop_loss = round(entry * (1 - STOP_LOSS_PCT), 2)
     target1 = round(entry * (1 + TARGET1_PCT), 2)
     target2 = round(entry * (1 + TARGET2_PCT), 2)
