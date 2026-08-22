@@ -1,3 +1,18 @@
+"""Deterministic trade decision gate.
+
+The gate intentionally prefers ``NO TRADE`` when evidence conflicts. It does
+not place orders; it only converts validated market evidence into a decision.
+"""
+
+
+def _finite_positive(value):
+    try:
+        value = float(value)
+        return value > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def get_trade_decision(
     score,
     rsi,
@@ -10,21 +25,82 @@ def get_trade_decision(
     previous_low=None,
     volume_ratio=None,
 ):
-    """Return a CE/PE decision while supporting legacy scanner arguments."""
-    del ema200, atr, previous_high, previous_low, volume_ratio
+    """Return ``(decision, reason)`` using trend, momentum and risk gates."""
+    try:
+        score = float(score)
+        rsi = float(rsi)
+        ema20 = float(ema20)
+        ema50 = float(ema50)
+        close = float(close)
+    except (TypeError, ValueError):
+        return "NO TRADE", "INVALID INPUT"
 
-    if close > ema20 > ema50:
-        if score >= 60 and rsi >= 55:
-            return "BUY CE", "STRONG BULLISH"
+    if not all(_finite_positive(v) for v in (close, ema20, ema50)):
+        return "NO TRADE", "INVALID PRICE DATA"
 
-    if close > ema20 and score >= 50:
-        return "BUY CE", "BULLISH"
+    volume_ok = False
+    if volume_ratio is not None:
+        try:
+            volume_ok = float(volume_ratio) >= 1.25
+        except (TypeError, ValueError):
+            volume_ok = False
 
-    if close < ema20 < ema50:
-        if rsi <= 45:
-            return "BUY PE", "STRONG BEARISH"
+    bullish = close > ema20 > ema50
+    bearish = close < ema20 < ema50
 
-    if close < ema20:
-        return "BUY PE", "BEARISH"
+    if ema200 is not None:
+        try:
+            ema200 = float(ema200)
+            bullish = bullish and ema20 > ema200
+            bearish = bearish and ema20 < ema200
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID EMA200"
 
-    return "NO TRADE", "WAIT"
+    breakout_up = False
+    breakout_down = False
+    if previous_high is not None:
+        try:
+            breakout_up = close > float(previous_high)
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID PREVIOUS HIGH"
+    if previous_low is not None:
+        try:
+            breakout_down = close < float(previous_low)
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID PREVIOUS LOW"
+
+    if atr is not None:
+        try:
+            atr = float(atr)
+            if atr <= 0 or atr > close * 0.12:
+                return "NO TRADE", "ABNORMAL VOLATILITY"
+        except (TypeError, ValueError):
+            return "NO TRADE", "INVALID ATR"
+
+    # Hard risk gate: an RSI above 72 (or below 28) is overextended and must
+    # have a volume-confirmed breakout before any directional entry is allowed.
+    if bullish and rsi > 72 and not (breakout_up and volume_ok):
+        return "NO TRADE", "BULLISH BUT OVEREXTENDED"
+    if bearish and rsi < 28 and not (breakout_down and volume_ok):
+        return "NO TRADE", "BEARISH BUT OVEREXTENDED"
+
+    if bullish and score >= 72 and 52 <= rsi <= 72:
+        if rsi > 68 and not (breakout_up and volume_ok):
+            return "NO TRADE", "BULLISH BUT OVEREXTENDED"
+        if breakout_up and volume_ratio is not None and not volume_ok:
+            return "NO TRADE", "BREAKOUT WITHOUT VOLUME"
+        return "BUY CE", "HIGH-CONVICTION BULLISH"
+
+    if bearish and score >= 72 and 28 <= rsi <= 48:
+        if rsi < 32 and not (breakout_down and volume_ok):
+            return "NO TRADE", "BEARISH BUT OVEREXTENDED"
+        if breakout_down and volume_ratio is not None and not volume_ok:
+            return "NO TRADE", "BREAKDOWN WITHOUT VOLUME"
+        return "BUY PE", "HIGH-CONVICTION BEARISH"
+
+    if bullish and score >= 62 and rsi >= 55:
+        return "BUY CE", "CONFIRMED BULLISH"
+    if bearish and score >= 62 and rsi <= 45:
+        return "BUY PE", "CONFIRMED BEARISH"
+
+    return "NO TRADE", "INSUFFICIENT CONFLUENCE"

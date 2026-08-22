@@ -1,0 +1,87 @@
+name: PEREZ AI Core Validation
+
+on:
+  push:
+    branches:
+      - devops/iq200-hardening
+  workflow_dispatch:
+
+concurrency:
+  group: perez-ai-core-validation
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Full core validation and paper safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PAPER_MODE: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile every Python module
+        run: python -m py_compile main.py $(find src tests -name '*.py' -type f)
+
+      - name: Validate every repository source import
+        run: |
+          python - <<'PY'
+          import importlib
+          from pathlib import Path
+
+          failures = []
+          for path in sorted(Path('src').rglob('*.py')):
+              if path.name.startswith('test_'):
+                  continue
+              module = '.'.join(path.with_suffix('').parts)
+              try:
+                  importlib.import_module(module)
+              except Exception as exc:
+                  failures.append(f'{module}: {type(exc).__name__}: {exc}')
+
+          if failures:
+              raise SystemExit('Broken repository imports:\n' + '\n'.join(failures))
+          print('ALL_SOURCE_IMPORTS=PASS')
+          PY
+
+      - name: Run full pytest suite
+        run: python -m pytest -q
+
+      - name: Enforce paper-only safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' main.py src --include='*.py'; then
+            echo 'ERROR: live-order API primitive detected'
+            exit 1
+          fi
+          python - <<'PY'
+          import main
+          assert main.PAPER_MODE is True
+          print('PAPER_MODE_DEFAULT_SAFE=true')
+          PY
+
+      - name: Check tracked secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(\.env|.*\.pem|.*\.key)$'; then
+            echo 'ERROR: credential/private-key file is tracked'
+            exit 1
+          fi
+          echo 'TRACKED_SECRET_FILE_CHECK=PASS'

@@ -1,10 +1,15 @@
 import time
 import pyotp
-from SmartApi import SmartConnect
 
 
 class SessionManager:
-    """Owns Angel One authentication and safe session renewal."""
+    """Owns Angel One authentication and safe session renewal.
+
+    Importing this module is deliberately side-effect free. SmartAPI is loaded
+    only when a broker session is explicitly requested, so repository smoke
+    tests and offline tooling can import the trading stack without touching the
+    broker SDK/network.
+    """
 
     def __init__(self, api_key, client_id, password, totp_secret):
         self.api_key = api_key
@@ -15,6 +20,8 @@ class SessionManager:
         self.login_time = 0
 
     def login(self):
+        from SmartApi import SmartConnect
+
         self.obj = SmartConnect(api_key=self.api_key)
         session = self.obj.generateSession(
             self.client_id,
