@@ -12,7 +12,9 @@ from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover
-from src.ai_memory import remember_observation, remember_outcome
+from src.ai_memory import remember_observation, remember_outcome, remember_rejection, learned_confidence
+from src.regime_engine import regime_summary
+from src.ensemble_engine import ensemble_score, decision_band
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
     MINIMUM_SCORE,
@@ -44,7 +46,7 @@ def main():
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
+        print("PEREZ AI PAPER-TRADING BOT — ADAPTIVE AI / REGIME / OPTIONS")
         print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
         print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
         print(f"Capital source: {'PAPER_CAPITAL virtual balance' if PAPER_MODE else 'Angel One RMS available cash'}")
@@ -53,6 +55,8 @@ def main():
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("Persistent AI learning memory: ENABLED")
+        print("Regime engine: ENABLED | Ensemble engine: ENABLED | Rejection learning: ENABLED")
+        print("Live-order authority: DISABLED")
         print("=" * 72)
 
         while True:
@@ -102,17 +106,42 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
-            print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
+            regime = regime_summary(candidate)
+            learned = learned_confidence(candidate.get("symbol"), regime["regime"])
+            preliminary, _ = ensemble_score(candidate, options_score=0, learned_confidence=learned, regime_bonus=70 if regime["structure"] == "TRENDING" else 50)
+            band = decision_band(preliminary)
+            candidate["regime"] = regime["regime"]
+            candidate["ensemble_score"] = preliminary
+            print(f"AI ENSEMBLE: {preliminary:.0f}/100 | {band} | Regime={regime['regime']} | Learned confidence={learned:.0f}%")
+
+            if preliminary < MINIMUM_SCORE:
+                try:
+                    remember_rejection(candidate, f"ENSEMBLE_BELOW_{MINIMUM_SCORE}", regime=regime["regime"])
+                except Exception as exc:
+                    print(f"AI MEMORY WARNING — rejection not stored: {exc}")
+                print(f"AI ensemble rejected candidate below {MINIMUM_SCORE}/100.")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
+            print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Market {candidate['score']}/100 | Ensemble {preliminary:.0f}/100")
             option_type = "CE" if candidate["signal"] == "BUY CE" else "PE"
             try:
                 contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
             except Exception as exc:
                 print(f"OPTION CONTRACT LOOKUP FAILED — skipping candidate: {exc}")
+                try:
+                    remember_rejection(candidate, "OPTION_CONTRACT_LOOKUP_FAILED", regime=regime["regime"])
+                except Exception:
+                    pass
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
             if contract_probe.get("status") != "CONTRACT VALID":
                 print("Affordable options scanner rejected underlying:", contract_probe)
+                try:
+                    remember_rejection(candidate, "INVALID_OR_UNAFFORDABLE_CONTRACT", regime=regime["regime"])
+                except Exception:
+                    pass
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
@@ -131,6 +160,8 @@ def main():
                 "token": contract_probe.get("token", ""),
                 "trend_score": candidate.get("score", 0),
                 "momentum_score": candidate.get("score", 0),
+                "breakout_score": candidate.get("breakout_score", candidate.get("score", 0)),
+                "mean_reversion_score": candidate.get("mean_reversion_score", 50),
                 "volume_score": candidate.get("volume_ratio", 0),
                 "vwap_score": candidate.get("score", 0),
                 "index_confirmation": 8 if candidate.get("trend") else 0,
@@ -150,18 +181,46 @@ def main():
                 options_result = evaluate_option_candidate(gate_candidate)
             except Exception as exc:
                 print(f"OPTIONS GATE FAILED — skipping candidate: {exc}")
+                try:
+                    remember_rejection(candidate, "OPTIONS_GATE_EXCEPTION", regime=regime["regime"])
+                except Exception:
+                    pass
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
             try:
-                remember_observation(candidate, options_result)
+                remember_observation(candidate, options_result, regime=regime["regime"])
             except Exception as exc:
                 print(f"AI MEMORY WARNING — observation not stored: {exc}")
 
             gate = options_result.get("options_gate", {})
-            print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')}")
+            options_score = float(options_result.get("options_score", 0) or 0)
+            final_score, _ = ensemble_score(
+                candidate,
+                options_score=options_score,
+                learned_confidence=learned,
+                regime_bonus=70 if regime["structure"] == "TRENDING" else 50,
+            )
+            candidate["ensemble_score"] = final_score
+            print(f"OPTIONS GATE: {options_score:.0f}/100 | {gate.get('decision', 'NO TRADE')}")
+            print(f"FINAL ENSEMBLE: {final_score:.0f}/100 | {decision_band(final_score)}")
+
             if not options_result.get("paper_trade_candidate"):
-                print("Options gate rejected candidate:", gate.get("reasons", []))
+                reasons = gate.get("reasons", [])
+                print("Options gate rejected candidate:", reasons)
+                try:
+                    remember_rejection(candidate, "OPTIONS_GATE: " + ",".join(map(str, reasons)), options_result, regime["regime"])
+                except Exception as exc:
+                    print(f"AI MEMORY WARNING — rejection not stored: {exc}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
+            if final_score < MINIMUM_SCORE:
+                print(f"Final ensemble rejected candidate below {MINIMUM_SCORE}/100.")
+                try:
+                    remember_rejection(candidate, f"FINAL_ENSEMBLE_BELOW_{MINIMUM_SCORE}", options_result, regime["regime"])
+                except Exception:
+                    pass
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
@@ -181,12 +240,20 @@ def main():
 
             if trade.get("status") != "PAPER TRADE ACTIVE":
                 print("Trade was not created:", trade)
+                try:
+                    remember_rejection(candidate, "TRADE_CREATION_REJECTED", options_result, regime["regime"])
+                except Exception:
+                    pass
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
             trade["score"] = candidate.get("score", 0)
+            trade["ensemble_score"] = final_score
             trade["options_score"] = options_result.get("options_score", 0)
+            trade["ai_confidence"] = learned
+            trade["regime"] = regime["regime"]
             trade["ai_memory_enabled"] = True
+            trade["live_orders"] = False
             print(
                 f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | "
                 f"investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%"
@@ -210,7 +277,7 @@ def main():
 
             if isinstance(result, dict) and result.get("closed"):
                 try:
-                    remember_outcome(trade, result)
+                    remember_outcome(trade, result, regime=trade.get("regime", "unknown"))
                     print("AI MEMORY: paper-trade outcome stored for future learning.")
                 except Exception as exc:
                     print(f"AI MEMORY WARNING — outcome not stored: {exc}")
