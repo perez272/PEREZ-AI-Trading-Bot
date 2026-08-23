@@ -70,6 +70,8 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
     ltp = float(resolved["ltp"])
     if lot_size < 1 or ltp <= 0:
         return {"status": "INVALID CONTRACT", "reason": "Invalid lot size or LTP"}
+    if ltp > OPTION_MAX_PREMIUM:
+        return {"status": "PRICE_CHANGED", "reason": f"Option premium Rs {ltp:.2f} exceeds cap Rs {OPTION_MAX_PREMIUM:.2f}"}
 
     deployable_capital = float(capital) * MAX_CAPITAL_UTILIZATION
     lots = int(deployable_capital // (ltp * lot_size))
@@ -93,6 +95,7 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
         "strike": resolved["strike"],
         "entry": entry,
         "quantity": quantity,
+        "original_quantity": quantity,
         "remaining_quantity": quantity,
         "lots": lots,
         "investment": investment,
