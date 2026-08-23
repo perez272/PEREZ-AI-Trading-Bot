@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from src.option_chain import load_instruments
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
 
+def _parse_expiry(value):
+    try:
+        return datetime.strptime(str(value).strip().upper(), "%d%b%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
 def _candidates(symbol: str, spot: float, option_type: str):
-    today = datetime.now().date()
     rows = []
     for item in load_instruments():
         if str(item.get("name", "")).upper().strip() != symbol.upper().strip():
@@ -19,24 +25,25 @@ def _candidates(symbol: str, spot: float, option_type: str):
         option_symbol = str(item.get("symbol", "")).upper().strip()
         if not option_symbol.endswith(option_type.upper()):
             continue
+        expiry_date = _parse_expiry(item.get("expiry"))
         try:
-            expiry = datetime.strptime(str(item.get("expiry", "")).strip().upper(), "%d%b%Y").date()
             strike = float(item.get("strike", 0)) / 100.0
             lot_size = int(float(item.get("lotsize", 0)))
         except (TypeError, ValueError):
             continue
-        if expiry < today or strike <= 0 or lot_size <= 0:
+        if expiry_date is None or expiry_date < date.today() or strike <= 0 or lot_size <= 0:
             continue
         rows.append({
             "symbol": option_symbol,
             "token": str(item.get("token", "")),
             "exchange": "NFO",
-            "expiry": expiry.strftime("%d%b%Y").upper(),
+            "expiry": expiry_date.strftime("%d%b%Y").upper(),
+            "expiry_date": expiry_date,
             "strike": strike,
             "lotsize": lot_size,
             "difference": abs(strike - float(spot)),
         })
-    rows.sort(key=lambda x: (x["expiry"], x["difference"]))
+    rows.sort(key=lambda x: (x["expiry_date"], x["difference"]))
     return rows
 
 
@@ -48,19 +55,16 @@ def find_affordable_contract(
     max_premium: float = OPTION_MAX_PREMIUM,
     batch_ltp_getter=None,
 ):
-    """Find an affordable live-priced option while minimizing market-data calls."""
+    """Find an affordable live-priced option using the nearest true expiry."""
     rows = _candidates(symbol, spot, option_type)
     if not rows:
         return {"status": "NO CONTRACT", "reason": "No valid NFO contracts"}
 
-    # Concentrate on the nearest expiry and a practical strike band, then
-    # inspect a limited number of strikes to avoid API bursts.
-    nearest_expiry = rows[0]["expiry"]
-    rows = [r for r in rows if r["expiry"] == nearest_expiry]
+    nearest_expiry = min(r["expiry_date"] for r in rows)
+    rows = [r for r in rows if r["expiry_date"] == nearest_expiry]
     rows.sort(key=lambda x: x["difference"])
     rows = rows[:24]
 
-    affordable = []
     quotes = {}
     if batch_ltp_getter is not None:
         try:
@@ -68,22 +72,13 @@ def find_affordable_contract(
         except Exception as exc:
             print(f"[OPTION BATCH] {type(exc).__name__}: {exc}")
 
+    affordable = []
     for row in rows:
         try:
-            if batch_ltp_getter is not None and row["symbol"] in quotes:
+            if row["symbol"] in quotes:
                 ltp = float(quotes[row["symbol"]])
             else:
-                # Batch responses can legitimately omit a contract (unfetched,
-                # stale instrument, or temporary API issue). Fall back to the
-                # paced single-contract getter rather than failing the entire
-                # affordability scan.
-                ltp = float(
-                    ltp_getter(
-                        row["exchange"],
-                        row["symbol"],
-                        row["token"],
-                    )
-                )
+                ltp = float(ltp_getter(row["exchange"], row["symbol"], row["token"]))
         except (TypeError, ValueError, Exception):
             continue
         if ltp <= 0 or ltp > max_premium:
