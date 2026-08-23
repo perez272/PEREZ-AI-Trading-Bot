@@ -28,6 +28,8 @@ class OptionEvidence:
     event_risk_penalty: float = 0.0
     spread_pct: float = 0.0
     slippage_pct: float = 0.0
+    underlying_signal: str = ""
+    mtf_direction: str = ""
 
 
 def clamp(x, lo=0.0, hi=100.0):
@@ -65,9 +67,28 @@ def validate_trade(e: OptionEvidence) -> Dict:
     if not e.expiry: reasons.append("MISSING_EXPIRY")
     if e.spread_pct > MAX_SPREAD_PCT: reasons.append("WIDE_SPREAD")
     if e.slippage_pct > MAX_SLIPPAGE_PCT: reasons.append("HIGH_SLIPPAGE")
-    # These scores are generated only after a successful live Angel One quote fetch.
     if e.volume_score <= 0: reasons.append("NO_LIVE_OPTION_VOLUME")
     if e.oi_score <= 0: reasons.append("NO_LIVE_OPTION_OI")
+
+    # Direction is a hard gate, not a score bonus. A bullish underlying may
+    # not authorize a PE and a bearish underlying may not authorize a CE.
+    expected_direction = {"BUY CE": "BULLISH", "BUY PE": "BEARISH"}.get(e.underlying_signal.upper())
+    if expected_direction and e.mtf_direction.upper() != expected_direction:
+        reasons.append("MTF_DIRECTION_MISMATCH")
+    if e.underlying_signal.upper() not in {"BUY CE", "BUY PE"}:
+        reasons.append("MISSING_UNDERLYING_SIGNAL")
+    if expected_direction == "BULLISH" and e.option_type.upper() != "CE":
+        reasons.append("CE_PE_DIRECTION_MISMATCH")
+    if expected_direction == "BEARISH" and e.option_type.upper() != "PE":
+        reasons.append("CE_PE_DIRECTION_MISMATCH")
+
+    # Require independent option evidence. A large positive percent change
+    # alone must never be sufficient to manufacture a high score.
+    option_evidence = e.trend_score + e.momentum_score + e.vwap_score
+    if option_evidence < 12:
+        reasons.append("WEAK_OPTION_DIRECTIONAL_EVIDENCE")
+    if e.liquidity_score <= 0:
+        reasons.append("NO_LIVE_OPTION_LIQUIDITY")
 
     result = calculate_score(e)
     if result["score"] < MIN_SCORE: reasons.append(f"SCORE_BELOW_{MIN_SCORE}")
