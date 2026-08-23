@@ -11,6 +11,7 @@ from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
+from src.market_intelligence import enrich_option_intelligence
 from src.high_conviction_discovery import discover
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS,
@@ -91,7 +92,7 @@ def main():
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
+        print("PEREZ AI PAPER-TRADING BOT — MARKET/OPTION INTELLIGENCE HARDENED")
         print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
         print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
         print(f"Capital source: {'PAPER_CAPITAL virtual balance' if PAPER_MODE else 'Angel One RMS available cash'}")
@@ -100,10 +101,10 @@ def main():
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
         print(f"Entry window: {ENTRY_START.strftime('%H:%M')}-{LAST_ENTRY.strftime('%H:%M')} IST, weekdays only")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
+        print("Intelligence: Greeks/IV + OI-change memory + PCR context + execution/trap gates")
         print("=" * 72)
 
         while True:
-            # Never scan or create trades from stale Friday/after-hours data.
             wait_for_entry_window()
 
             write_heartbeat("capital_check")
@@ -179,6 +180,7 @@ def main():
                 "ltp": contract_probe.get("ltp", 0),
                 "exchange": contract_probe.get("exchange", "NFO"),
                 "token": contract_probe.get("token", ""),
+                "strike": contract_probe.get("strike", 0),
                 "trend_score": candidate.get("score", 0),
                 "momentum_score": candidate.get("score", 0),
                 "volume_score": candidate.get("volume_ratio", 0),
@@ -210,9 +212,54 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
+            # Second-stage market intelligence runs only after the cheaper live
+            # quote gate passes. It adds official Angel Greeks/IV when available,
+            # real OI/IV change memory, PCR context and hard execution/trap checks.
+            try:
+                intelligence = enrich_option_intelligence(options_result, contract_probe)
+            except Exception as exc:
+                print(f"MARKET INTELLIGENCE FAILED — fail closed: {exc}")
+                write_heartbeat("intelligence_error", symbol=candidate["symbol"], error=str(exc))
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
+            print(
+                f"INTELLIGENCE: {intelligence.get('intelligence_score', 0):.1f}/100 | "
+                f"IV={intelligence.get('iv_pct', 0):.2f}% | "
+                f"Delta={intelligence.get('delta', 0):.4f} | "
+                f"Gamma={intelligence.get('gamma', 0):.6f} | "
+                f"Theta={intelligence.get('theta', 0):.4f} | "
+                f"Vega={intelligence.get('vega', 0):.4f} | "
+                f"OIΔ={intelligence.get('oi_change_pct', 0):.2f}% | "
+                f"PCR={intelligence.get('pcr', 'NA')}"
+            )
+            if intelligence.get("intelligence_hard_fail"):
+                print("INTELLIGENCE REJECTED:", intelligence.get("intelligence_reasons", []))
+                write_heartbeat(
+                    "intelligence_reject",
+                    symbol=candidate["symbol"],
+                    reasons=intelligence.get("intelligence_reasons", []),
+                )
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+
+            # Reuse the exact live quote that passed the gate/intelligence layer.
+            live_ltp = float(options_result.get("ltp", 0) or 0)
+            if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
+                print(f"LIVE OPTION PRICE CHANGED — no trade: Rs {live_ltp:.2f}")
+                time.sleep(RESCAN_DELAY_SECONDS)
+                continue
+            contract_probe["ltp"] = live_ltp
+
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
             try:
-                trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
+                trade = create_trade(
+                    candidate["symbol"],
+                    candidate["close"],
+                    candidate["signal"],
+                    capital,
+                    resolved_contract=contract_probe,
+                )
             except Exception as exc:
                 print(f"TRADE CREATION FAILED — no trade opened: {exc}")
                 time.sleep(RESCAN_DELAY_SECONDS)
@@ -222,6 +269,19 @@ def main():
                 print("Trade was not created:", trade)
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
+
+            trade.update({
+                "options_score": options_result.get("options_score", 0),
+                "intelligence_score": intelligence.get("intelligence_score", 0),
+                "iv_pct": intelligence.get("iv_pct", 0),
+                "delta": intelligence.get("delta", 0),
+                "gamma": intelligence.get("gamma", 0),
+                "theta": intelligence.get("theta", 0),
+                "vega": intelligence.get("vega", 0),
+                "oi_change_pct": intelligence.get("oi_change_pct", 0),
+                "pcr": intelligence.get("pcr", -1),
+                "greeks_source": intelligence.get("greeks_source", ""),
+            })
 
             print(
                 f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | "
