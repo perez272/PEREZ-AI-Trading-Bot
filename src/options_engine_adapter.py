@@ -34,6 +34,8 @@ def evidence_from_candidate(candidate: Dict[str, Any]) -> OptionEvidence:
         index_confirmation=_num(candidate.get("index_confirmation")), news_confirmation=_num(candidate.get("news_confirmation")),
         event_risk_penalty=_num(candidate.get("event_risk_penalty")), spread_pct=_num(candidate.get("spread_pct")),
         slippage_pct=_num(candidate.get("slippage_pct")),
+        underlying_signal=_text(candidate.get("underlying_signal")),
+        mtf_direction=_text(candidate.get("mtf_direction")),
     )
 
 def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -70,7 +72,6 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
             result["slippage_pct"] = max(0.0, (ask - ltp) / ltp * 100.0)
         else: result["spread_pct"] = result["slippage_pct"] = 999.0
         pct = result["percent_change"]; avg = result["avg_price"]
-        # These are option-only signals, not copied from the underlying.
         result["trend_score"] = min(15.0, max(0.0, pct * 3.0))
         result["momentum_score"] = min(10.0, max(0.0, pct * 2.0))
         result["vwap_score"] = 7.0 if avg > 0 and ltp > avg else (3.0 if avg > 0 and ltp == avg else 0.0)
