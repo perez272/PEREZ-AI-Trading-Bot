@@ -103,9 +103,7 @@ def main():
         print("=" * 72)
 
         while True:
-            # Never scan or create trades from stale Friday/after-hours data.
             wait_for_entry_window()
-
             write_heartbeat("capital_check")
             try:
                 capital = get_available_capital(get_client(), paper_mode=PAPER_MODE)
@@ -212,7 +210,13 @@ def main():
 
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
             try:
-                trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital)
+                trade = create_trade(
+                    candidate["symbol"],
+                    candidate["close"],
+                    candidate["signal"],
+                    capital,
+                    resolved_contract=contract_probe,
+                )
             except Exception as exc:
                 print(f"TRADE CREATION FAILED — no trade opened: {exc}")
                 time.sleep(RESCAN_DELAY_SECONDS)
