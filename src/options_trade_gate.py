@@ -7,6 +7,7 @@ STOP_LOSS_PCT = 2.0
 TARGETS = (5.0, 10.0, 15.0, 20.0)
 MIN_SCORE = OPTIONS_MIN_SCORE
 
+
 @dataclass
 class OptionEvidence:
     symbol: str
@@ -30,6 +31,11 @@ class OptionEvidence:
     slippage_pct: float = 0.0
     underlying_signal: str = ""
     mtf_direction: str = ""
+    percent_change: float = 0.0
+    avg_price: float = 0.0
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    live_market_data: bool = False
 
 
 def clamp(x, lo=0.0, hi=100.0):
@@ -38,15 +44,23 @@ def clamp(x, lo=0.0, hi=100.0):
 
 def calculate_score(e: OptionEvidence) -> Dict:
     components = {
-        "trend": clamp(e.trend_score, 0, 15), "momentum": clamp(e.momentum_score, 0, 10),
-        "volume": clamp(e.volume_score, 0, 8), "vwap": clamp(e.vwap_score, 0, 7),
-        "volatility": clamp(e.volatility_score, 0, 5), "structure": clamp(e.structure_score, 0, 5),
-        "oi": clamp(e.oi_score, 0, 10), "oi_change": clamp(e.oi_change_score, 0, 8),
-        "iv": clamp(e.iv_score, 0, 5), "liquidity": clamp(e.liquidity_score, 0, 7),
+        "trend": clamp(e.trend_score, 0, 15),
+        "momentum": clamp(e.momentum_score, 0, 10),
+        "volume": clamp(e.volume_score, 0, 8),
+        "vwap": clamp(e.vwap_score, 0, 7),
+        "volatility": clamp(e.volatility_score, 0, 5),
+        "structure": clamp(e.structure_score, 0, 5),
+        "oi": clamp(e.oi_score, 0, 10),
+        "oi_change": clamp(e.oi_change_score, 0, 8),
+        "iv": clamp(e.iv_score, 0, 5),
+        "liquidity": clamp(e.liquidity_score, 0, 7),
         "index_confirmation": clamp(e.index_confirmation, 0, 8),
         "news_confirmation": clamp(e.news_confirmation, 0, 5),
     }
-    return {"score": round(clamp(sum(components.values()) - clamp(e.event_risk_penalty, 0, 20), 0, 100), 2), "components": components}
+    return {
+        "score": round(clamp(sum(components.values()) - clamp(e.event_risk_penalty, 0, 20), 0, 100), 2),
+        "components": components,
+    }
 
 
 def projected_levels(entry: float) -> Dict:
@@ -62,52 +76,83 @@ def projected_levels(entry: float) -> Dict:
 
 def validate_trade(e: OptionEvidence) -> Dict:
     reasons: List[str] = []
-    if e.ltp <= 0: reasons.append("INVALID_LTP")
-    if e.option_type.upper() not in {"CE", "PE"}: reasons.append("INVALID_OPTION_TYPE")
-    if not e.expiry: reasons.append("MISSING_EXPIRY")
-    if e.spread_pct > MAX_SPREAD_PCT: reasons.append("WIDE_SPREAD")
-    if e.slippage_pct > MAX_SLIPPAGE_PCT: reasons.append("HIGH_SLIPPAGE")
-    if e.volume_score <= 0: reasons.append("NO_LIVE_OPTION_VOLUME")
-    if e.oi_score <= 0: reasons.append("NO_LIVE_OPTION_OI")
+    option_type = e.option_type.upper().strip()
+    signal = e.underlying_signal.upper().strip()
+    mtf = e.mtf_direction.upper().strip()
 
-    # Direction is a hard gate, not a score bonus. A bullish underlying may
-    # not authorize a PE and a bearish underlying may not authorize a CE.
-    expected_direction = {"BUY CE": "BULLISH", "BUY PE": "BEARISH"}.get(e.underlying_signal.upper())
-    if expected_direction and e.mtf_direction.upper() != expected_direction:
+    if not e.live_market_data:
+        reasons.append("LIVE_OPTION_DATA_REQUIRED")
+    if e.ltp <= 0:
+        reasons.append("INVALID_LTP")
+    if option_type not in {"CE", "PE"}:
+        reasons.append("INVALID_OPTION_TYPE")
+    if not e.expiry:
+        reasons.append("MISSING_EXPIRY")
+    if e.spread_pct > MAX_SPREAD_PCT:
+        reasons.append("WIDE_SPREAD")
+    if e.slippage_pct > MAX_SLIPPAGE_PCT:
+        reasons.append("HIGH_SLIPPAGE")
+    if e.best_bid <= 0 or e.best_ask <= 0 or e.best_ask < e.best_bid:
+        reasons.append("INVALID_ORDER_BOOK")
+
+    expected_signal = "BUY CE" if option_type == "CE" else "BUY PE" if option_type == "PE" else ""
+    expected_mtf = "BULLISH" if option_type == "CE" else "BEARISH" if option_type == "PE" else ""
+    if signal != expected_signal:
+        reasons.append("OPTION_SIGNAL_MISMATCH")
+    if mtf != expected_mtf:
         reasons.append("MTF_DIRECTION_MISMATCH")
-    if e.underlying_signal.upper() not in {"BUY CE", "BUY PE"}:
-        reasons.append("MISSING_UNDERLYING_SIGNAL")
-    if expected_direction == "BULLISH" and e.option_type.upper() != "CE":
-        reasons.append("CE_PE_DIRECTION_MISMATCH")
-    if expected_direction == "BEARISH" and e.option_type.upper() != "PE":
-        reasons.append("CE_PE_DIRECTION_MISMATCH")
+    if e.index_confirmation < 4:
+        reasons.append("WEAK_INDEX_CONFIRMATION")
 
-    # Require independent option evidence. A large positive percent change
-    # alone must never be sufficient to manufacture a high score.
-    option_evidence = e.trend_score + e.momentum_score + e.vwap_score
-    if option_evidence < 12:
-        reasons.append("WEAK_OPTION_DIRECTIONAL_EVIDENCE")
+    # Long options need live directional confirmation; a cheap or liquid option
+    # must not qualify while its own tape is weakening.
+    if e.percent_change <= 0:
+        reasons.append("NEGATIVE_OPTION_MOMENTUM")
+    if e.avg_price <= 0 or e.ltp <= e.avg_price:
+        reasons.append("BELOW_LIVE_AVERAGE_PRICE")
+    if e.volume_score <= 0:
+        reasons.append("NO_LIVE_OPTION_VOLUME")
+    if e.oi_score <= 0:
+        reasons.append("NO_LIVE_OPTION_OI")
     if e.liquidity_score <= 0:
         reasons.append("NO_LIVE_OPTION_LIQUIDITY")
 
+    # Require independent option-direction evidence in addition to the
+    # underlying score. This prevents duplicated underlying signals from
+    # manufacturing an apparently strong option setup.
+    if e.trend_score + e.momentum_score + e.vwap_score < 12:
+        reasons.append("WEAK_OPTION_DIRECTIONAL_EVIDENCE")
+
     result = calculate_score(e)
-    if result["score"] < MIN_SCORE: reasons.append(f"SCORE_BELOW_{MIN_SCORE}")
-    if e.event_risk_penalty >= 10: reasons.append("HIGH_EVENT_RISK")
-    if e.index_confirmation < 4: reasons.append("WEAK_INDEX_CONFIRMATION")
+    if result["score"] < MIN_SCORE:
+        reasons.append(f"SCORE_BELOW_{MIN_SCORE}")
+    if e.event_risk_penalty >= 10:
+        reasons.append("HIGH_EVENT_RISK")
 
     levels = projected_levels(e.ltp) if e.ltp > 0 else {}
     return {
-        "symbol": e.symbol, "option_type": e.option_type.upper(), "expiry": e.expiry,
-        "score": result["score"], "eligible": not reasons,
+        "symbol": e.symbol,
+        "option_type": option_type,
+        "expiry": e.expiry,
+        "score": result["score"],
+        "eligible": not reasons,
         "decision": "PAPER TRADE CANDIDATE" if not reasons else "NO TRADE",
-        "reasons": reasons, "levels": levels, "live_orders": False, "paper_trade": True,
+        "reasons": reasons,
+        "levels": levels,
+        "live_orders": False,
+        "paper_trade": True,
     }
 
 
 def rank_candidates(candidates):
-    return sorted([validate_trade(x) for x in candidates], key=lambda x: (x["eligible"], x["score"]), reverse=True)
+    return sorted(
+        [validate_trade(x) for x in candidates],
+        key=lambda x: (x["eligible"], x["score"]),
+        reverse=True,
+    )
 
 
 def print_candidate(r):
     print(f"{r['symbol']} {r['option_type']} | {r['score']}/100 | {r['decision']}")
-    if r["reasons"]: print("REJECT:", ", ".join(r["reasons"]))
+    if r["reasons"]:
+        print("REJECT:", ", ".join(r["reasons"]))
