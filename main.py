@@ -117,14 +117,14 @@ def main():
                 print("Affordable options scanner rejected underlying:", contract_probe); time.sleep(RESCAN_DELAY_SECONDS); continue
             print(f"AFFORDABLE OPTION: {contract_probe['contract']} Strike={contract_probe['strike']} LTP=Rs {contract_probe['ltp']:.2f} Expiry={contract_probe['expiry']} Lotsize={contract_probe['lotsize']}")
 
+            mtf_direction = candidate.get("m15_trend") if candidate.get("m15_trend") == candidate.get("h1_trend") else "MIXED"
             gate_candidate = {
                 "symbol": candidate["symbol"], "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
                 "expiry": contract_probe.get("expiry", ""), "ltp": contract_probe.get("ltp", 0),
                 "exchange": contract_probe.get("exchange", "NFO"), "token": contract_probe.get("token", ""),
-                # Option trend/momentum/VWAP are derived from the option's own FULL quote in the adapter.
-                # Underlying MTF alignment is the only index-confirmation input.
+                "underlying_signal": candidate["signal"], "mtf_direction": mtf_direction,
                 "trend_score": 0, "momentum_score": 0, "volume_score": 0, "vwap_score": 0,
-                "index_confirmation": 8 if candidate.get("mtf_aligned") is True else 0,
+                "index_confirmation": 8 if ((candidate["signal"] == "BUY CE" and mtf_direction == "BULLISH") or (candidate["signal"] == "BUY PE" and mtf_direction == "BEARISH")) else 0,
                 "oi_score": 0, "oi_change_score": 0, "iv_score": 0, "liquidity_score": 0,
                 "volatility_score": 0, "structure_score": 0, "news_confirmation": 0,
                 "event_risk_penalty": 0, "spread_pct": 0, "slippage_pct": 0,
@@ -137,13 +137,21 @@ def main():
             if not options_result.get("paper_trade_candidate"):
                 print("Options gate rejected candidate:", gate.get("reasons", [])); time.sleep(RESCAN_DELAY_SECONDS); continue
 
+            # The gate uses a fresh FULL quote. Reuse that exact live price for
+            # sizing and re-check the premium cap before creating the paper trade.
+            live_ltp = float(options_result.get("ltp", 0) or 0)
+            if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
+                print(f"LIVE OPTION PRICE CHANGED — no trade: Rs {live_ltp:.2f} exceeds allowed premium or is invalid")
+                time.sleep(RESCAN_DELAY_SECONDS); continue
+            contract_probe["ltp"] = live_ltp
+
             write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
             try: trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital, resolved_contract=contract_probe)
             except Exception as exc:
                 print(f"TRADE CREATION FAILED — no trade opened: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
             if trade.get("status") != "PAPER TRADE ACTIVE":
                 print("Trade was not created:", trade); time.sleep(RESCAN_DELAY_SECONDS); continue
-            trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": True, "underlying_score": candidate.get("score", 0)})
+            trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": True, "underlying_score": candidate.get("score", 0), "option_live_ltp_at_gate": live_ltp, "mtf_direction": mtf_direction})
             print(f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%")
             try: send_entry_alert(trade)
             except Exception as exc: print(f"TELEGRAM ALERT FAILED — trade remains paper-managed: {exc}")
