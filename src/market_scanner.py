@@ -10,18 +10,15 @@ from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
 from src.upgrade_config import SYMBOLS, PER_SYMBOL_DELAY_SECONDS
 from src.multi_timeframe import confirm as confirm_multi_timeframe
+from src.market_integrity import validate_candidate
 
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
 IST = ZoneInfo("Asia/Kolkata")
 CANDLE_INTERVAL_MINUTES = 5
+_CANDLE_CACHE = {}
 _session = None
 _client = None
-
-# Cache is keyed by the last CLOSED 5-minute candle bucket.  The API commonly
-# returns the currently forming candle as its final row; that row is never
-# used for indicators, scoring, or trading.
-_CANDLE_CACHE = {}
 
 
 def get_client():
@@ -40,31 +37,18 @@ def _parse_candle_timestamp(raw):
 
 
 def _bucket_start(timestamp):
-    return timestamp.replace(
-        minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES,
-        second=0,
-        microsecond=0,
-    )
+    return timestamp.replace(minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES, second=0, microsecond=0)
 
 
 def _closed_candle_bucket(now=None):
     now = now or datetime.now(IST)
     minute = (now.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES
-    current_bucket = now.replace(minute=minute, second=0, microsecond=0)
-    return current_bucket - timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+    return now.replace(minute=minute, second=0, microsecond=0) - timedelta(minutes=CANDLE_INTERVAL_MINUTES)
 
 
 def _normalize_closed_candles(candles, symbol):
-    """Return candles containing only fully closed 5-minute bars.
-
-    Angel One historical candle responses can end with the currently forming
-    5-minute bar.  During market hours we explicitly remove that bar and use
-    the latest bar whose bucket is strictly before the current bucket.
-    """
     if not isinstance(candles, list) or not candles:
-        print(f"{symbol}: NO CANDLE DATA — SKIP")
         return None
-
     valid = []
     for row in candles:
         if not isinstance(row, (list, tuple)) or len(row) < 6:
@@ -77,61 +61,32 @@ def _normalize_closed_candles(candles, symbol):
             valid.append((ts, list(row)))
         except (TypeError, ValueError, IndexError):
             continue
-
     if not valid:
-        print(f"{symbol}: INVALID CANDLE DATA — SKIP")
         return None
-
     valid.sort(key=lambda item: item[0])
     now = datetime.now(IST)
     required_bucket = _closed_candle_bucket(now)
-
-    # Keep only bars up to the latest expected closed bucket. This strips the
-    # currently forming 13:40 bar when the expected closed bar is 13:35.
     closed = [row for ts, row in valid if _bucket_start(ts) <= required_bucket]
     if not closed:
-        print(f"{symbol}: NO CLOSED 5-MINUTE CANDLE AVAILABLE — SKIP")
         return None
-
     actual_bucket = _bucket_start(_parse_candle_timestamp(closed[-1][0]))
     if MARKET_OPEN <= now.time() <= MARKET_CLOSE and actual_bucket != required_bucket:
-        print(
-            f"{symbol}: STALE/UNEXPECTED CLOSED CANDLE — "
-            f"actual={actual_bucket.strftime('%H:%M')} "
-            f"expected={required_bucket.strftime('%H:%M')} — SKIP"
-        )
         return None
-
     return closed
 
 
-def _validate_candle_freshness(candles, symbol, require_current_closed=True):
+def _validate_candle_freshness(candles, symbol):
     normalized = _normalize_closed_candles(candles, symbol)
     if normalized is None:
         return None
-
-    try:
-        timestamp = _parse_candle_timestamp(normalized[-1][0])
-        now = datetime.now(IST)
-        age_seconds = (now - timestamp).total_seconds()
-        if age_seconds < -60:
-            print(f"{symbol}: FUTURE CANDLE — SKIP")
-            return None
-
-        if require_current_closed and MARKET_OPEN <= now.time() <= MARKET_CLOSE:
-            expected_bucket = _closed_candle_bucket(now)
-            actual_bucket = _bucket_start(timestamp)
-            if actual_bucket != expected_bucket:
-                print(
-                    f"{symbol}: STALE/UNEXPECTED CLOSED CANDLE — "
-                    f"actual={actual_bucket.strftime('%H:%M')} "
-                    f"expected={expected_bucket.strftime('%H:%M')} — SKIP"
-                )
-                return None
-        return age_seconds
-    except (TypeError, ValueError, IndexError) as exc:
-        print(f"{symbol}: INVALID CANDLE TIMESTAMP/DATA — {exc}")
+    timestamp = _parse_candle_timestamp(normalized[-1][0])
+    now = datetime.now(IST)
+    age_seconds = (now - timestamp).total_seconds()
+    if age_seconds < -60:
         return None
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now):
+        return None
+    return age_seconds
 
 
 def _candle_bucket(candles):
@@ -141,212 +96,90 @@ def _candle_bucket(candles):
         return None
 
 
-def _cached_candles(symbol):
-    entry = _CANDLE_CACHE.get(symbol)
-    if not entry:
-        return None
-
-    candles = entry.get("candles")
-    entry_bucket = entry.get("bucket")
-    if candles is None or entry_bucket is None:
-        _CANDLE_CACHE.pop(symbol, None)
-        return None
-
-    now = datetime.now(IST)
-    required_bucket = _closed_candle_bucket(now)
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and entry_bucket != required_bucket:
-        return None
-
-    normalized = _normalize_closed_candles(candles, symbol)
-    if normalized is None:
-        _CANDLE_CACHE.pop(symbol, None)
-        return None
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _candle_bucket(normalized) != required_bucket:
-        _CANDLE_CACHE.pop(symbol, None)
-        return None
-    return normalized
-
-
 def _scan_one(symbol, exchange, token):
-    candles = _cached_candles(symbol)
-    freshness_age = None
+    candles = None
+    entry = _CANDLE_CACHE.get(symbol)
+    if entry and entry.get("bucket") == _closed_candle_bucket(datetime.now(IST)):
+        candles = _normalize_closed_candles(entry.get("candles"), symbol)
     cache_hit = candles is not None
-
     if candles is None:
         to_date = datetime.now(IST)
-        from_date = to_date - timedelta(days=5)
-        params = {
-            "exchange": exchange,
-            "symboltoken": token,
-            "interval": "FIVE_MINUTE",
-            "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-            "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-        }
+        params = {"exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE", "fromdate": (to_date - timedelta(days=5)).strftime("%Y-%m-%d %H:%M"), "todate": to_date.strftime("%Y-%m-%d %H:%M")}
         try:
             response = get_client().get_candles(params)
-        except Exception as exc:
-            print(f"{symbol}: candle request failed — {exc}")
+        except Exception:
             return None, False
-
-        if not response or not isinstance(response, dict) or not response.get("status"):
-            print(f"{symbol}: candle API unavailable — SKIP")
+        if not isinstance(response, dict) or not response.get("status"):
             return None, False
-
         candles = _normalize_closed_candles(response.get("data"), symbol)
         if candles is None:
             return None, False
-
-        freshness_age = _validate_candle_freshness(candles, symbol, require_current_closed=True)
-        if freshness_age is None:
+        if _validate_candle_freshness(candles, symbol) is None:
             return None, False
-
         bucket = _candle_bucket(candles)
         if bucket is None:
-            print(f"{symbol}: INVALID CANDLE BUCKET — SKIP")
             return None, False
-
-        required_bucket = _closed_candle_bucket(datetime.now(IST))
-        if MARKET_OPEN <= datetime.now(IST).time() <= MARKET_CLOSE and bucket != required_bucket:
-            print(
-                f"{symbol}: MARKET DATA NOT FRESH — bucket={bucket.strftime('%H:%M')} "
-                f"required={required_bucket.strftime('%H:%M')} — SKIP"
-            )
-            return None, False
-
         _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket}
-    else:
-        freshness_age = _validate_candle_freshness(candles, symbol, require_current_closed=True)
-        if freshness_age is None:
-            return None, cache_hit
-
-    if not isinstance(candles, list) or len(candles) < 30:
-        print(f"{symbol}: Insufficient/invalid closed candle data — SKIP")
+    freshness_age = _validate_candle_freshness(candles, symbol)
+    if freshness_age is None or len(candles) < 30:
         return None, cache_hit
-
-    # Final freshness assertion immediately before indicators/scoring.
-    required_bucket = _closed_candle_bucket(datetime.now(IST))
-    cached_bucket = _candle_bucket(candles)
-    if MARKET_OPEN <= datetime.now(IST).time() <= MARKET_CLOSE and cached_bucket != required_bucket:
-        print(f"{symbol}: MARKET DATA STALE BEFORE SCORING — SKIP")
-        return None, cache_hit
-
     try:
         df = calculate_indicators(candles)
         if df is None or df.empty or len(df) < 30:
-            print(f"{symbol}: Insufficient indicator data — SKIP")
             return None, cache_hit
-
         last = df.iloc[-1]
         required = ("RSI", "EMA20", "EMA50", "close")
-        if any(key not in df.columns for key in required):
-            print(f"{symbol}: Missing indicator columns — SKIP")
+        if any(key not in df.columns for key in required) or any(last[key] != last[key] for key in required):
             return None, cache_hit
-        if any(last[key] != last[key] for key in required):
-            print(f"{symbol}: Invalid indicator values — SKIP")
-            return None, cache_hit
-
         base_score = calculate_score(df)
-        signal, trend = get_trade_decision(
-            base_score,
-            float(last["RSI"]),
-            float(last["EMA20"]),
-            float(last["EMA50"]),
-            float(last["close"]),
-        )
+        signal, trend = get_trade_decision(base_score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
         mtf = confirm_multi_timeframe(candles)
         score = max(0, min(100, int(base_score) + int(mtf["quality"])))
         if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
             signal = "NO TRADE"
-
+        candidate = {"symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1), "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": True, "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"], "data_source": "Angel One live closed 5-minute candles / local MTF resample"}
+        ok, reasons = validate_candidate(candidate)
+        candidate["market_integrity_ok"] = ok
+        candidate["market_integrity_reasons"] = reasons
+        if not ok:
+            candidate["signal"] = "NO TRADE"
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
-
-        return {
-            "symbol": symbol,
-            "score": score,
-            "base_score": int(base_score),
-            "close": float(last["close"]),
-            "rsi": float(last["RSI"]),
-            "signal": signal,
-            "trend": trend,
-            "volume_ratio": float(last.get("volume_ratio", 0) or 0),
-            "candle_age_seconds": round(freshness_age, 1),
-            "candle_bucket": cached_bucket.isoformat() if cached_bucket else None,
-            "market_data_fresh": True,
-            "m15_trend": mtf["m15"],
-            "h1_trend": mtf["h1"],
-            "mtf_aligned": mtf["aligned"],
-            "data_source": "Angel One live closed 5-minute candles / local MTF resample",
-        }, cache_hit
-    except Exception as exc:
-        print(f"{symbol}: indicator/scoring failure — {exc}")
+        return candidate, cache_hit
+    except Exception:
         return None, cache_hit
 
 
 def scan_market():
-    results = []
-    refreshed = 0
-    cached = 0
-    failed = 0
-
+    results, refreshed, cached, failed = [], 0, 0, 0
     for symbol, (exchange, token) in SYMBOLS.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
-            results.append(item)
-            if cache_hit:
-                cached += 1
-            else:
-                refreshed += 1
+            results.append(item); cached += int(cache_hit); refreshed += int(not cache_hit)
         else:
             failed += 1
-
-    print(
-        f"CLOSED-CANDLE REFRESHES THIS SCAN: {refreshed} | "
-        f"CACHE HITS: {cached} | SYMBOL SKIPS: {failed}"
-    )
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
 def _candidate_is_fresh(candidate):
-    if not candidate or candidate.get("market_data_fresh") is not True:
+    if candidate.get("market_data_fresh") is not True or candidate.get("market_integrity_ok") is not True:
         return False
     try:
-        bucket = datetime.fromisoformat(candidate["candle_bucket"])
-        now = datetime.now(IST)
-        if MARKET_OPEN <= now.time() <= MARKET_CLOSE:
-            return bucket == _closed_candle_bucket(now)
-        return True
+        return datetime.fromisoformat(candidate["candle_bucket"]) == _closed_candle_bucket(datetime.now(IST))
     except (TypeError, ValueError, KeyError):
         return False
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [
-        x for x in results
-        if x["score"] >= minimum_score
-        and x["signal"] in ("BUY CE", "BUY PE")
-        and x.get("mtf_aligned") is True
-        and _candidate_is_fresh(x)
-    ]
+    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True and _candidate_is_fresh(x)]
     return eligible[0] if eligible else None
 
 
 def print_results(results):
     print("\nAI Ranking")
-    print("-" * 112)
     for item in results:
-        print(
-            f"{item['symbol']:<12} Score={item['score']}/100 "
-            f"Base={item.get('base_score', '?')} Close={item['close']:.2f} "
-            f"Signal={item['signal']} 15m={item.get('m15_trend', '?')} "
-            f"1h={item.get('h1_trend', '?')} DataAge={item.get('candle_age_seconds', '?')}s "
-            f"Fresh={item.get('market_data_fresh', False)}"
-        )
-    print("-" * 112)
+        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} Fresh={item.get('market_data_fresh')} Integrity={item.get('market_integrity_ok')}")
 
 
 if __name__ == "__main__":
-    print("=" * 72)
-    print("PEREZ AI MARKET SCANNER — CLOSED-CANDLE MARKET-DATA SAFETY")
-    print("=" * 72)
     print_results(scan_market())
