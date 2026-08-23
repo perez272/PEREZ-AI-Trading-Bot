@@ -5,6 +5,7 @@ from src.upgrade_config import OPTION_MAX_PREMIUM
 STOP_LOSS_PCT = 0.02
 TARGET1_PCT = 0.05
 TARGET2_PCT = 0.10
+MAX_CAPITAL_UTILIZATION = 0.90
 
 
 def resolve_option_contract(symbol, spot, signal):
@@ -39,21 +40,37 @@ def resolve_option_contract(symbol, spot, signal):
     }
 
 
-def create_trade(symbol, spot, signal, capital):
-    """Create a PAPER trade using as much of the current available capital as whole lots allow."""
+def create_trade(symbol, spot, signal, capital, resolved_contract=None):
+    """Create a PAPER trade from one validated option contract.
+
+    If ``resolved_contract`` is supplied, it is reused exactly so the option
+    that passed the options gate cannot silently change before trade creation.
+    """
     if capital is None or float(capital) <= 0:
         return {"status": "NO CAPITAL", "reason": "No valid live available capital"}
 
-    resolved = resolve_option_contract(symbol, spot, signal)
+    if resolved_contract is None:
+        resolved = resolve_option_contract(symbol, spot, signal)
+    else:
+        resolved = dict(resolved_contract)
+
     if resolved.get("status") != "CONTRACT VALID":
         return resolved
 
-    lot_size = resolved["lotsize"]
-    ltp = resolved["ltp"]
+    expected_option_type = "CE" if signal == "BUY CE" else "PE" if signal == "BUY PE" else None
+    if expected_option_type is None or resolved.get("option_type") != expected_option_type:
+        return {"status": "INVALID CONTRACT", "reason": "Validated contract does not match trade signal"}
 
-    # Keep a 10% capital reserve for slippage, fees, and future risk-managed
-    # actions. Never size a paper position against 100% of available capital.
-    MAX_CAPITAL_UTILIZATION = 0.90
+    required = ("contract", "exchange", "token", "expiry", "strike", "lotsize", "ltp")
+    missing = [key for key in required if resolved.get(key) in (None, "")]
+    if missing:
+        return {"status": "INVALID CONTRACT", "reason": f"Missing validated contract fields: {', '.join(missing)}"}
+
+    lot_size = int(resolved["lotsize"])
+    ltp = float(resolved["ltp"])
+    if lot_size < 1 or ltp <= 0:
+        return {"status": "INVALID CONTRACT", "reason": "Invalid lot size or LTP"}
+
     deployable_capital = float(capital) * MAX_CAPITAL_UTILIZATION
     lots = int(deployable_capital // (ltp * lot_size))
     if lots < 1:
