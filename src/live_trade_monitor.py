@@ -6,8 +6,20 @@ from src.telegram_alert import send_exit_alert, send_alert
 from src.trade_logger import log_closed_trade
 from src.trade_monitor import monitor_trade
 
+# Public test/runtime seam. Keeping this name lets the monitor be driven by a
+# deterministic paper quote source without patching broker modules.
+get_ltp = get_option_ltp
 
-def run_monitor(trade, poll_seconds=3, get_ltp=get_option_ltp, notify=True, log_path="data/trades.csv"):
+
+def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data/trades.csv"):
+    """Monitor one paper trade and persist its outcome exactly once on close.
+
+    Outcome learning belongs at the closure boundary, not only in the caller,
+    so every closed paper trade is learnable even if a higher-level caller
+    exits immediately afterwards. ``ai_memory.remember_outcome`` is
+    idempotent by trade_id, so main.py may safely perform a second reconciliation.
+    """
+    quote_fn = get_ltp or globals()["get_ltp"]
     print("=" * 60)
     print("PEREZ AI LIVE PAPER-TRADE MONITOR")
     print("=" * 60)
@@ -16,7 +28,7 @@ def run_monitor(trade, poll_seconds=3, get_ltp=get_option_ltp, notify=True, log_
 
     while True:
         try:
-            ltp = get_ltp(trade["exchange"], trade["contract"], trade["token"])
+            ltp = quote_fn(trade["exchange"], trade["contract"], trade["token"])
             if ltp is None:
                 consecutive_errors += 1
                 print(f"LTP unavailable; retrying ({consecutive_errors})")
@@ -43,6 +55,20 @@ def run_monitor(trade, poll_seconds=3, get_ltp=get_option_ltp, notify=True, log_
 
             if result["closed"]:
                 record = log_closed_trade(trade, result, log_path)
+                # Closure is the authoritative learning boundary. The memory
+                # layer rejects missing trade IDs and deduplicates retries.
+                try:
+                    from src.ai_memory import remember_outcome
+                    learning = remember_outcome(trade, result, regime=trade.get("regime", "unknown"))
+                    print(
+                        "AI MEMORY: outcome "
+                        f"{'STORED' if learning.get('stored') else 'ALREADY_STORED'} "
+                        f"trade_id={learning.get('trade_id')}"
+                    )
+                except Exception as exc:
+                    # Never turn a successful paper exit into a false failure;
+                    # main.py can retry the same idempotent write.
+                    print(f"AI MEMORY WARNING — outcome reconciliation pending: {exc}")
                 if notify:
                     send_exit_alert(trade, result)
                 print(f"TRADE CLOSED: {result['exit_reason']}")
