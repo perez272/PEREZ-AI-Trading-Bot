@@ -1,5 +1,3 @@
-import os
-
 from src.market_data_router import MarketDataRouter
 
 
@@ -16,11 +14,24 @@ class FakeAngel:
 
 
 class FakeUpstox:
-    def __init__(self, candles):
+    def __init__(self, candles, available=True):
         self.candles = candles
+        self._available = available
 
     def available(self):
-        return True
+        return self._available
+
+    def get_candles(self, symbol, interval_minutes=5):
+        return self.candles
+
+
+class FakeFyers:
+    def __init__(self, candles, available=True):
+        self.candles = candles
+        self._available = available
+
+    def available(self):
+        return self._available
 
     def get_candles(self, symbol, interval_minutes=5):
         return self.candles
@@ -30,6 +41,7 @@ def test_router_falls_back_when_angel_is_in_cooldown(monkeypatch):
     candles = [["2026-08-24T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
     router = MarketDataRouter(FakeAngel(cooldown=300))
     router.upstox = FakeUpstox(candles)
+    router.fyers = FakeFyers([])
     monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
     router.mode = "auto"
 
@@ -40,19 +52,47 @@ def test_router_falls_back_when_angel_is_in_cooldown(monkeypatch):
     assert router.summary()["upstox_successes"] == 1
 
 
-def test_router_fail_closed_without_configured_upstox(monkeypatch):
+def test_router_uses_fyers_after_upstox_failure(monkeypatch):
+    candles = [["2026-08-24T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
+    router = MarketDataRouter(FakeAngel(cooldown=300))
+    router.upstox = FakeUpstox([])
+    router.fyers = FakeFyers(candles)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
+    router.mode = "auto"
+
+    result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
+
+    assert result == candles
+    assert source == "fyers"
+    assert router.summary()["fyers_successes"] == 1
+
+
+def test_router_fail_closed_without_configured_alternatives(monkeypatch):
     monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
     router = MarketDataRouter(FakeAngel(cooldown=300))
+    router.upstox = FakeUpstox([], available=False)
+    router.fyers = FakeFyers([], available=False)
 
-    class Unavailable:
-        def available(self):
-            return False
-
-    router.upstox = Unavailable()
     result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
 
     assert result is None
     assert source == "none"
+
+
+def test_fyers_mode_does_not_call_other_fallbacks(monkeypatch):
+    candles = [["2026-08-24T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
+    router = MarketDataRouter(FakeAngel(cooldown=0))
+    router.upstox = FakeUpstox(candles)
+    router.fyers = FakeFyers(candles)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "fyers")
+    router.mode = "fyers"
+
+    result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
+
+    assert result == candles
+    assert source == "fyers"
+    assert router.summary()["angel_attempts"] == 0
+    assert router.summary()["upstox_attempts"] == 0
 
 
 def test_upstox_provider_mapping_contains_core_universe():
