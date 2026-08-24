@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+import uuid
+
 from src.affordable_options import find_affordable_contract
 from src.live_option_price import get_option_ltp
 from src.upgrade_config import OPTION_MAX_PREMIUM
@@ -35,8 +38,9 @@ def resolve_option_contract(symbol, spot, signal):
 def create_trade(symbol, spot, signal, capital, resolved=None):
     """Create a PAPER trade from one validated option contract.
 
-    If ``resolved`` is supplied, it is reused so the execution path cannot
-    silently select a different contract after the gate has approved one.
+    Every accepted paper trade receives a stable unique ``trade_id``. That ID
+    is the correlation key between execution, monitoring, the trade ledger and
+    persistent AI outcome memory, preventing double-learning of one trade.
     """
     if capital is None or float(capital) <= 0:
         return {"status": "NO CAPITAL", "reason": "No valid live available capital"}
@@ -64,6 +68,7 @@ def create_trade(symbol, spot, signal, capital, resolved=None):
     target2 = round(entry * (1 + TARGET2_PCT), 2)
 
     return {
+        "trade_id": f"PEREZ-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:10]}",
         "symbol": symbol,
         "signal": signal,
         "contract": resolved["contract"],
