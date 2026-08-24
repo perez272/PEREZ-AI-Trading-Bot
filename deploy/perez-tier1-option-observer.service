@@ -1,0 +1,18 @@
+[Unit]
+Description=PEREZ AI Tier-1 Option Observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+Environment=PAPER_MODE=true
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.tier1_option_observer_service
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
