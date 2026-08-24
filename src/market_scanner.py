@@ -9,7 +9,8 @@ from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
 from src.market_data_router import MarketDataRouter
-from src.upgrade_config import SYMBOLS, PER_SYMBOL_DELAY_SECONDS, FRESHNESS_MAX_AGE_MINUTES
+from src.upgrade_config import FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECONDS
+from src.scanner_universe import build_scan_symbols
 from src.multi_timeframe import confirm as confirm_multi_timeframe
 from src.market_integrity import validate_candidate
 
@@ -26,10 +27,10 @@ _client = None
 _router = None
 
 
-def _reset_scan_stats():
+def _reset_scan_stats(symbol_count):
     global _SCAN_STATS
     _SCAN_STATS = {
-        "symbols": len(SYMBOLS), "api_attempts": 0, "live_refreshes": 0,
+        "symbols": symbol_count, "api_attempts": 0, "live_refreshes": 0,
         "cache_hits": 0, "fresh_candles": 0, "fresh_to_decision_engine": 0,
         "stale_or_invalid": 0, "api_blocked_or_failed": 0, "decision_evaluations": 0,
         "results": 0, "upstox_fallback_attempts": 0, "upstox_fallback_successes": 0,
@@ -130,6 +131,49 @@ def _historical_params(exchange, token):
     }
 
 
+def _safe_pct(numerator, denominator):
+    try:
+        denominator = float(denominator)
+        return float(numerator) / denominator * 100.0 if denominator else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _derive_momentum_fields(df):
+    """Derive early-move features so the momentum layer is not blind to breakouts."""
+    last = df.iloc[-1]
+    previous = df.iloc[-2] if len(df) >= 2 else last
+    lookback = df.iloc[-13:-1] if len(df) >= 13 else df.iloc[:-1]
+    prior_high = float(lookback["high"].max()) if not lookback.empty else float(last["high"])
+    prior_low = float(lookback["low"].min()) if not lookback.empty else float(last["low"])
+    close = float(last["close"])
+    candle_range = max(float(last["high"]) - float(last["low"]), 1e-9)
+    body = abs(float(last["close"]) - float(last["open"]))
+    breakout = max(_safe_pct(close - prior_high, prior_high), _safe_pct(prior_low - close, prior_low), 0.0)
+    direction_breakout = max(
+        _safe_pct(close - prior_high, prior_high),
+        _safe_pct(prior_low - close, prior_low),
+        0.0,
+    )
+    volume_ratio = 0.0
+    if len(df) >= 21:
+        avg_volume = float(df["volume"].iloc[-21:-1].mean())
+        volume_ratio = float(last.get("volume", 0) or 0) / avg_volume if avg_volume > 0 else 0.0
+    rsi_slope = float(last.get("RSI", 0) or 0) - float(previous.get("RSI", 0) or 0)
+    atr = float(last.get("ATR", 0) or 0)
+    atr_pct = _safe_pct(atr, close)
+    ema_gap_pct = abs(_safe_pct(float(last.get("EMA20", close)) - float(last.get("EMA50", close)), close))
+    return {
+        "breakout_strength": round(direction_breakout, 4),
+        "body_strength": round(body / candle_range, 4),
+        "ema_gap_pct": round(ema_gap_pct, 4),
+        "rsi_slope": round(rsi_slope, 4),
+        "atr_pct": round(atr_pct, 4),
+        "percent_change": round(_safe_pct(close - float(previous.get("close", close)), float(previous.get("close", close))), 4),
+        "volume_ratio": round(volume_ratio, 4),
+    }
+
+
 def _scan_one(symbol, exchange, token):
     candles = None
     source = "cache"
@@ -182,12 +226,14 @@ def _scan_one(symbol, exchange, token):
         _SCAN_STATS["decision_evaluations"] += 1
         mtf = confirm_multi_timeframe(candles)
         score = max(0, min(100, int(base_score) + int(mtf["quality"])))
+        fields = _derive_momentum_fields(df)
         if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
             signal = "NO TRADE"
         candidate = {
             "symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]),
             "rsi": float(last["RSI"]), "signal": signal, "trend": trend,
-            "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1),
+            **fields,
+            "candle_age_seconds": round(freshness_age, 1),
             "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
             "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
             "data_source": source,
@@ -206,9 +252,10 @@ def _scan_one(symbol, exchange, token):
 
 
 def scan_market():
-    _reset_scan_stats()
+    symbols = build_scan_symbols()
+    _reset_scan_stats(len(symbols))
     results, refreshed, cached = [], 0, 0
-    for symbol, (exchange, token) in SYMBOLS.items():
+    for symbol, (exchange, token) in symbols.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
             results.append(item)
@@ -232,16 +279,34 @@ def _candidate_is_fresh(candidate):
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True and _candidate_is_fresh(x)]
+    eligible = [
+        x for x in results
+        if x["score"] >= minimum_score
+        and x["signal"] in ("BUY CE", "BUY PE")
+        and x.get("mtf_aligned") is True
+        and _candidate_is_fresh(x)
+    ]
     return eligible[0] if eligible else None
 
 
 def print_results(results):
     print("\nAI Ranking")
     for item in results:
-        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} Integrity={item.get('market_integrity_ok')} Source={item.get('data_source')}")
+        print(
+            f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} "
+            f"Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} "
+            f"Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} "
+            f"Breakout={item.get('breakout_strength', 0):.2f}% Vol={item.get('volume_ratio', 0):.2f}x "
+            f"Integrity={item.get('market_integrity_ok')} Source={item.get('data_source')}"
+        )
     stats = get_scan_stats()
-    print("MARKET DATA QUALITY: " + f"API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} FreshToDecision={stats['fresh_to_decision_engine']} Decisions={stats['decision_evaluations']} BlockedOrFailed={stats['api_blocked_or_failed']} InvalidOrStale={stats['stale_or_invalid']} UpstoxFallback={stats['upstox_fallback_successes']}/{stats['upstox_fallback_attempts']}")
+    print(
+        "MARKET DATA QUALITY: "
+        + f"Universe={stats['symbols']} API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} "
+        + f"Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} FreshToDecision={stats['fresh_to_decision_engine']} "
+        + f"Decisions={stats['decision_evaluations']} BlockedOrFailed={stats['api_blocked_or_failed']} "
+        + f"InvalidOrStale={stats['stale_or_invalid']} UpstoxFallback={stats['upstox_fallback_successes']}/{stats['upstox_fallback_attempts']}"
+    )
 
 
 if __name__ == "__main__":
