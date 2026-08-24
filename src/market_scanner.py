@@ -20,13 +20,7 @@ MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
 IST = ZoneInfo("Asia/Kolkata")
 CANDLE_INTERVAL_MINUTES = 5
-# A candle is considered usable only while it is both the latest closed bucket
-# and within this explicit age ceiling.  The bucket check alone is insufficient:
-# a delayed API/cache can otherwise make a many-minute-old candle appear fresh.
 MAX_CANDLE_AGE_SECONDS = FRESHNESS_MAX_AGE_MINUTES * 60
-
-# H1 confirmation needs EMA50 history. Five calendar days can be
-# insufficient at the start of a trading week.
 HISTORICAL_LOOKBACK_DAYS = 15
 _CANDLE_CACHE = {}
 _SCAN_STATS = {}
@@ -119,7 +113,6 @@ def _validate_candle_freshness(candles, symbol):
     timestamp = _parse_candle_timestamp(normalized[-1][0])
     now = datetime.now(IST)
     age_seconds = (now - timestamp).total_seconds()
-    # Never allow future timestamps or stale closed candles into scoring.
     if age_seconds < -60 or age_seconds > MAX_CANDLE_AGE_SECONDS:
         return None
     if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now):
@@ -159,10 +152,7 @@ def _scan_one(symbol, exchange, token):
             _SCAN_STATS["api_blocked_or_failed"] += 1
             return None, False
         candles = _normalize_closed_candles(response.get("data"), symbol)
-        if candles is None:
-            _SCAN_STATS["stale_or_invalid"] += 1
-            return None, False
-        if _validate_candle_freshness(candles, symbol) is None:
+        if candles is None or _validate_candle_freshness(candles, symbol) is None:
             _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
         bucket = _candle_bucket(candles)
@@ -184,10 +174,6 @@ def _scan_one(symbol, exchange, token):
         required = ("RSI", "EMA20", "EMA50", "close")
         if any(key not in df.columns for key in required) or any(last[key] != last[key] for key in required):
             return None, cache_hit
-        # This counter is intentionally incremented only after the same hard
-        # freshness validation that protects candidate selection. It proves
-        # that usable closed-candle data, rather than merely an API response,
-        # reached the indicator/decision engine.
         _SCAN_STATS["fresh_to_decision_engine"] += 1
         base_score = calculate_score(df)
         signal, trend = get_trade_decision(
@@ -233,15 +219,38 @@ def _scan_one(symbol, exchange, token):
 
 def scan_market():
     _reset_scan_stats()
-    results, refreshed, cached, failed = [], 0, 0, 0
+    results, refreshed, cached = [], 0, 0
+
+    # Do not walk every symbol when the shared provider cooldown/budget already
+    # says that no network request can succeed. This prevents a single blocked
+    # request from producing a burst of identical provider calls/logs. Cached
+    # candles remain usable only if they independently pass the same freshness
+    # gate, so this optimization cannot create stale-data trades.
+    try:
+        status = get_client().market_data_status()
+    except Exception:
+        status = None
+    if status and (status["cooldown_remaining"] > 0 or status["requests_remaining"] <= 0):
+        current_bucket = _closed_candle_bucket(datetime.now(IST))
+        cache_available = any(
+            entry.get("bucket") == current_bucket and _normalize_closed_candles(entry.get("candles"), symbol)
+            for symbol, entry in _CANDLE_CACHE.items()
+        )
+        if not cache_available:
+            _SCAN_STATS["api_blocked_or_failed"] = 1
+            print(
+                "MARKET DATA THROTTLED — scan deferred; "
+                f"cooldown={status['cooldown_remaining']:.1f}s "
+                f"budget_remaining={status['requests_remaining']}."
+            )
+            return []
+
     for symbol, (exchange, token) in SYMBOLS.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
             results.append(item)
             cached += int(cache_hit)
             refreshed += int(not cache_hit)
-        else:
-            failed += 1
     _SCAN_STATS["cache_hits"] = cached
     _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed)
     _SCAN_STATS["results"] = len(results)
