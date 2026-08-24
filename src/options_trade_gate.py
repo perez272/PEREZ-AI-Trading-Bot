@@ -6,6 +6,7 @@ from src.upgrade_config import OPTIONS_MIN_SCORE, MAX_SPREAD_PCT, MAX_SLIPPAGE_P
 STOP_LOSS_PCT = 2.0
 TARGETS = (5.0, 10.0, 15.0, 20.0)
 MIN_SCORE = OPTIONS_MIN_SCORE
+INDEX_OPTION_UNDERLYINGS = {"SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 
 
 @dataclass
@@ -79,6 +80,7 @@ def validate_trade(e: OptionEvidence) -> Dict:
     option_type = e.option_type.upper().strip()
     signal = e.underlying_signal.upper().strip()
     mtf = e.mtf_direction.upper().strip()
+    symbol = e.symbol.upper().strip()
 
     if not e.live_market_data:
         reasons.append("LIVE_OPTION_DATA_REQUIRED")
@@ -101,11 +103,13 @@ def validate_trade(e: OptionEvidence) -> Dict:
         reasons.append("OPTION_SIGNAL_MISMATCH")
     if mtf != expected_mtf:
         reasons.append("MTF_DIRECTION_MISMATCH")
-    if e.index_confirmation < 4:
+
+    # Index options require explicit index confirmation. Stock options already
+    # have underlying + MTF confirmation, so an index-only gate must not reject
+    # every otherwise valid equity option by requiring a zero-valued field.
+    if symbol in INDEX_OPTION_UNDERLYINGS and e.index_confirmation < 4:
         reasons.append("WEAK_INDEX_CONFIRMATION")
 
-    # Long options need live directional confirmation; a cheap or liquid option
-    # must not qualify while its own tape is weakening.
     if e.percent_change <= 0:
         reasons.append("NEGATIVE_OPTION_MOMENTUM")
     if e.avg_price <= 0 or e.ltp <= e.avg_price:
@@ -116,10 +120,6 @@ def validate_trade(e: OptionEvidence) -> Dict:
         reasons.append("NO_LIVE_OPTION_OI")
     if e.liquidity_score <= 0:
         reasons.append("NO_LIVE_OPTION_LIQUIDITY")
-
-    # Require independent option-direction evidence in addition to the
-    # underlying score. This prevents duplicated underlying signals from
-    # manufacturing an apparently strong option setup.
     if e.trend_score + e.momentum_score + e.vwap_score < 12:
         reasons.append("WEAK_OPTION_DIRECTIONAL_EVIDENCE")
 
@@ -145,11 +145,7 @@ def validate_trade(e: OptionEvidence) -> Dict:
 
 
 def rank_candidates(candidates):
-    return sorted(
-        [validate_trade(x) for x in candidates],
-        key=lambda x: (x["eligible"], x["score"]),
-        reverse=True,
-    )
+    return sorted([validate_trade(x) for x in candidates], key=lambda x: (x["eligible"], x["score"]), reverse=True)
 
 
 def print_candidate(r):
