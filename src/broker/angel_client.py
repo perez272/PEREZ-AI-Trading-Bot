@@ -12,19 +12,21 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 class AngelClient:
     # Deliberately conservative pacing for Angel One historical/market-data traffic.
-    # The scanner does not need to consume the provider's documented ceiling.
+    # The scanner spaces the ten-symbol universe across the minute instead of
+    # firing a burst at the provider.
     CANDLE_REQUEST_INTERVAL = 5.0
     MARKET_DATA_REQUEST_INTERVAL = 5.0
 
-    # One global rolling budget for all local processes using this client.
+    # Ten symbols are scanned. The rolling budget therefore permits one complete
+    # universe pass while still preventing an accidental request storm.
     MARKET_DATA_BUDGET_WINDOW = 60.0
-    MARKET_DATA_BUDGET_MAX_REQUESTS = 6
+    MARKET_DATA_BUDGET_MAX_REQUESTS = 10
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
 
-    # A provider rate-limit is treated as a circuit-breaker event.  Do not
-    # probe again every scan cycle; repeated probes can turn a transient block
-    # into a persistent one.  The state is shared across local processes.
+    # A provider rate-limit is treated as a circuit-breaker event. Do not probe
+    # again every scan cycle; repeated probes can turn a transient block into a
+    # persistent one. The state is shared across local processes.
     RATE_LIMIT_COOLDOWN = 300.0
 
     def __init__(self, smartapi, session_manager=None):
