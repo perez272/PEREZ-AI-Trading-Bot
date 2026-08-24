@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
-from src.ai_memory import learning_summary
+from src.ai_memory import memory_status
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
@@ -33,10 +33,7 @@ def send_status():
         raise RuntimeError("Telegram chat ID not found in .env")
     now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     hostname = socket.gethostname()
-    stats = learning_summary()["overall"]
-    n = int(stats["n"])
-    wins = int(stats["wins"])
-    win_rate = (wins / n * 100) if n else 0
+    memory = memory_status()
     message = (
         "🤖 PEREZ AI BOT STATUS\n\n"
         "🟢 Runtime: ONLINE\n"
@@ -46,10 +43,17 @@ def send_status():
         f"⏱️ Heartbeat: {now}\n"
         "🛡️ Trading engine: PROTECTED\n\n"
         "🧠 LEARNING MEMORY\n"
-        f"Completed paper trades: {n}\n"
-        f"Learned win rate: {win_rate:.0f}%\n"
-        f"Learned P/L: Rs {float(stats['pnl']):.2f}\n\n"
-        "💡 AI: learning from completed paper-trade outcomes; risk gates cannot be bypassed."
+        f"Completed paper trades: {memory['completed_trades']}\n"
+        f"Wins: {memory['wins']}\n"
+        f"Learned win rate: {memory['win_rate_pct']:.2f}%\n"
+        f"Learned P/L: Rs {memory['pnl']:.2f}\n"
+        f"Observations: {memory['observations']}\n"
+        f"Rejections: {memory['rejections']}\n"
+        f"Lessons/events: {memory['lessons']}\n"
+        f"Option surge events: {memory['surge_events']}\n"
+        f"Outcome learning: {memory['outcome_learning']}\n"
+        f"Pattern learning: {memory['pattern_learning']}\n\n"
+        "💡 AI: learning only from genuine persisted market evidence and closed paper trades; risk gates cannot be bypassed."
     )
     telegram("sendMessage", {"chat_id": CHAT_ID, "text": message})
 
