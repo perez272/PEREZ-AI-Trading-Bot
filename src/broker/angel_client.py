@@ -11,16 +11,13 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 
 class AngelClient:
-    # Deliberately conservative pacing for Angel One historical/market-data traffic.
-    # The scanner spaces the ten-symbol universe across the minute instead of
-    # firing a burst at the provider.
-    CANDLE_REQUEST_INTERVAL = 5.0
-    MARKET_DATA_REQUEST_INTERVAL = 5.0
-
-    # Ten symbols are scanned. The rolling budget therefore permits one complete
-    # universe pass while still preventing an accidental request storm.
+    # Conservative but useful pacing. Angel One documents historical candle
+    # access at up to 3 requests/sec and 150/min; we deliberately stay below
+    # that with one request/sec and a 60/min rolling budget.
+    CANDLE_REQUEST_INTERVAL = 1.0
+    MARKET_DATA_REQUEST_INTERVAL = 1.0
     MARKET_DATA_BUDGET_WINDOW = 60.0
-    MARKET_DATA_BUDGET_MAX_REQUESTS = 10
+    MARKET_DATA_BUDGET_MAX_REQUESTS = 60
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
 
@@ -77,7 +74,6 @@ class AngelClient:
             return max(0.0, state["cooldown_until"] - now)
 
     def market_data_status(self):
-        """Return shared pacing state without consuming request budget."""
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
@@ -96,9 +92,7 @@ class AngelClient:
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
-            state["cooldown_until"] = max(
-                state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
-            )
+            state["cooldown_until"] = max(state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN)
             self._write_shared_state(handle, state)
 
     def _is_invalid_token(self, response=None, error=None):
@@ -108,12 +102,7 @@ class AngelClient:
         if response is not None:
             text += " " + str(response)
         text = text.lower()
-        return (
-            "invalid token" in text
-            or "ag8001" in text
-            or "jwt" in text
-            or "token expired" in text
-        )
+        return "invalid token" in text or "ag8001" in text or "jwt" in text or "token expired" in text
 
     def _is_rate_limited(self, response=None, error=None):
         text = ""
@@ -122,13 +111,7 @@ class AngelClient:
         if response is not None:
             text += " " + str(response)
         text = text.lower()
-        return (
-            "access rate" in text
-            or "rate limit" in text
-            or "too many requests" in text
-            or "ab1021" in text
-            or "exceeding access rate" in text
-        )
+        return "access rate" in text or "rate limit" in text or "too many requests" in text or "ab1021" in text or "exceeding access rate" in text
 
     def refresh_session(self):
         if not self.session_manager:
@@ -143,7 +126,6 @@ class AngelClient:
             return False
 
     def _retry(self, func, *args, **kwargs):
-        """Call SmartAPI defensively without a rate-limit retry storm."""
         remaining = self._shared_cooldown_remaining()
         if remaining > 0:
             print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
@@ -156,7 +138,6 @@ class AngelClient:
                 if response is None:
                     print("[API] Empty response — skipping request.")
                     return None
-
                 if self._is_invalid_token(response=response):
                     if self.session_manager and not token_refresh_attempted:
                         token_refresh_attempted = True
@@ -167,15 +148,10 @@ class AngelClient:
                             continue
                     print("[AUTH] Invalid token and session refresh failed.")
                     return None
-
                 if self._is_rate_limited(response=response):
                     self._set_rate_limit_cooldown()
-                    print(
-                        "[API RATE LIMIT] Angel One rejected request. "
-                        f"Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
-                    )
+                    print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
-
                 return response
             except Exception as e:
                 if self._is_invalid_token(error=e):
@@ -188,24 +164,17 @@ class AngelClient:
                             continue
                     print("[AUTH] Could not refresh Angel One session.")
                     return None
-
                 if self._is_rate_limited(error=e):
                     self._set_rate_limit_cooldown()
-                    print(
-                        "[API RATE LIMIT] Angel One rejected request. "
-                        f"Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
-                    )
+                    print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
-
                 print(f"[API attempt {attempt + 1}/2] {e}")
                 if attempt == 0:
                     time.sleep(4)
-
         print("[API] Request failed after retries — skipping.")
         return None
 
     def _reserve_market_data_request(self, last_request_attr, interval):
-        """Wait for local pacing, then atomically reserve one global request."""
         while True:
             now = time.monotonic()
             last_request = getattr(self, last_request_attr)
@@ -218,30 +187,19 @@ class AngelClient:
                 state = self._read_shared_state(handle)
                 cooldown_remaining = max(0.0, state["cooldown_until"] - now)
                 if cooldown_remaining > 0:
-                    print(
-                        f"[API RATE LIMIT] Global cooldown active — "
-                        f"skipping request ({int(cooldown_remaining)}s remaining)."
-                    )
+                    print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(cooldown_remaining)}s remaining).")
                     self._write_shared_state(handle, state)
                     return False
-
                 cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
                 requests = [x for x in state["requests"] if x > cutoff]
                 state["requests"] = requests
-
                 if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
                     retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
-                    print(
-                        "[MARKET DATA BUDGET] Global request budget exhausted — "
-                        f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
-                        f"{self.MARKET_DATA_BUDGET_WINDOW:.0f}s; retry in ~{retry_in}s."
-                    )
+                    print(f"[MARKET DATA BUDGET] Global request budget exhausted — {len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS}; retry in ~{retry_in}s.")
                     self._write_shared_state(handle, state)
                     return False
-
                 state["requests"].append(now)
                 self._write_shared_state(handle, state)
-
             setattr(self, last_request_attr, now)
             return True
 
