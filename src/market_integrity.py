@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
+from src.market_data_validation import validate_against_upstox
+
 MAX_CANDLE_AGE_SECONDS = 420.0
 MAX_SCORE_JUMP = 30
 MIN_OPTION_LIQUIDITY = 1.0
@@ -39,6 +41,18 @@ def validate_candidate(candidate: Dict[str, Any], now: datetime | None = None) -
                 reasons.append("INVALID_VOLUME_RATIO")
         except (TypeError, ValueError):
             reasons.append("INVALID_VOLUME_RATIO")
+
+    # Optional independent Upstox validation. When explicitly enabled, a
+    # missing token, missing instrument mapping, stale response, or material
+    # disagreement is a hard no-trade condition. This prevents a single broker
+    # feed from becoming the sole source of truth.
+    if candidate and candidate.get("symbol") and candidate.get("close") is not None:
+        upstox_ok, details = validate_against_upstox(candidate["symbol"], float(candidate["close"]))
+        candidate["upstox_validation"] = details
+        candidate["upstox_data_valid"] = upstox_ok
+        if not upstox_ok:
+            reasons.append(f"UPSTOX_VALIDATION_{details.get('status', 'FAILED')}")
+
     return not reasons, reasons
 
 
