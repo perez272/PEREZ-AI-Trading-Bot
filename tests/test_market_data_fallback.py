@@ -58,6 +58,28 @@ def test_router_fail_closed_without_configured_upstox(monkeypatch):
 def test_upstox_provider_mapping_contains_core_universe():
     from src.alternative_market_data import DEFAULT_INSTRUMENT_KEYS
 
-    for symbol in ("NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"):
+    tier1 = (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "NIFTYNXT50",
+        "NIFTYFPI",
+    )
+
+    tier2 = (
+        "RELIANCE",
+        "TCS",
+        "INFY",
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "AXISBANK",
+    )
+
+    for symbol in tier1:
         assert symbol in DEFAULT_INSTRUMENT_KEYS
         assert "|" in DEFAULT_INSTRUMENT_KEYS[symbol]
+
+    for symbol in tier2:
+        assert symbol not in DEFAULT_INSTRUMENT_KEYS
