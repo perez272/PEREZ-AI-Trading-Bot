@@ -11,19 +11,21 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 
 class AngelClient:
-    # Conservative pacing for Angel One historical/market-data traffic.
-    CANDLE_REQUEST_INTERVAL = 3.0
-    MARKET_DATA_REQUEST_INTERVAL = 3.0
+    # Deliberately conservative pacing for Angel One historical/market-data traffic.
+    # The scanner does not need to consume the provider's documented ceiling.
+    CANDLE_REQUEST_INTERVAL = 5.0
+    MARKET_DATA_REQUEST_INTERVAL = 5.0
 
     # One global rolling budget for all local processes using this client.
     MARKET_DATA_BUDGET_WINDOW = 60.0
-    MARKET_DATA_BUDGET_MAX_REQUESTS = 12
+    MARKET_DATA_BUDGET_MAX_REQUESTS = 6
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
 
-    # Shared cooldown prevents any process from hammering Angel One after a
-    # rate-limit response from another process.
-    RATE_LIMIT_COOLDOWN = 90.0
+    # A provider rate-limit is treated as a circuit-breaker event.  Do not
+    # probe again every scan cycle; repeated probes can turn a transient block
+    # into a persistent one.  The state is shared across local processes.
+    RATE_LIMIT_COOLDOWN = 300.0
 
     def __init__(self, smartapi, session_manager=None):
         self.api = smartapi
@@ -168,7 +170,7 @@ class AngelClient:
                     self._set_rate_limit_cooldown()
                     print(
                         "[API RATE LIMIT] Angel One rejected request. "
-                        f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
+                        f"Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
                     )
                     return None
 
@@ -189,7 +191,7 @@ class AngelClient:
                     self._set_rate_limit_cooldown()
                     print(
                         "[API RATE LIMIT] Angel One rejected request. "
-                        f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
+                        f"Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
                     )
                     return None
 
@@ -201,12 +203,7 @@ class AngelClient:
         return None
 
     def _reserve_market_data_request(self, last_request_attr, interval):
-        """Atomically pace and reserve one global market-data request.
-
-        Cooldown, rolling-window pruning, budget check, reservation, and local
-        pacing are performed under one file lock so concurrent processes cannot
-        observe spare capacity and overshoot the global limit.
-        """
+        """Atomically pace and reserve one global market-data request."""
         now = time.monotonic()
         last_request = getattr(self, last_request_attr)
         local_remaining = interval - (now - last_request)
@@ -233,9 +230,7 @@ class AngelClient:
             state["requests"] = requests
 
             if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
-                retry_in = max(
-                    0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0]))
-                )
+                retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
                 print(
                     "[MARKET DATA BUDGET] Global request budget exhausted — "
                     f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
@@ -244,8 +239,6 @@ class AngelClient:
                 self._write_shared_state(handle, state)
                 return False
 
-            # Reserve capacity before touching Angel One. This is the single
-            # atomic operation shared by every local AngelClient process.
             state["requests"].append(now)
             self._write_shared_state(handle, state)
 
@@ -253,16 +246,12 @@ class AngelClient:
         return True
 
     def get_candles(self, params):
-        if not self._reserve_market_data_request(
-            "_last_candle_request", self.CANDLE_REQUEST_INTERVAL
-        ):
+        if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.getCandleData, params)
 
     def get_ltp(self, exchange, symbol, token):
-        if not self._reserve_market_data_request(
-            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
-        ):
+        if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.ltpData, exchange, symbol, token)
 
@@ -270,8 +259,6 @@ class AngelClient:
         return self._retry(self.api.rmsLimit)
 
     def get_market_data(self, mode, exchange_tokens):
-        if not self._reserve_market_data_request(
-            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
-        ):
+        if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.getMarketData, mode, exchange_tokens)
