@@ -42,16 +42,11 @@ jobs:
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           venv/bin/python -m pytest -q
 
-          # One production owner only. main.py owns scanning, paper execution,
-          # and the per-trade LTP monitor. Legacy market-open/bot/monitor units
-          # are retired so they cannot create duplicate processes or restart loops.
           for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
             sudo systemctl disable --now "$unit" 2>/dev/null || true
           done
           sudo rm -f /etc/systemd/system/perez-market-open.service /etc/systemd/system/perez-ai-bot.service /etc/systemd/system/perez-paper-monitor.service
 
-          # Install every PEREZ-owned systemd unit from the repository so EC2
-          # cannot drift into a configuration that is absent from source control.
           sudo install -m 0644 deploy/systemd/perez-ai.service /etc/systemd/system/perez-ai.service
           sudo install -m 0644 deploy/systemd/perez-ai-health.service /etc/systemd/system/perez-ai-health.service
           sudo install -m 0644 deploy/systemd/perez-ai-health.timer /etc/systemd/system/perez-ai-health.timer
@@ -59,10 +54,10 @@ jobs:
           sudo systemctl enable perez-ai.service
           sudo systemctl enable --now perez-ai-health.timer
           sudo systemctl restart perez-ai.service
+          sleep 2
 
-          # The health check is a deployment gate, not a best-effort side effect.
-          # Its success must be observable so deployment cannot report green while
-          # the health layer is broken or the heartbeat belongs to a dead process.
+          # Health is a hard deployment gate. It must succeed against the
+          # repository-installed watchdog and the currently running bot.
           sudo systemctl start perez-ai-health.service
 
           echo "DEPLOY_OK"
@@ -108,16 +103,30 @@ jobs:
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
           if test -f data/runtime/heartbeat.json; then
             python3 - <<'PY'
-          import json, time
+          import json, subprocess, time
           from pathlib import Path
           p = Path('data/runtime/heartbeat.json')
           data = json.loads(p.read_text())
           age = time.time() - float(data['epoch'])
-          print(f"HEARTBEAT_AGE_SECONDS={age:.1f}")
+          status = data.get('status')
+          heartbeat_pid = int(data['pid'])
+          main_pid = int(subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'perez-ai.service'], text=True).strip())
+          healthy_states = {
+              'starting', 'waiting_entry_window', 'capital_check', 'capital_error',
+              'blocked', 'scanning', 'scan_error', 'scanned', 'index_momentum_candidate',
+              'discovery_error', 'fundamental_reject', 'index_fundamental_bypass',
+              'creating_trade', 'monitoring', 'monitor_error', 'trade_complete',
+          }
+          print(f'HEARTBEAT_AGE_SECONDS={age:.1f}')
+          print(f'HEARTBEAT_STATUS={status!r}')
+          print(f'HEARTBEAT_PID={heartbeat_pid}')
+          print(f'MAIN_PID={main_pid}')
           if age > 120:
               raise SystemExit('STALE_HEARTBEAT')
-          if data.get('status') != 'running':
-              raise SystemExit(f"INVALID_HEARTBEAT_STATUS={data.get('status')!r}")
+          if status not in healthy_states:
+              raise SystemExit(f'INVALID_HEARTBEAT_STATUS={status!r}')
+          if heartbeat_pid != main_pid:
+              raise SystemExit(f'HEARTBEAT_PID_MISMATCH={heartbeat_pid}!={main_pid}')
           PY
           fi
           if journalctl --no-pager -u perez-ai.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
