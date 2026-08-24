@@ -2,8 +2,8 @@
 
 Adaptive statistical memory only: it never edits strategy code and cannot
 bypass risk/execution gates. Rejected candidates are remembered too, so the
-system learns when *not* to trade. Options surge observations are persisted
-for 5/10/15-minute event learning and expiry-aware pattern analysis.
+system learns when *not* to trade. Completed paper-trade outcomes are keyed by
+trade_id so one closed trade can never be learned twice.
 """
 import json
 import sqlite3
@@ -33,6 +33,7 @@ def _connect():
         CREATE TABLE IF NOT EXISTS outcomes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,
+            trade_id TEXT,
             symbol TEXT,
             signal TEXT,
             contract TEXT,
@@ -63,6 +64,11 @@ def _connect():
         );
         """
     )
+    # Safe migration for databases created before trade_id existed.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(outcomes)")}
+    if "trade_id" not in columns:
+        conn.execute("ALTER TABLE outcomes ADD COLUMN trade_id TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_outcomes_trade_id ON outcomes(trade_id) WHERE trade_id IS NOT NULL")
     return conn
 
 
@@ -101,21 +107,16 @@ def remember_observation(candidate, options_result=None, regime="unknown"):
     options_result = options_result or {}
     features = _rich_features(candidate, options_result)
     features["expiry"] = options_result.get("expiry", features.get("expiry"))
-    # The surge engine is deliberately observational only. It never creates
-    # orders and fails closed when live option data is unavailable.
     surge_events = []
-    expiry_learning = None
     try:
         from src.options_surge_engine import observe_option
         from src.expiry_learning_engine import learn_from_surge
         surge_events = observe_option(candidate, options_result, regime=regime)
         for event in surge_events:
-            learned = learn_from_surge(event)
-            event["expiry_learning"] = learned
+            event["expiry_learning"] = learn_from_surge(event)
         if surge_events:
-            expiry_learning = surge_events[-1].get("expiry_learning")
             options_result["surge_events"] = surge_events
-            options_result["expiry_learning"] = expiry_learning
+            options_result["expiry_learning"] = surge_events[-1].get("expiry_learning")
     except Exception as exc:
         features["surge_engine_error"] = repr(exc)
 
@@ -147,18 +148,38 @@ def remember_rejection(candidate, reason, options_result=None, regime="unknown")
 
 
 def remember_outcome(trade, result, regime="unknown"):
+    """Store exactly one completed paper-trade outcome.
+
+    A missing trade_id is rejected rather than silently creating an
+    uncorrelatable learning record. Duplicate delivery is treated as a
+    successful idempotent no-op.
+    """
+    trade_id = str(trade.get("trade_id") or "").strip()
+    if not trade_id:
+        raise ValueError("CLOSED_PAPER_TRADE_MISSING_TRADE_ID")
+    if not result or not result.get("closed"):
+        raise ValueError("OUTCOME_NOT_CLOSED")
+
     pnl = float(result.get("pnl", 0))
     pnl_pct = float(result.get("pnl_percent", 0))
     features = {
+        "trade_id": trade_id,
         "expiry": trade.get("expiry"), "strike": trade.get("strike"),
         "entry": trade.get("entry"), "quantity": trade.get("quantity"),
         "investment": trade.get("investment"), "ensemble_score": trade.get("ensemble_score"),
         "options_score": trade.get("options_score"), "ai_confidence": trade.get("ai_confidence"),
+        "market_data_source": trade.get("data_source"),
+        "exit": result.get("current"),
     }
     with _connect() as conn:
-        conn.execute(
-            "INSERT INTO outcomes VALUES (NULL,?,?,?,?,?,?,?,?,?)",
-            (_now(), trade.get("symbol"), trade.get("signal"), trade.get("contract"),
+        existing = conn.execute("SELECT id FROM outcomes WHERE trade_id = ?", (trade_id,)).fetchone()
+        if existing:
+            return {"stored": False, "duplicate": True, "trade_id": trade_id, "outcome_id": int(existing["id"])}
+        cursor = conn.execute(
+            """INSERT INTO outcomes
+               (ts,trade_id,symbol,signal,contract,score,regime,pnl,pnl_percent,exit_reason,features_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (_now(), trade_id, trade.get("symbol"), trade.get("signal"), trade.get("contract"),
              float(trade.get("score", 0)), regime, pnl, pnl_pct,
              result.get("exit_reason", "UNKNOWN"), json.dumps(features, default=str)),
         )
@@ -168,6 +189,7 @@ def remember_outcome(trade, result, regime="unknown"):
              "Completed paper trade outcome stored for adaptive confidence; no strategy code is auto-modified.",
              json.dumps({"trade": trade, "result": result}, default=str)),
         )
+        return {"stored": True, "duplicate": False, "trade_id": trade_id, "outcome_id": int(cursor.lastrowid)}
 
 
 def _stats(conn, where="", params=()):
@@ -188,8 +210,13 @@ def learning_summary(symbol=None, regime=None):
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         scoped = _stats(conn, where, tuple(params))
         overall = _stats(conn)
-        recent = conn.execute("SELECT symbol, signal, pnl, pnl_percent, exit_reason, regime, ts FROM outcomes ORDER BY id DESC LIMIT 8").fetchall()
-    return {"overall": overall, "scope": scoped, "recent": [dict(r) for r in recent]}
+        counts = {
+            "observations": int(conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]),
+            "rejections": int(conn.execute("SELECT COUNT(*) FROM rejections").fetchone()[0]),
+            "lessons": int(conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]),
+        }
+        recent = conn.execute("SELECT trade_id, symbol, signal, pnl, pnl_percent, exit_reason, regime, ts FROM outcomes ORDER BY id DESC LIMIT 8").fetchall()
+    return {"overall": overall, "scope": scoped, "counts": counts, "recent": [dict(r) for r in recent]}
 
 
 def learned_confidence(symbol=None, regime=None):
@@ -220,9 +247,21 @@ def ai_suggestion(symbol=None, score=0, signal="", regime=None):
 def memory_status():
     summary = learning_summary()
     n = int(summary["overall"]["n"])
+    counts = summary["counts"]
     try:
         from src.options_surge_engine import surge_summary
         surge_count = len(surge_summary(500))
     except Exception:
         surge_count = 0
-    return f"Memory: {n} completed paper trades | {surge_count} recent option-surge events | persistent SQLite learning"
+    return {
+        "completed_trades": n,
+        "wins": int(summary["overall"]["wins"]),
+        "win_rate_pct": round((summary["overall"]["wins"] / n * 100) if n else 0.0, 2),
+        "pnl": round(float(summary["overall"]["pnl"]), 2),
+        "observations": counts["observations"],
+        "rejections": counts["rejections"],
+        "lessons": counts["lessons"],
+        "surge_events": surge_count,
+        "outcome_learning": "ACTIVE" if n else "WAITING_FOR_FIRST_CLOSED_TRADE",
+        "pattern_learning": "ACTIVE" if counts["observations"] else "WAITING_FOR_OBSERVATIONS",
+    }
