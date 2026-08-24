@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -13,6 +15,7 @@ UPSTOX_BASE_URL = "https://api.upstox.com/v3"
 UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
+INSTRUMENT_FILE = Path("data/instruments.json")
 
 DEFAULT_INSTRUMENT_KEYS = {
     "SENSEX": "BSE_INDEX|SENSEX",
@@ -35,12 +38,31 @@ def _env_instrument_keys() -> dict[str, str]:
     if not raw:
         return {}
     try:
-        import json
         value = json.loads(raw)
         return {str(k).upper(): str(v) for k, v in value.items()}
     except (TypeError, ValueError, json.JSONDecodeError):
         print("[UPSTOX] Invalid UPSTOX_INSTRUMENT_KEYS_JSON; using built-in mappings.")
         return {}
+
+
+def _local_instrument_keys() -> dict[str, str]:
+    """Use the current Angel instrument master ISINs for Upstox equity keys."""
+    if not INSTRUMENT_FILE.exists():
+        return {}
+    try:
+        data = json.loads(INSTRUMENT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+    result = {}
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict) or str(item.get("exch_seg", "")).upper() != "NSE":
+            continue
+        if str(item.get("symbol", "")).strip().upper().endswith("-EQ"):
+            name = str(item.get("name", "")).strip().upper()
+            isin = str(item.get("isin", "")).strip().upper()
+            if name and isin.startswith("INE"):
+                result[name] = f"NSE_EQ|{isin}"
+    return result
 
 
 class UpstoxMarketData:
@@ -52,6 +74,7 @@ class UpstoxMarketData:
         self.access_token = (access_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
         self.enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.instrument_keys = dict(DEFAULT_INSTRUMENT_KEYS)
+        self.instrument_keys.update(_local_instrument_keys())
         self.instrument_keys.update(_env_instrument_keys())
         self._last_request = 0.0
         self._session = requests.Session()
