@@ -8,11 +8,8 @@ from src.trade_decision import get_trade_decision
 from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
-from src.upgrade_config import (
-    SYMBOLS,
-    PER_SYMBOL_DELAY_SECONDS,
-    FRESHNESS_MAX_AGE_MINUTES,
-)
+from src.market_data_router import MarketDataRouter
+from src.upgrade_config import SYMBOLS, PER_SYMBOL_DELAY_SECONDS, FRESHNESS_MAX_AGE_MINUTES
 from src.multi_timeframe import confirm as confirm_multi_timeframe
 from src.market_integrity import validate_candidate
 
@@ -26,21 +23,16 @@ _CANDLE_CACHE = {}
 _SCAN_STATS = {}
 _session = None
 _client = None
+_router = None
 
 
 def _reset_scan_stats():
     global _SCAN_STATS
     _SCAN_STATS = {
-        "symbols": len(SYMBOLS),
-        "api_attempts": 0,
-        "live_refreshes": 0,
-        "cache_hits": 0,
-        "fresh_candles": 0,
-        "fresh_to_decision_engine": 0,
-        "stale_or_invalid": 0,
-        "api_blocked_or_failed": 0,
-        "decision_evaluations": 0,
-        "results": 0,
+        "symbols": len(SYMBOLS), "api_attempts": 0, "live_refreshes": 0,
+        "cache_hits": 0, "fresh_candles": 0, "fresh_to_decision_engine": 0,
+        "stale_or_invalid": 0, "api_blocked_or_failed": 0, "decision_evaluations": 0,
+        "results": 0, "upstox_fallback_attempts": 0, "upstox_fallback_successes": 0,
     }
 
 
@@ -49,11 +41,17 @@ def get_scan_stats():
 
 
 def get_client():
-    global _session, _client
+    global _session, _client, _router
     if _client is None:
         _session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
         _client = AngelClient(_session.get_client(), session_manager=_session)
+        _router = MarketDataRouter(_client)
     return _client
+
+
+def _get_router():
+    get_client()
+    return _router
 
 
 def _parse_candle_timestamp(raw):
@@ -64,11 +62,7 @@ def _parse_candle_timestamp(raw):
 
 
 def _bucket_start(timestamp):
-    return timestamp.replace(
-        minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES,
-        second=0,
-        microsecond=0,
-    )
+    return timestamp.replace(minute=(timestamp.minute // CANDLE_INTERVAL_MINUTES) * CANDLE_INTERVAL_MINUTES, second=0, microsecond=0)
 
 
 def _closed_candle_bucket(now=None):
@@ -127,31 +121,37 @@ def _candle_bucket(candles):
         return None
 
 
+def _historical_params(exchange, token):
+    to_date = datetime.now(IST)
+    return {
+        "exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE",
+        "fromdate": (to_date - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M"),
+        "todate": to_date.strftime("%Y-%m-%d %H:%M"),
+    }
+
+
 def _scan_one(symbol, exchange, token):
     candles = None
+    source = "cache"
     entry = _CANDLE_CACHE.get(symbol)
     if entry and entry.get("bucket") == _closed_candle_bucket(datetime.now(IST)):
         candles = _normalize_closed_candles(entry.get("candles"), symbol)
     cache_hit = candles is not None
     if candles is None:
         _SCAN_STATS["api_attempts"] += 1
-        to_date = datetime.now(IST)
-        params = {
-            "exchange": exchange,
-            "symboltoken": token,
-            "interval": "FIVE_MINUTE",
-            "fromdate": (to_date - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M"),
-            "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-        }
         try:
-            response = get_client().get_candles(params)
-        except Exception:
+            candles, source = _get_router().get_candles(symbol, _historical_params(exchange, token), CANDLE_INTERVAL_MINUTES)
+        except Exception as exc:
+            _SCAN_STATS["api_blocked_or_failed"] += 1
+            print(f"[MARKET DATA] Provider routing failed for {symbol}: {exc}")
+            return None, False
+        if source == "upstox":
+            _SCAN_STATS["upstox_fallback_attempts"] += 1
+            _SCAN_STATS["upstox_fallback_successes"] += int(bool(candles))
+        if not candles:
             _SCAN_STATS["api_blocked_or_failed"] += 1
             return None, False
-        if not isinstance(response, dict) or not response.get("status"):
-            _SCAN_STATS["api_blocked_or_failed"] += 1
-            return None, False
-        candles = _normalize_closed_candles(response.get("data"), symbol)
+        candles = _normalize_closed_candles(candles, symbol)
         if candles is None or _validate_candle_freshness(candles, symbol) is None:
             _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
@@ -159,8 +159,10 @@ def _scan_one(symbol, exchange, token):
         if bucket is None:
             _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
-        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket}
+        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket, "source": source}
         _SCAN_STATS["live_refreshes"] += 1
+    else:
+        source = entry.get("source", "cache") if entry else "cache"
     freshness_age = _validate_candle_freshness(candles, symbol)
     if freshness_age is None or len(candles) < 30:
         _SCAN_STATS["stale_or_invalid"] += 1
@@ -176,34 +178,19 @@ def _scan_one(symbol, exchange, token):
             return None, cache_hit
         _SCAN_STATS["fresh_to_decision_engine"] += 1
         base_score = calculate_score(df)
-        signal, trend = get_trade_decision(
-            base_score,
-            float(last["RSI"]),
-            float(last["EMA20"]),
-            float(last["EMA50"]),
-            float(last["close"]),
-        )
+        signal, trend = get_trade_decision(base_score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
         _SCAN_STATS["decision_evaluations"] += 1
         mtf = confirm_multi_timeframe(candles)
         score = max(0, min(100, int(base_score) + int(mtf["quality"])))
         if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
             signal = "NO TRADE"
         candidate = {
-            "symbol": symbol,
-            "score": score,
-            "base_score": int(base_score),
-            "close": float(last["close"]),
-            "rsi": float(last["RSI"]),
-            "signal": signal,
-            "trend": trend,
-            "volume_ratio": float(last.get("volume_ratio", 0) or 0),
-            "candle_age_seconds": round(freshness_age, 1),
-            "candle_bucket": _candle_bucket(candles).isoformat(),
-            "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
-            "m15_trend": mtf["m15"],
-            "h1_trend": mtf["h1"],
-            "mtf_aligned": mtf["aligned"],
-            "data_source": "Angel One live closed 5-minute candles / local MTF resample",
+            "symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]),
+            "rsi": float(last["RSI"]), "signal": signal, "trend": trend,
+            "volume_ratio": float(last.get("volume_ratio", 0) or 0), "candle_age_seconds": round(freshness_age, 1),
+            "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
+            "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
+            "data_source": source,
         }
         ok, reasons = validate_candidate(candidate)
         candidate["market_integrity_ok"] = ok
@@ -213,59 +200,20 @@ def _scan_one(symbol, exchange, token):
         if PER_SYMBOL_DELAY_SECONDS:
             time.sleep(PER_SYMBOL_DELAY_SECONDS)
         return candidate, cache_hit
-    except Exception:
+    except Exception as exc:
+        print(f"[MARKET DATA] Decision pipeline failed for {symbol}: {exc}")
         return None, cache_hit
 
 
 def scan_market():
     _reset_scan_stats()
     results, refreshed, cached = [], 0, 0
-
-    # Never probe the provider when the shared circuit breaker/budget says the
-    # provider is unavailable. A valid fresh cache may still be evaluated, but
-    # cached data must pass exactly the same closed-candle freshness gate.
-    try:
-        client = get_client()
-        status = client.market_data_status()
-    except Exception:
-        client = None
-        status = None
-    if status and (status["cooldown_remaining"] > 0 or status["requests_remaining"] <= 0):
-        current_bucket = _closed_candle_bucket(datetime.now(IST))
-        cache_available = any(
-            entry.get("bucket") == current_bucket and _normalize_closed_candles(entry.get("candles"), symbol)
-            for symbol, entry in _CANDLE_CACHE.items()
-        )
-        if not cache_available:
-            _SCAN_STATS["api_blocked_or_failed"] = 1
-            print(
-                "MARKET DATA THROTTLED — scan deferred; "
-                f"cooldown={status['cooldown_remaining']:.1f}s "
-                f"budget_remaining={status['requests_remaining']}."
-            )
-            return []
-
     for symbol, (exchange, token) in SYMBOLS.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
             results.append(item)
             cached += int(cache_hit)
             refreshed += int(not cache_hit)
-        elif client is not None:
-            # A provider rate-limit response activates the shared circuit
-            # breaker. Abort the remainder of this scan immediately rather than
-            # issuing known-doomed requests for the other symbols. This is a
-            # pacing fix only; it cannot bypass or relax any trade gate.
-            try:
-                post_status = client.market_data_status()
-            except Exception:
-                post_status = None
-            if post_status and post_status["cooldown_remaining"] > 0:
-                print(
-                    "MARKET DATA CIRCUIT BREAKER — provider rate-limit detected; "
-                    "aborting remainder of scan."
-                )
-                break
     _SCAN_STATS["cache_hits"] = cached
     _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed)
     _SCAN_STATS["results"] = len(results)
@@ -284,35 +232,16 @@ def _candidate_is_fresh(candidate):
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [
-        x for x in results
-        if x["score"] >= minimum_score
-        and x["signal"] in ("BUY CE", "BUY PE")
-        and x.get("mtf_aligned") is True
-        and _candidate_is_fresh(x)
-    ]
+    eligible = [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True and _candidate_is_fresh(x)]
     return eligible[0] if eligible else None
 
 
 def print_results(results):
     print("\nAI Ranking")
     for item in results:
-        print(
-            f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} "
-            f"Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} "
-            f"Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} "
-            f"Integrity={item.get('market_integrity_ok')}"
-        )
+        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} Integrity={item.get('market_integrity_ok')} Source={item.get('data_source')}")
     stats = get_scan_stats()
-    print(
-        "MARKET DATA QUALITY: "
-        f"API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} "
-        f"Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} "
-        f"FreshToDecision={stats['fresh_to_decision_engine']} "
-        f"Decisions={stats['decision_evaluations']} "
-        f"BlockedOrFailed={stats['api_blocked_or_failed']} "
-        f"InvalidOrStale={stats['stale_or_invalid']}"
-    )
+    print("MARKET DATA QUALITY: " + f"API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} FreshToDecision={stats['fresh_to_decision_engine']} Decisions={stats['decision_evaluations']} BlockedOrFailed={stats['api_blocked_or_failed']} InvalidOrStale={stats['stale_or_invalid']} UpstoxFallback={stats['upstox_fallback_successes']}/{stats['upstox_fallback_attempts']}")
 
 
 if __name__ == "__main__":
