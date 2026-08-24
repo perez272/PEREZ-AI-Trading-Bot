@@ -59,7 +59,11 @@ jobs:
           sudo systemctl enable perez-ai.service
           sudo systemctl enable --now perez-ai-health.timer
           sudo systemctl restart perez-ai.service
-          sudo systemctl start perez-ai-health.service || true
+
+          # The health check is a deployment gate, not a best-effort side effect.
+          # Its success must be observable so deployment cannot report green while
+          # the health layer is broken or the heartbeat belongs to a dead process.
+          sudo systemctl start perez-ai-health.service
 
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
@@ -112,6 +116,8 @@ jobs:
           print(f"HEARTBEAT_AGE_SECONDS={age:.1f}")
           if age > 120:
               raise SystemExit('STALE_HEARTBEAT')
+          if data.get('status') != 'running':
+              raise SystemExit(f"INVALID_HEARTBEAT_STATUS={data.get('status')!r}")
           PY
           fi
           if journalctl --no-pager -u perez-ai.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
