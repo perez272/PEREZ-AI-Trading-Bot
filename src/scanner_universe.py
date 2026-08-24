@@ -1,55 +1,62 @@
-"""Build a rotating, optionable market universe without network calls.
+"""Hard allowlist for PEREZ AI's Tier-1 index F&O scanner.
 
-The live scanner keeps the major indices/core symbols on every pass and rotates
-through NSE F&O equities from the local Angel instrument master. Rotation keeps
-coverage broad while respecting broker pacing and the five-minute candle model.
+The scanner deliberately does NOT expand into individual equity F&O names.
+NIFTYNXT50 and NIFTYFPI tokens are resolved from the local instrument master
+when available so the policy remains symbol-based rather than token-fragile.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import json
+from pathlib import Path
 
-from src.optionable_universe import get_optionable_universe
-from src.upgrade_config import SYMBOLS, SCAN_BATCH_SIZE
+from src.upgrade_config import SYMBOLS, TIER1_INDEX_SYMBOLS
 
-IST = ZoneInfo("Asia/Kolkata")
+INSTRUMENT_FILE = Path("data/instruments.json")
+
+
+def _index_tokens_from_master() -> dict[str, tuple[str, str]]:
+    if not INSTRUMENT_FILE.exists():
+        return {}
+    try:
+        data = json.loads(INSTRUMENT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+    resolved: dict[str, tuple[str, str]] = {}
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        exchange = str(item.get("exch_seg", "")).upper().strip()
+        if exchange != "NSE":
+            continue
+        token = str(item.get("token", "")).strip()
+        symbol = str(item.get("symbol", "")).strip().upper()
+        name = str(item.get("name", "")).strip().upper()
+        for tier_symbol in TIER1_INDEX_SYMBOLS:
+            if tier_symbol in resolved:
+                continue
+            if symbol == tier_symbol or name == tier_symbol:
+                if token:
+                    resolved[tier_symbol] = ("NSE", token)
+    return resolved
 
 
 def build_scan_symbols() -> dict[str, tuple[str, str]]:
-    """Return the symbols for this scan cycle.
+    """Return ONLY the six configured Tier-1 index underlyings.
 
-    Core symbols are always scanned. F&O equities are added in deterministic
-    rotating batches so a broad universe is covered over the session instead of
-    permanently limiting discovery to a handful of names.
+    This is a hard scanner-level allowlist. The function never calls the
+    equity/F&O universe builder and never rotates through individual stocks.
     """
-    result = dict(SYMBOLS)
-    if SCAN_BATCH_SIZE <= len(result):
-        return result
+    resolved = _index_tokens_from_master()
+    result: dict[str, tuple[str, str]] = {}
 
-    universe = get_optionable_universe()
-    dynamic = []
-    for name, item in universe.items():
-        name = str(name).upper().strip()
-        if not name or name in result:
-            continue
-        token = str(item.get("token", "")).strip()
-        if token:
-            dynamic.append((name, ("NSE", token)))
-    dynamic.sort(key=lambda item: item[0])
+    for symbol in TIER1_INDEX_SYMBOLS:
+        configured = SYMBOLS.get(symbol)
+        if configured:
+            result[symbol] = configured
+        elif symbol in resolved:
+            result[symbol] = resolved[symbol]
 
-    slots = max(0, SCAN_BATCH_SIZE - len(result))
-    if not dynamic or slots == 0:
-        return result
-
-    # Rotate once per minute. Each batch is stable during its scan and changes
-    # on the next minute, giving broad coverage without random omissions.
-    minute_index = int(datetime.now(IST).timestamp() // 60)
-    batch_count = (len(dynamic) + slots - 1) // slots
-    start = (minute_index % batch_count) * slots
-    selected = dynamic[start:start + slots]
-    if len(selected) < slots:
-        selected += dynamic[:slots - len(selected)]
-
-    result.update(dict(selected))
+    # Prefer current instrument-master tokens when available for every index.
+    result.update({symbol: resolved[symbol] for symbol in TIER1_INDEX_SYMBOLS if symbol in resolved})
     return result
