@@ -6,23 +6,30 @@ RESCAN_DELAY_SECONDS = 60
 PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
-# Core symbols are always scanned. scanner_universe.py adds a rotating batch of
-# NSE F&O equities from the local instrument master for broad opportunity coverage.
+# HARD SCANNER POLICY: PEREZ AI scans index F&O only.
+# No individual equity/security is allowed into the market scanner universe.
+# NSE currently offers derivatives on these six major indices.
+TIER1_INDEX_SYMBOLS = (
+    "NIFTY",
+    "BANKNIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "NIFTYNXT50",
+    "NIFTYFPI",
+)
+
+# Stable Angel One index tokens. NIFTYNXT50 and NIFTYFPI are resolved from the
+# local instrument master so token changes cannot silently break the scanner.
 SYMBOLS = {
-    "SENSEX": ("BSE", "99919000"),
     "NIFTY": ("NSE", "99926000"),
     "BANKNIFTY": ("NSE", "99926009"),
     "FINNIFTY": ("NSE", "99926037"),
     "MIDCPNIFTY": ("NSE", "99926074"),
-    "RELIANCE": ("NSE", "2885"),
-    "TCS": ("NSE", "11536"),
-    "INFY": ("NSE", "1594"),
-    "HDFCBANK": ("NSE", "1333"),
-    "ICICIBANK": ("NSE", "4963"),
-    "SBIN": ("NSE", "3045"),
-    "AXISBANK": ("NSE", "5900"),
 }
-SCAN_BATCH_SIZE = 40
+
+# Backward-compatible setting only. scanner_universe enforces the Tier-1
+# allowlist and never expands into equity F&O securities.
+SCAN_BATCH_SIZE = len(TIER1_INDEX_SYMBOLS)
 
 MINIMUM_SCORE = 65
 MAX_TECHNICAL_BYPASS_SCORE = 80
