@@ -43,19 +43,17 @@ def test_closed_paper_trade_monitor_to_memory_end_to_end(tmp_path, monkeypatch):
     assert result["closed"] is True
     assert result["exit_reason"] == "TARGET2"
 
-    first = ai_memory.remember_outcome(trade, result, regime="TRENDING")
-    second = ai_memory.remember_outcome(trade, result, regime="TRENDING")
-
-    assert first["stored"] is True
-    assert first["duplicate"] is False
-    assert second["stored"] is False
-    assert second["duplicate"] is True
-
+    # The monitor itself must persist the outcome at the closure boundary.
     summary = ai_memory.learning_summary()
     assert summary["overall"]["n"] == 1
     assert summary["overall"]["wins"] == 1
     assert summary["overall"]["pnl"] == 1.0
     assert summary["recent"][0]["trade_id"] == trade["trade_id"]
+
+    # A higher-level reconciliation is safe and must not double-learn it.
+    first = ai_memory.remember_outcome(trade, result, regime="TRENDING")
+    assert first["stored"] is False
+    assert first["duplicate"] is True
 
 
 def test_outcome_without_trade_id_is_rejected(tmp_path):
