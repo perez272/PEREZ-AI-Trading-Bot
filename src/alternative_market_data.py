@@ -1,9 +1,4 @@
-"""Alternative market-data provider used when Angel One is unavailable.
-
-Upstox is an authenticated, broker-provided market-data source.  This module
-only supplies OHLCV candles; all freshness, integrity, indicator, and trade
-decision gates remain in the existing scanner.
-"""
+"""Alternative authenticated market-data provider used when Angel One is unavailable."""
 
 from __future__ import annotations
 
@@ -15,12 +10,10 @@ from urllib.parse import quote
 import requests
 
 UPSTOX_BASE_URL = "https://api.upstox.com/v3"
+UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
 
-# Upstox instrument keys use ISINs for equities and named index instruments.
-# The values can be overridden with UPSTOX_INSTRUMENT_KEYS_JSON if an account's
-# instrument master uses a different key.
 DEFAULT_INSTRUMENT_KEYS = {
     "SENSEX": "BSE_INDEX|SENSEX",
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -51,7 +44,7 @@ def _env_instrument_keys() -> dict[str, str]:
 
 
 class UpstoxMarketData:
-    """Small defensive wrapper around Upstox V3 intraday candle data."""
+    """Defensive wrapper around Upstox V3 candles and V2 option APIs."""
 
     provider_name = "upstox"
 
@@ -67,18 +60,35 @@ class UpstoxMarketData:
         return self.enabled and bool(self.access_token)
 
     def status(self) -> dict[str, Any]:
-        return {
-            "provider": self.provider_name,
-            "enabled": self.enabled,
-            "configured": bool(self.access_token),
-            "available": self.available(),
-        }
+        return {"provider": self.provider_name, "enabled": self.enabled, "configured": bool(self.access_token), "available": self.available()}
 
     def _pace(self) -> None:
         remaining = UPSTOX_REQUEST_INTERVAL_SECONDS - (time.monotonic() - self._last_request)
         if remaining > 0:
             time.sleep(remaining)
         self._last_request = time.monotonic()
+
+    def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not self.available():
+            return None
+        self._pace()
+        try:
+            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            print(f"[UPSTOX] request failed: {exc}")
+            return None
+        if response.status_code != 200:
+            print(f"[UPSTOX] HTTP {response.status_code}; provider unavailable for this request.")
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            print("[UPSTOX] invalid JSON response.")
+            return None
+        if str(payload.get("status", "")).lower() not in {"success", "ok"}:
+            print("[UPSTOX] unsuccessful response.")
+            return None
+        return payload
 
     def get_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
         if not self.available():
@@ -89,32 +99,64 @@ class UpstoxMarketData:
             return None
         if not 1 <= int(interval_minutes) <= 300:
             raise ValueError("interval_minutes must be between 1 and 300")
-
-        self._pace()
         encoded_key = quote(instrument_key, safe="")
-        url = f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/minutes/{int(interval_minutes)}"
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.access_token}",
-        }
-        try:
-            response = self._session.get(url, headers=headers, timeout=UPSTOX_TIMEOUT_SECONDS)
-        except requests.RequestException as exc:
-            print(f"[UPSTOX] request failed for {symbol}: {exc}")
-            return None
-        if response.status_code != 200:
-            print(f"[UPSTOX] HTTP {response.status_code} for {symbol}; fallback unavailable this cycle.")
-            return None
-        try:
-            payload = response.json()
-        except ValueError:
-            print(f"[UPSTOX] invalid JSON response for {symbol}.")
-            return None
-        if str(payload.get("status", "")).lower() not in {"success", "ok"}:
-            print(f"[UPSTOX] unsuccessful response for {symbol}.")
-            return None
-        candles = payload.get("data", {}).get("candles")
+        payload = self._get(f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/minutes/{int(interval_minutes)}")
+        candles = payload.get("data", {}).get("candles") if payload else None
         return candles if isinstance(candles, list) else None
+
+    def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
+        if not self.available():
+            return None
+        underlying_key = self.instrument_keys.get(symbol.upper())
+        if not underlying_key:
+            return None
+        payload = self._get(f"{UPSTOX_V2_BASE_URL}/option/chain", {"instrument_key": underlying_key, "expiry_date": expiry})
+        data = payload.get("data") if payload else None
+        return data if isinstance(data, list) else None
+
+    def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
+        chain = self.get_option_chain(symbol)
+        if not chain or option_type not in {"CE", "PE"}:
+            return None
+        candidates = []
+        for row in chain:
+            try:
+                strike = float(row.get("strike_price"))
+                option = row.get("call_options" if option_type == "CE" else "put_options") or {}
+                instrument_key = option.get("instrument_key")
+                market = option.get("market_data") or {}
+                ltp = float(market.get("ltp", 0) or 0)
+                bid = float(market.get("bid_price", 0) or 0)
+                ask = float(market.get("ask_price", 0) or 0)
+                volume = float(market.get("volume", 0) or 0)
+                oi = float(market.get("oi", 0) or 0)
+                if not instrument_key or ltp <= 0 or ltp > max_premium or strike <= 0:
+                    continue
+                spread_pct = ((ask - bid) / ltp * 100.0) if bid > 0 and ask >= bid else 999.0
+                if spread_pct > 5.0:
+                    continue
+                candidates.append((abs(strike - float(spot)), -volume, -oi, spread_pct, row, option, ltp))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[:4])
+        _, _, _, spread_pct, row, option, ltp = candidates[0]
+        return {
+            "status": "CONTRACT VALID",
+            "option_type": option_type,
+            "contract": option.get("trading_symbol") or row.get("trading_symbol", ""),
+            "exchange": "NFO" if str(option.get("instrument_key", "")).startswith("NSE_FO|") else "BFO",
+            "token": option.get("instrument_key", ""),
+            "expiry": row.get("expiry", ""),
+            "strike": float(row.get("strike_price")),
+            "lotsize": int(option.get("lot_size") or row.get("lot_size") or 0),
+            "ltp": ltp,
+            "spread_pct": round(spread_pct, 3),
+            "volume": float((option.get("market_data") or {}).get("volume", 0) or 0),
+            "oi": float((option.get("market_data") or {}).get("oi", 0) or 0),
+            "data_source": "upstox_option_chain",
+        }
 
 
 _upstox = UpstoxMarketData()
