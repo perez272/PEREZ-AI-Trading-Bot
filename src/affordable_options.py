@@ -5,6 +5,13 @@ from datetime import date, datetime
 from src.option_chain import load_instruments
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
+INDEX_OPTION_EXCHANGES = {
+    "SENSEX": "BFO",
+    "NIFTY": "NFO",
+    "BANKNIFTY": "NFO",
+    "FINNIFTY": "NFO",
+}
+
 
 def _parse_expiry(value):
     try:
@@ -15,10 +22,11 @@ def _parse_expiry(value):
 
 def _candidates(symbol: str, spot: float, option_type: str):
     rows = []
+    exchange = INDEX_OPTION_EXCHANGES.get(symbol.upper().strip(), "NFO")
     for item in load_instruments():
         if str(item.get("name", "")).upper().strip() != symbol.upper().strip():
             continue
-        if str(item.get("exch_seg", "")).upper().strip() != "NFO":
+        if str(item.get("exch_seg", "")).upper().strip() != exchange:
             continue
         if str(item.get("instrumenttype", "")).upper().strip() not in ("OPTSTK", "OPTIDX"):
             continue
@@ -36,7 +44,7 @@ def _candidates(symbol: str, spot: float, option_type: str):
         rows.append({
             "symbol": option_symbol,
             "token": str(item.get("token", "")),
-            "exchange": "NFO",
+            "exchange": exchange,
             "expiry": expiry_date.strftime("%d%b%Y").upper(),
             "expiry_date": expiry_date,
             "strike": strike,
@@ -58,7 +66,7 @@ def find_affordable_contract(
     """Find an affordable live-priced option using the nearest true expiry."""
     rows = _candidates(symbol, spot, option_type)
     if not rows:
-        return {"status": "NO CONTRACT", "reason": "No valid NFO contracts"}
+        return {"status": "NO CONTRACT", "reason": "No valid index/stock option contracts"}
 
     nearest_expiry = min(r["expiry_date"] for r in rows)
     rows = [r for r in rows if r["expiry_date"] == nearest_expiry]
@@ -68,7 +76,7 @@ def find_affordable_contract(
     quotes = {}
     if batch_ltp_getter is not None:
         try:
-            quotes = batch_ltp_getter("NFO", rows) or {}
+            quotes = batch_ltp_getter(rows[0]["exchange"], rows) or {}
         except Exception as exc:
             print(f"[OPTION BATCH] {type(exc).__name__}: {exc}")
 
