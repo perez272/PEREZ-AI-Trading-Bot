@@ -47,7 +47,7 @@ def wait_for_0915_ist():
     while True:
         now = datetime.now(IST)
         if _is_weekday(now) and MARKET_OPEN <= now.time() < MARKET_CLOSE:
-            print("09:15 IST reached — starting market-data initialization and live-data scan.")
+            print("09:15 IST reached — starting Tier-1 index market-data initialization.")
             return
         target = now.replace(hour=9, minute=15, second=0, microsecond=0)
         if not (_is_weekday(now) and now.time() < MARKET_OPEN):
@@ -142,7 +142,8 @@ def main():
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — BROAD SCANNER + MOMENTUM + CORE STRATEGIES")
+        print("PEREZ AI PAPER-TRADING BOT — TIER-1 INDEX F&O ONLY")
+        print("Scanner universe: NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | NIFTYNXT50 | NIFTYFPI")
         print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
         print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
@@ -177,7 +178,7 @@ def main():
                 results = scan_market()
             except Exception as exc:
                 write_heartbeat("scan_error", error=str(exc), capital=capital)
-                print(f"MARKET SCAN FAILED — skipping this cycle: {exc}")
+                print(f"TIER-1 MARKET SCAN FAILED — skipping this cycle: {exc}")
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
             print_results(results)
@@ -203,7 +204,7 @@ def main():
 
             queue = _candidate_queue(results, admitted)
             if not queue:
-                print("No qualifying candidate after market-data, MTF, score and freshness gates.")
+                print("No qualifying Tier-1 index candidate after market-data, MTF, score and freshness gates.")
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
 
@@ -216,7 +217,7 @@ def main():
                     print(f"FUNDAMENTAL GATE REJECTED {symbol}: {admission_reason}")
                     continue
 
-                print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {symbol} | Score {candidate.get('score', 0)}/100 | Momentum={candidate.get('momentum_score', 0)}")
+                print(f"HIGH-CONVICTION TIER-1 INDEX CANDIDATE: {symbol} | Score {candidate.get('score', 0)}/100 | Momentum={candidate.get('momentum_score', 0)}")
                 try:
                     contract_probe = resolve_option_contract(symbol, candidate["close"], candidate["signal"])
                 except Exception as exc:
@@ -284,7 +285,7 @@ def main():
                 break
 
             if not trade_opened:
-                print("All qualifying candidates were rejected by contract/options/capital gates — no trade.")
+                print("All qualifying Tier-1 index candidates were rejected by contract/options/capital gates — no trade.")
             time.sleep(RESCAN_DELAY_SECONDS)
     finally:
         write_heartbeat("stopped")
