@@ -185,14 +185,6 @@ class AngelClient:
         return None
 
     def _reserve_market_data_request(self, last_request_attr, interval):
-        """Atomically pace and reserve one global market-data request.
-
-        The old implementation checked the shared budget and then recorded
-        the request in two separate critical sections. Two processes could
-        therefore both observe spare capacity and overshoot the global limit.
-        This method performs cooldown, rolling-window pruning, budget check,
-        reservation, and local pacing under one file lock.
-        """
         now = time.monotonic()
         last_request = getattr(self, last_request_attr)
         local_remaining = interval - (now - last_request)
@@ -230,8 +222,6 @@ class AngelClient:
                 self._write_shared_state(handle, state)
                 return False
 
-            # Reserve capacity before touching Angel One. This is the single
-            # atomic operation shared by every local AngelClient process.
             state["requests"].append(now)
             self._write_shared_state(handle, state)
 
@@ -239,11 +229,28 @@ class AngelClient:
         return True
 
     def get_candles(self, params):
-        if not self._reserve_market_data_request(
+        """Angel One first; FYERS is a read-only fallback when Angel fails."""
+        if self._reserve_market_data_request(
             "_last_candle_request", self.CANDLE_REQUEST_INTERVAL
         ):
-            return None
-        return self._retry(self.api.getCandleData, params)
+            response = self._retry(self.api.getCandleData, params)
+            if response and isinstance(response, dict) and response.get("status"):
+                return response
+
+        # Never retry Angel after a block/rate-limit. Use the independent FYERS
+        # data path so a broker-data outage cannot silently become a trade.
+        try:
+            from src.fyers_market_data import get_candles as fyers_get_candles
+
+            exchange = params.get("exchange", "NSE")
+            token = str(params.get("symboltoken", ""))
+            symbol = params.get("symbol") or token
+            response = fyers_get_candles(symbol, exchange)
+            if response:
+                return response
+        except Exception as exc:
+            print(f"[FYERS FALLBACK] Router failure: {exc}")
+        return None
 
     def get_ltp(self, exchange, symbol, token):
         if not self._reserve_market_data_request(
