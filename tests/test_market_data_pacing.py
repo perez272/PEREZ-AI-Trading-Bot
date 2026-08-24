@@ -17,16 +17,24 @@ def test_market_data_request_is_paced(tmp_path):
     api = _FakeSmartApi()
     client = AngelClient(api)
     client.MARKET_DATA_BUDGET_FILE = str(tmp_path / "budget.json")
+    # Keep the unit test fast while verifying the same wait-before-request
+    # contract used by the production 5-second candle pacing interval.
+    client.CANDLE_REQUEST_INTERVAL = 0.02
 
+    started = time.monotonic()
     first = client.get_candles({"interval": "FIVE_MINUTE"})
+    first_finished = time.monotonic()
     second = client.get_candles({"interval": "FIVE_MINUTE"})
+    second_finished = time.monotonic()
 
     assert first == {"status": True, "data": []}
-    assert second is None
-    assert api.calls == 1
+    assert second == {"status": True, "data": []}
+    assert api.calls == 2
+    assert first_finished - started < 0.02
+    assert second_finished - first_finished >= 0.019
     status = client.market_data_status()
-    assert status["requests_in_window"] == 1
-    assert status["requests_remaining"] == client.MARKET_DATA_BUDGET_MAX_REQUESTS - 1
+    assert status["requests_in_window"] == 2
+    assert status["requests_remaining"] == client.MARKET_DATA_BUDGET_MAX_REQUESTS - 2
 
 
 def test_global_cooldown_blocks_without_touching_provider(tmp_path):
