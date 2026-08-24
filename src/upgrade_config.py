@@ -7,6 +7,7 @@ PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
 SYMBOLS = {
+    "SENSEX": ("BSE", "99919000"),
     "NIFTY": ("NSE", "99926000"),
     "BANKNIFTY": ("NSE", "99926009"),
     "FINNIFTY": ("NSE", "99926037"),
@@ -30,6 +31,11 @@ OPTION_MAX_PREMIUM = 100.0
 OPTIONS_MIN_SCORE = 60
 MAX_SPREAD_PCT = 1.50
 MAX_SLIPPAGE_PCT = 1.00
+
+# Dedicated index-momentum strategy gate. It is stricter than the base scanner
+# and remains paper-only until separately proven in real sessions.
+INDEX_MOMENTUM_ENABLED = True
+INDEX_MOMENTUM_MIN_SCORE = 72
 
 ENTRY_START = time(9, 30)
 LAST_ENTRY = time(14, 45)
