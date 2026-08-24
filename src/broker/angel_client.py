@@ -72,6 +72,22 @@ class AngelClient:
             state = self._read_shared_state(handle)
             return max(0.0, state["cooldown_until"] - now)
 
+    def market_data_status(self):
+        """Return shared pacing state without consuming request budget."""
+        now = time.monotonic()
+        with self._budget_file_lock() as handle:
+            state = self._read_shared_state(handle)
+            cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
+            requests = [x for x in state["requests"] if x > cutoff]
+            state["requests"] = requests
+            self._write_shared_state(handle, state)
+            cooldown_remaining = max(0.0, state["cooldown_until"] - now)
+            return {
+                "cooldown_remaining": cooldown_remaining,
+                "requests_in_window": len(requests),
+                "requests_remaining": max(0, self.MARKET_DATA_BUDGET_MAX_REQUESTS - len(requests)),
+            }
+
     def _set_rate_limit_cooldown(self):
         now = time.monotonic()
         with self._budget_file_lock() as handle:
@@ -124,9 +140,9 @@ class AngelClient:
 
     def _retry(self, func, *args, **kwargs):
         """Call SmartAPI defensively without a rate-limit retry storm."""
-        if self._shared_cooldown_remaining() > 0:
-            remaining = int(self._shared_cooldown_remaining())
-            print(f"[API RATE LIMIT] Global cooldown active — skipping request ({remaining}s remaining).")
+        remaining = self._shared_cooldown_remaining()
+        if remaining > 0:
+            print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
             return None
 
         token_refresh_attempted = False
@@ -187,11 +203,9 @@ class AngelClient:
     def _reserve_market_data_request(self, last_request_attr, interval):
         """Atomically pace and reserve one global market-data request.
 
-        The old implementation checked the shared budget and then recorded
-        the request in two separate critical sections. Two processes could
-        therefore both observe spare capacity and overshoot the global limit.
-        This method performs cooldown, rolling-window pruning, budget check,
-        reservation, and local pacing under one file lock.
+        Cooldown, rolling-window pruning, budget check, reservation, and local
+        pacing are performed under one file lock so concurrent processes cannot
+        observe spare capacity and overshoot the global limit.
         """
         now = time.monotonic()
         last_request = getattr(self, last_request_attr)
