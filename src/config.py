@@ -16,6 +16,13 @@ UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN", "")
 UPSTOX_INSTRUMENT_KEYS_JSON = os.getenv("UPSTOX_INSTRUMENT_KEYS_JSON", "{}")
 UPSTOX_MAX_PRICE_DEVIATION_PCT = os.getenv("UPSTOX_MAX_PRICE_DEVIATION_PCT", "0.35")
 
+# FYERS is data-only in PEREZ at this stage. No FYERS order API is imported.
+FYERS_ENABLED = os.getenv("FYERS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+FYERS_APP_ID = os.getenv("FYERS_APP_ID", "")
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "")
+FYERS_SYMBOLS_JSON = os.getenv("FYERS_SYMBOLS_JSON", "{}")
+FYERS_TIMEOUT_SECONDS = os.getenv("FYERS_TIMEOUT_SECONDS", "8")
+
 # Telegram settings are environment-only. Never commit bot tokens.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
