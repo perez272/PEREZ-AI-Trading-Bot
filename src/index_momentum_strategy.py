@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import time
 from typing import Any, Iterable
 
-INDEX_SYMBOLS = {"SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY"}
+# All index option underlyings currently covered by the scanner. Stock-option
+# strategies remain separate so the fast index strategy cannot accidentally
+# turn every equity signal into an option scalp.
+INDEX_SYMBOLS = {"SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 ENTRY_START = time(9, 30)
 LAST_ENTRY = time(14, 45)
 MIN_SCORE = 72
@@ -100,8 +103,6 @@ def build_dynamic_exits(entry: float, atr: float, option_ltp: float) -> dict[str
     entry = float(entry)
     atr = max(float(atr or 0), 0.0)
     option_ltp = max(float(option_ltp or entry), 0.01)
-    # If ATR is unavailable, use a conservative bounded default rather than
-    # inventing a volatility estimate from a stale/zero value.
     if atr <= 0:
         stop_pct, target1_pct, target2_pct = 0.10, 0.15, 0.30
     else:
