@@ -1,5 +1,6 @@
 from src.affordable_options import find_affordable_contract
 from src.live_option_price import get_option_ltp, get_option_ltp_batch
+from src.alternative_market_data import get_upstox_client
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
 STOP_LOSS_PCT = 0.02
@@ -9,35 +10,34 @@ MAX_CAPITAL_UTILIZATION = 0.90
 
 
 def resolve_option_contract(symbol, spot, signal):
-    """Resolve an affordable, live-priced NFO option without creating a trade."""
+    """Resolve an affordable, live-priced option with provider failover."""
     if signal not in ("BUY CE", "BUY PE"):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
 
     option_type = "CE" if signal == "BUY CE" else "PE"
     affordable = find_affordable_contract(
-        symbol,
-        spot,
-        option_type,
-        get_option_ltp,
-        OPTION_MAX_PREMIUM,
-        batch_ltp_getter=get_option_ltp_batch,
+        symbol, spot, option_type, get_option_ltp, OPTION_MAX_PREMIUM, batch_ltp_getter=get_option_ltp_batch
     )
-    if affordable.get("status") in ("NO CONTRACT", "NO AFFORDABLE OPTION"):
-        return affordable
+    if affordable.get("status") not in ("NO CONTRACT", "NO AFFORDABLE OPTION"):
+        return {
+            "status": "CONTRACT VALID", "option_type": option_type, "contract": affordable["symbol"],
+            "exchange": affordable["exchange"], "token": affordable["token"], "expiry": affordable["expiry"],
+            "strike": affordable["strike"], "lotsize": int(affordable["lotsize"]), "ltp": float(affordable["ltp"]),
+            "affordability_score": affordable["affordability_score"], "max_premium": OPTION_MAX_PREMIUM,
+            "data_source": "angel_one_option_chain",
+        }
 
-    return {
-        "status": "CONTRACT VALID",
-        "option_type": option_type,
-        "contract": affordable["symbol"],
-        "exchange": affordable["exchange"],
-        "token": affordable["token"],
-        "expiry": affordable["expiry"],
-        "strike": affordable["strike"],
-        "lotsize": int(affordable["lotsize"]),
-        "ltp": float(affordable["ltp"]),
-        "affordability_score": affordable["affordability_score"],
-        "max_premium": OPTION_MAX_PREMIUM,
-    }
+    # Angel One may be rate-limited while the underlying scanner is healthy via
+    # Upstox. Use the same premium cap and a live option-chain quote; never
+    # synthesize a contract or price. The downstream options gate still runs.
+    fallback = get_upstox_client().resolve_affordable_option(symbol, float(spot), option_type, OPTION_MAX_PREMIUM)
+    if fallback and fallback.get("status") == "CONTRACT VALID":
+        fallback["max_premium"] = OPTION_MAX_PREMIUM
+        fallback["affordability_score"] = 0
+        print(f"[TRADE ENGINE] Upstox option fallback selected {fallback['contract']} LTP=Rs {fallback['ltp']:.2f}")
+        return fallback
+
+    return affordable
 
 
 def create_trade(symbol, spot, signal, capital, resolved_contract=None):
@@ -48,12 +48,7 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
     """
     if capital is None or float(capital) <= 0:
         return {"status": "NO CAPITAL", "reason": "No valid live available capital"}
-
-    if resolved_contract is None:
-        resolved = resolve_option_contract(symbol, spot, signal)
-    else:
-        resolved = dict(resolved_contract)
-
+    resolved = resolve_option_contract(symbol, spot, signal) if resolved_contract is None else dict(resolved_contract)
     if resolved.get("status") != "CONTRACT VALID":
         return resolved
 
@@ -86,28 +81,12 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
     target2 = round(entry * (1 + TARGET2_PCT), 2)
 
     return {
-        "symbol": symbol,
-        "signal": signal,
-        "contract": resolved["contract"],
-        "exchange": resolved["exchange"],
-        "token": resolved["token"],
-        "expiry": resolved["expiry"],
-        "strike": resolved["strike"],
-        "entry": entry,
-        "quantity": quantity,
-        "original_quantity": quantity,
-        "remaining_quantity": quantity,
-        "lots": lots,
-        "investment": investment,
-        "capital_available": round(float(capital), 2),
-        "capital_utilization_pct": round(investment / float(capital) * 100.0, 2),
-        "initial_stop_loss": stop_loss,
-        "stop_loss": stop_loss,
-        "target1": target1,
-        "target2": target2,
-        "target": target2,
-        "partial_booked": False,
-        "realized_pnl": 0.0,
-        "status": "PAPER TRADE ACTIVE",
-        "live_orders": False,
+        "symbol": symbol, "signal": signal, "contract": resolved["contract"], "exchange": resolved["exchange"],
+        "token": resolved["token"], "expiry": resolved["expiry"], "strike": resolved["strike"], "entry": entry,
+        "quantity": quantity, "original_quantity": quantity, "remaining_quantity": quantity, "lots": lots,
+        "investment": investment, "capital_available": round(float(capital), 2),
+        "capital_utilization_pct": round(investment / float(capital) * 100.0, 2), "initial_stop_loss": stop_loss,
+        "stop_loss": stop_loss, "target1": target1, "target2": target2, "target": target2, "partial_booked": False,
+        "realized_pnl": 0.0, "status": "PAPER TRADE ACTIVE", "live_orders": False,
+        "data_source": resolved.get("data_source", "unknown"),
     }
