@@ -24,6 +24,10 @@ CANDLE_INTERVAL_MINUTES = 5
 # and within this explicit age ceiling.  The bucket check alone is insufficient:
 # a delayed API/cache can otherwise make a many-minute-old candle appear fresh.
 MAX_CANDLE_AGE_SECONDS = FRESHNESS_MAX_AGE_MINUTES * 60
+
+# H1 confirmation needs EMA50 history. Five calendar days can be
+# insufficient at the start of a trading week.
+HISTORICAL_LOOKBACK_DAYS = 15
 _CANDLE_CACHE = {}
 _session = None
 _client = None
@@ -121,7 +125,7 @@ def _scan_one(symbol, exchange, token):
             "exchange": exchange,
             "symboltoken": token,
             "interval": "FIVE_MINUTE",
-            "fromdate": (to_date - timedelta(days=5)).strftime("%Y-%m-%d %H:%M"),
+            "fromdate": (to_date - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M"),
             "todate": to_date.strftime("%Y-%m-%d %H:%M"),
         }
         try:
