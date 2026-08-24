@@ -12,7 +12,12 @@ from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover, CANDIDATE_FILE
-from src.upgrade_config import RESCAN_DELAY_SECONDS, MINIMUM_SCORE, MAX_TRADES_PER_DAY, OPTIONS_MIN_SCORE, OPTION_MAX_PREMIUM, ENTRY_START, LAST_ENTRY
+from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
+from src.upgrade_config import (
+    RESCAN_DELAY_SECONDS, MINIMUM_SCORE, MAX_TRADES_PER_DAY, OPTIONS_MIN_SCORE,
+    OPTION_MAX_PREMIUM, ENTRY_START, LAST_ENTRY, INDEX_MOMENTUM_ENABLED,
+    INDEX_MOMENTUM_MIN_SCORE,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN = dt_time(9, 15)
@@ -64,17 +69,57 @@ def _fundamental_admission(admitted, symbol):
     return (True, "FUNDAMENTALLY_ADMITTED") if symbol.upper().strip() in admitted_symbols else (False, "UNDERLYING_NOT_FUNDAMENTALLY_ADMITTED")
 
 
+def _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momentum_strategy=False):
+    if momentum_strategy:
+        # The live option adapter independently re-derives option-tape evidence;
+        # these fields only encode the underlying/index confirmation and are not
+        # allowed to manufacture an option signal.
+        trend_score = 15
+        momentum_score = 10
+        volume_score = 8 if candidate.get("volume_ratio", 0) >= 1.2 else 4
+        structure_score = 5 if candidate.get("momentum_score", 0) >= 80 else 3
+        index_confirmation = 8 if ((candidate["signal"] == "BUY CE" and mtf_direction == "BULLISH") or (candidate["signal"] == "BUY PE" and mtf_direction == "BEARISH")) else 0
+    else:
+        trend_score = momentum_score = volume_score = structure_score = index_confirmation = 0
+    return {
+        "symbol": candidate["symbol"],
+        "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
+        "expiry": contract_probe.get("expiry", ""),
+        "ltp": contract_probe.get("ltp", 0),
+        "exchange": contract_probe.get("exchange", "NFO"),
+        "token": contract_probe.get("token", ""),
+        "underlying_signal": candidate["signal"],
+        "mtf_direction": mtf_direction,
+        "trend_score": trend_score,
+        "momentum_score": momentum_score,
+        "volume_score": volume_score,
+        "vwap_score": 0,
+        "index_confirmation": index_confirmation,
+        "oi_score": 0,
+        "oi_change_score": 0,
+        "iv_score": 0,
+        "liquidity_score": 0,
+        "volatility_score": 0,
+        "structure_score": structure_score,
+        "news_confirmation": 0,
+        "event_risk_penalty": 0,
+        "spread_pct": 0,
+        "slippage_pct": 0,
+    }
+
+
 def main():
     lock = acquire_single_instance(); write_heartbeat("starting")
     try:
         wait_for_0915_ist()
         print("=" * 72)
-        print("PEREZ AI PAPER-TRADING BOT — DYNAMIC CAPITAL / AFFORDABLE OPTIONS")
+        print("PEREZ AI PAPER-TRADING BOT — INDEX MOMENTUM + CORE STRATEGIES")
         print(f"Execution mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
         print("Paper mode only — no real orders are placed." if PAPER_MODE else "LIVE mode — capital is tied to Angel One RMS.")
         print(f"Capital source: {'PAPER_CAPITAL virtual balance' if PAPER_MODE else 'Angel One RMS available cash'}")
         print(f"Preferred option premium: <= Rs {OPTION_MAX_PREMIUM:.2f}")
         print(f"Market score threshold: {MINIMUM_SCORE} | Options threshold: {OPTIONS_MIN_SCORE}")
+        print(f"Index momentum: {'ENABLED' if INDEX_MOMENTUM_ENABLED else 'DISABLED'} | minimum={INDEX_MOMENTUM_MIN_SCORE}")
         print(f"Entry window: {ENTRY_START.strftime('%H:%M')}-{LAST_ENTRY.strftime('%H:%M')} IST, weekdays only")
         print(f"Rescan interval: {RESCAN_DELAY_SECONDS}s")
         print("=" * 72)
@@ -97,9 +142,7 @@ def main():
             print_results(results)
             scan_stats = get_scan_stats()
             write_heartbeat(
-                "scanned",
-                candidates=len(results),
-                capital=capital,
+                "scanned", candidates=len(results), capital=capital,
                 market_data_api_attempts=scan_stats["api_attempts"],
                 market_data_live_refreshes=scan_stats["live_refreshes"],
                 market_data_cache_hits=scan_stats["cache_hits"],
@@ -110,20 +153,43 @@ def main():
                 market_data_invalid_or_stale=scan_stats["stale_or_invalid"],
             )
 
-            try: admitted, rejected = discover()
-            except Exception as exc:
-                write_heartbeat("discovery_error", error=str(exc), capital=capital); print(f"FUNDAMENTAL DISCOVERY FAILED — fail-closed: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
-            print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
+            # Fast index strategy is independent of the fundamental gate. It
+            # trades the underlying momentum, while retaining every market-data,
+            # option, capital and risk protection downstream.
+            candidate = None
+            momentum_strategy = False
+            if INDEX_MOMENTUM_ENABLED:
+                candidate = select_index_momentum_candidate(results, INDEX_MOMENTUM_MIN_SCORE)
+                if candidate:
+                    momentum_strategy = True
+                    write_heartbeat(
+                        "index_momentum_candidate",
+                        symbol=candidate["symbol"], signal=candidate["signal"],
+                        momentum_score=candidate["momentum_score"], reasons=candidate["momentum_reasons"],
+                    )
+                    print(
+                        f"INDEX MOMENTUM CANDIDATE: {candidate['symbol']} {candidate['signal']} "
+                        f"Momentum={candidate['momentum_score']}/100 | {', '.join(candidate['momentum_reasons'])}"
+                    )
 
-            candidate = select_best_candidate(results, MINIMUM_SCORE)
-            if not candidate:
-                print("No qualifying underlying market signal."); time.sleep(RESCAN_DELAY_SECONDS); continue
-            admitted_ok, admission_reason = _fundamental_admission(admitted, candidate["symbol"])
-            if not admitted_ok:
-                write_heartbeat("fundamental_reject", symbol=candidate["symbol"], reason=admission_reason)
-                print(f"FUNDAMENTAL GATE REJECTED {candidate['symbol']}: {admission_reason}"); time.sleep(RESCAN_DELAY_SECONDS); continue
+            if candidate is None:
+                try: admitted, rejected = discover()
+                except Exception as exc:
+                    write_heartbeat("discovery_error", error=str(exc), capital=capital); print(f"FUNDAMENTAL DISCOVERY FAILED — fail-closed: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
+                print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
+                candidate = select_best_candidate(results, MINIMUM_SCORE)
+                if not candidate:
+                    print("No qualifying underlying market signal."); time.sleep(RESCAN_DELAY_SECONDS); continue
+                admitted_ok, admission_reason = _fundamental_admission(admitted, candidate["symbol"])
+                if not admitted_ok:
+                    write_heartbeat("fundamental_reject", symbol=candidate["symbol"], reason=admission_reason)
+                    print(f"FUNDAMENTAL GATE REJECTED {candidate['symbol']}: {admission_reason}"); time.sleep(RESCAN_DELAY_SECONDS); continue
+            else:
+                # Explicitly record that the index strategy bypassed only the
+                # equity-fundamental admission layer; all execution/risk gates remain.
+                write_heartbeat("index_fundamental_bypass", symbol=candidate["symbol"], reason="INDEX_MOMENTUM_STRATEGY")
 
-            print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate['score']}/100")
+            print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate.get('score', 0)}/100")
             try: contract_probe = resolve_option_contract(candidate["symbol"], candidate["close"], candidate["signal"])
             except Exception as exc:
                 print(f"OPTION CONTRACT LOOKUP FAILED — skipping candidate: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
@@ -132,17 +198,7 @@ def main():
             print(f"AFFORDABLE OPTION: {contract_probe['contract']} Strike={contract_probe['strike']} LTP=Rs {contract_probe['ltp']:.2f} Expiry={contract_probe['expiry']} Lotsize={contract_probe['lotsize']}")
 
             mtf_direction = candidate.get("m15_trend") if candidate.get("m15_trend") == candidate.get("h1_trend") else "MIXED"
-            gate_candidate = {
-                "symbol": candidate["symbol"], "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
-                "expiry": contract_probe.get("expiry", ""), "ltp": contract_probe.get("ltp", 0),
-                "exchange": contract_probe.get("exchange", "NFO"), "token": contract_probe.get("token", ""),
-                "underlying_signal": candidate["signal"], "mtf_direction": mtf_direction,
-                "trend_score": 0, "momentum_score": 0, "volume_score": 0, "vwap_score": 0,
-                "index_confirmation": 8 if ((candidate["signal"] == "BUY CE" and mtf_direction == "BULLISH") or (candidate["signal"] == "BUY PE" and mtf_direction == "BEARISH")) else 0,
-                "oi_score": 0, "oi_change_score": 0, "iv_score": 0, "liquidity_score": 0,
-                "volatility_score": 0, "structure_score": 0, "news_confirmation": 0,
-                "event_risk_penalty": 0, "spread_pct": 0, "slippage_pct": 0,
-            }
+            gate_candidate = _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momentum_strategy)
             try: options_result = evaluate_option_candidate(gate_candidate)
             except Exception as exc:
                 print(f"OPTIONS GATE FAILED — skipping candidate: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
@@ -159,18 +215,35 @@ def main():
                 time.sleep(RESCAN_DELAY_SECONDS); continue
             contract_probe["ltp"] = live_ltp
 
-            write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital)
+            write_heartbeat("creating_trade", symbol=candidate["symbol"], capital=capital, strategy=candidate.get("strategy", "CORE"))
             try: trade = create_trade(candidate["symbol"], candidate["close"], candidate["signal"], capital, resolved_contract=contract_probe)
             except Exception as exc:
                 print(f"TRADE CREATION FAILED — no trade opened: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
             if trade.get("status") != "PAPER TRADE ACTIVE":
                 print("Trade was not created:", trade); time.sleep(RESCAN_DELAY_SECONDS); continue
-            trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": True, "underlying_score": candidate.get("score", 0), "option_live_ltp_at_gate": live_ltp, "mtf_direction": mtf_direction})
-            print(f"PAPER TRADE: {trade['contract']} | quantity={trade['quantity']} | investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%")
+
+            if momentum_strategy:
+                exits = build_dynamic_exits(candidate.get("close", 0), candidate.get("atr", 0), live_ltp)
+                trade.update({
+                    "initial_stop_loss": exits["stop_loss"], "stop_loss": exits["stop_loss"],
+                    "target1": exits["target1"], "target2": exits["target2"], "target": exits["target2"],
+                    "strategy": "INDEX_MOMENTUM_SCALP", "momentum_score": candidate.get("momentum_score", 0),
+                    "momentum_reasons": candidate.get("momentum_reasons", []),
+                })
+
+            trade.update({
+                "options_score": options_result.get("options_score", 0),
+                "fundamental_admitted": not momentum_strategy,
+                "underlying_score": candidate.get("score", 0),
+                "option_live_ltp_at_gate": live_ltp,
+                "mtf_direction": mtf_direction,
+            })
+            print(f"PAPER TRADE: {trade['contract']} | strategy={trade.get('strategy', 'CORE')} | quantity={trade['quantity']} | investment=Rs {trade['investment']:.2f} | capital utilization={trade['capital_utilization_pct']:.2f}%")
+            print(f"EXITS: SL={trade['stop_loss']:.2f} | T1={trade['target1']:.2f} | T2={trade['target2']:.2f}")
             try: send_entry_alert(trade)
             except Exception as exc: print(f"TELEGRAM ALERT FAILED — trade remains paper-managed: {exc}")
 
-            write_heartbeat("monitoring", symbol=trade.get("symbol"), contract=trade.get("contract"))
+            write_heartbeat("monitoring", symbol=trade.get("symbol"), contract=trade.get("contract"), strategy=trade.get("strategy", "CORE"))
             try: result = run_monitor(trade)
             except Exception as exc:
                 write_heartbeat("monitor_error", symbol=trade.get("symbol"), error=str(exc)); print(f"TRADE MONITOR FAILED — lifecycle unresolved; halting scanner: {exc}"); return
