@@ -18,18 +18,12 @@ UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECON
 INSTRUMENT_FILE = Path("data/instruments.json")
 
 DEFAULT_INSTRUMENT_KEYS = {
-    "SENSEX": "BSE_INDEX|SENSEX",
     "NIFTY": "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
     "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
     "MIDCPNIFTY": "NSE_INDEX|Nifty Midcap Select",
-    "RELIANCE": "NSE_EQ|INE002A01018",
-    "TCS": "NSE_EQ|INE467B01029",
-    "INFY": "NSE_EQ|INE009A01021",
-    "HDFCBANK": "NSE_EQ|INE040A01034",
-    "ICICIBANK": "NSE_EQ|INE090A01021",
-    "SBIN": "NSE_EQ|INE062A01020",
-    "AXISBANK": "NSE_EQ|INE238A01034",
+    "NIFTYNXT50": "NSE_INDEX|Nifty Next 50",
+    "NIFTYFPI": "NSE_INDEX|Nifty India FPI 150",
 }
 
 
@@ -46,7 +40,7 @@ def _env_instrument_keys() -> dict[str, str]:
 
 
 def _local_instrument_keys() -> dict[str, str]:
-    """Use the current Angel instrument master ISINs for Upstox equity keys."""
+    """Use current index mappings from the local instrument master when present."""
     if not INSTRUMENT_FILE.exists():
         return {}
     try:
@@ -54,14 +48,25 @@ def _local_instrument_keys() -> dict[str, str]:
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return {}
     result = {}
+    aliases = {
+        "NIFTY": {"NIFTY", "NIFTY 50"},
+        "BANKNIFTY": {"BANKNIFTY", "NIFTY BANK"},
+        "FINNIFTY": {"FINNIFTY", "NIFTY FIN SERVICE", "NIFTY FINANCIAL SERVICES"},
+        "MIDCPNIFTY": {"MIDCPNIFTY", "NIFTY MIDCAP SELECT"},
+        "NIFTYNXT50": {"NIFTYNXT50", "NIFTY NEXT 50"},
+        "NIFTYFPI": {"NIFTYFPI", "NIFTY INDIA FPI 150"},
+    }
     for item in data if isinstance(data, list) else []:
         if not isinstance(item, dict) or str(item.get("exch_seg", "")).upper() != "NSE":
             continue
-        if str(item.get("symbol", "")).strip().upper().endswith("-EQ"):
-            name = str(item.get("name", "")).strip().upper()
-            isin = str(item.get("isin", "")).strip().upper()
-            if name and isin.startswith("INE"):
-                result[name] = f"NSE_EQ|{isin}"
+        symbol = str(item.get("symbol", "")).strip().upper()
+        name = str(item.get("name", "")).strip().upper()
+        token = str(item.get("token", "")).strip()
+        if not token:
+            continue
+        for canonical, accepted in aliases.items():
+            if symbol in accepted or name in accepted:
+                result[canonical] = f"NSE_INDEX|{name or symbol}"
     return result
 
 
