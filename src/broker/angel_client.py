@@ -205,47 +205,45 @@ class AngelClient:
         return None
 
     def _reserve_market_data_request(self, last_request_attr, interval):
-        """Atomically pace and reserve one global market-data request."""
-        now = time.monotonic()
-        last_request = getattr(self, last_request_attr)
-        local_remaining = interval - (now - last_request)
-        if local_remaining > 0:
-            print(
-                f"[MARKET DATA PACE] Request skipped — "
-                f"{local_remaining:.1f}s until next permitted request."
-            )
-            return False
+        """Wait for local pacing, then atomically reserve one global request."""
+        while True:
+            now = time.monotonic()
+            last_request = getattr(self, last_request_attr)
+            local_remaining = interval - (now - last_request)
+            if local_remaining > 0:
+                time.sleep(local_remaining)
+                continue
 
-        with self._budget_file_lock() as handle:
-            state = self._read_shared_state(handle)
-            cooldown_remaining = max(0.0, state["cooldown_until"] - now)
-            if cooldown_remaining > 0:
-                print(
-                    f"[API RATE LIMIT] Global cooldown active — "
-                    f"skipping request ({int(cooldown_remaining)}s remaining)."
-                )
+            with self._budget_file_lock() as handle:
+                state = self._read_shared_state(handle)
+                cooldown_remaining = max(0.0, state["cooldown_until"] - now)
+                if cooldown_remaining > 0:
+                    print(
+                        f"[API RATE LIMIT] Global cooldown active — "
+                        f"skipping request ({int(cooldown_remaining)}s remaining)."
+                    )
+                    self._write_shared_state(handle, state)
+                    return False
+
+                cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
+                requests = [x for x in state["requests"] if x > cutoff]
+                state["requests"] = requests
+
+                if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
+                    retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
+                    print(
+                        "[MARKET DATA BUDGET] Global request budget exhausted — "
+                        f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
+                        f"{self.MARKET_DATA_BUDGET_WINDOW:.0f}s; retry in ~{retry_in}s."
+                    )
+                    self._write_shared_state(handle, state)
+                    return False
+
+                state["requests"].append(now)
                 self._write_shared_state(handle, state)
-                return False
 
-            cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
-            requests = [x for x in state["requests"] if x > cutoff]
-            state["requests"] = requests
-
-            if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
-                retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
-                print(
-                    "[MARKET DATA BUDGET] Global request budget exhausted — "
-                    f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
-                    f"{self.MARKET_DATA_BUDGET_WINDOW:.0f}s; retry in ~{retry_in}s."
-                )
-                self._write_shared_state(handle, state)
-                return False
-
-            state["requests"].append(now)
-            self._write_shared_state(handle, state)
-
-        setattr(self, last_request_attr, now)
-        return True
+            setattr(self, last_request_attr, now)
+            return True
 
     def get_candles(self, params):
         if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
