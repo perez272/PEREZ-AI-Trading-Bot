@@ -221,14 +221,14 @@ def scan_market():
     _reset_scan_stats()
     results, refreshed, cached = [], 0, 0
 
-    # Do not walk every symbol when the shared provider cooldown/budget already
-    # says that no network request can succeed. This prevents a single blocked
-    # request from producing a burst of identical provider calls/logs. Cached
-    # candles remain usable only if they independently pass the same freshness
-    # gate, so this optimization cannot create stale-data trades.
+    # Never probe the provider when the shared circuit breaker/budget says the
+    # provider is unavailable. A valid fresh cache may still be evaluated, but
+    # cached data must pass exactly the same closed-candle freshness gate.
     try:
-        status = get_client().market_data_status()
+        client = get_client()
+        status = client.market_data_status()
     except Exception:
+        client = None
         status = None
     if status and (status["cooldown_remaining"] > 0 or status["requests_remaining"] <= 0):
         current_bucket = _closed_candle_bucket(datetime.now(IST))
@@ -251,6 +251,21 @@ def scan_market():
             results.append(item)
             cached += int(cache_hit)
             refreshed += int(not cache_hit)
+        elif client is not None:
+            # A provider rate-limit response activates the shared circuit
+            # breaker. Abort the remainder of this scan immediately rather than
+            # issuing known-doomed requests for the other symbols. This is a
+            # pacing fix only; it cannot bypass or relax any trade gate.
+            try:
+                post_status = client.market_data_status()
+            except Exception:
+                post_status = None
+            if post_status and post_status["cooldown_remaining"] > 0:
+                print(
+                    "MARKET DATA CIRCUIT BREAKER — provider rate-limit detected; "
+                    "aborting remainder of scan."
+                )
+                break
     _SCAN_STATS["cache_hits"] = cached
     _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed)
     _SCAN_STATS["results"] = len(results)
