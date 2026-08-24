@@ -11,6 +11,7 @@ SYMBOLS = {
     "NIFTY": ("NSE", "99926000"),
     "BANKNIFTY": ("NSE", "99926009"),
     "FINNIFTY": ("NSE", "99926037"),
+    "MIDCPNIFTY": ("NSE", "99926074"),
     "RELIANCE": ("NSE", "2885"),
     "TCS": ("NSE", "11536"),
     "INFY": ("NSE", "1594"),
