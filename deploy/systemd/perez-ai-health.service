@@ -1,0 +1,15 @@
+[Unit]
+Description=PEREZ AI automatic health and repair engine
+After=perez-ai.service
+Wants=perez-ai.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.self_repair
+Environment=PYTHONUNBUFFERED=1
+Environment=PEREZ_BOT_ROOT=/home/ubuntu/PEREZ-AI-Trading-Bot
+Environment=PEREZ_MAIN_SERVICE=perez-ai.service
+Environment=PEREZ_HEALTH_MAX_HEARTBEAT_AGE=180
+Environment=PEREZ_HEALTH_ALLOW_RESTART=true
