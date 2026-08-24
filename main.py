@@ -71,9 +71,6 @@ def _fundamental_admission(admitted, symbol):
 
 def _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momentum_strategy=False):
     if momentum_strategy:
-        # The live option adapter independently re-derives option-tape evidence;
-        # these fields only encode the underlying/index confirmation and are not
-        # allowed to manufacture an option signal.
         trend_score = 15
         momentum_score = 10
         volume_score = 8 if candidate.get("volume_ratio", 0) >= 1.2 else 4
@@ -153,9 +150,6 @@ def main():
                 market_data_invalid_or_stale=scan_stats["stale_or_invalid"],
             )
 
-            # Fast index strategy is independent of the fundamental gate. It
-            # trades the underlying momentum, while retaining every market-data,
-            # option, capital and risk protection downstream.
             candidate = None
             momentum_strategy = False
             if INDEX_MOMENTUM_ENABLED:
@@ -185,8 +179,6 @@ def main():
                     write_heartbeat("fundamental_reject", symbol=candidate["symbol"], reason=admission_reason)
                     print(f"FUNDAMENTAL GATE REJECTED {candidate['symbol']}: {admission_reason}"); time.sleep(RESCAN_DELAY_SECONDS); continue
             else:
-                # Explicitly record that the index strategy bypassed only the
-                # equity-fundamental admission layer; all execution/risk gates remain.
                 write_heartbeat("index_fundamental_bypass", symbol=candidate["symbol"], reason="INDEX_MOMENTUM_STRATEGY")
 
             print(f"HIGH-CONVICTION UNDERLYING CANDIDATE: {candidate['symbol']} | Score {candidate.get('score', 0)}/100")
@@ -207,8 +199,6 @@ def main():
             if not options_result.get("paper_trade_candidate"):
                 print("Options gate rejected candidate:", gate.get("reasons", [])); time.sleep(RESCAN_DELAY_SECONDS); continue
 
-            # The gate uses a fresh FULL quote. Reuse that exact live price for
-            # sizing and re-check the premium cap before creating the paper trade.
             live_ltp = float(options_result.get("ltp", 0) or 0)
             if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
                 print(f"LIVE OPTION PRICE CHANGED — no trade: Rs {live_ltp:.2f} exceeds allowed premium or is invalid")
@@ -223,7 +213,7 @@ def main():
                 print("Trade was not created:", trade); time.sleep(RESCAN_DELAY_SECONDS); continue
 
             if momentum_strategy:
-                exits = build_dynamic_exits(candidate.get("close", 0), candidate.get("atr", 0), live_ltp)
+                exits = build_dynamic_exits(live_ltp, candidate.get("atr", 0), live_ltp)
                 trade.update({
                     "initial_stop_loss": exits["stop_loss"], "stop_loss": exits["stop_loss"],
                     "target1": exits["target1"], "target2": exits["target2"], "target": exits["target2"],
