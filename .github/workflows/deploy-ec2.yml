@@ -50,10 +50,16 @@ jobs:
           done
           sudo rm -f /etc/systemd/system/perez-market-open.service /etc/systemd/system/perez-ai-bot.service /etc/systemd/system/perez-paper-monitor.service
 
+          # Install every PEREZ-owned systemd unit from the repository so EC2
+          # cannot drift into a configuration that is absent from source control.
           sudo install -m 0644 deploy/systemd/perez-ai.service /etc/systemd/system/perez-ai.service
+          sudo install -m 0644 deploy/systemd/perez-ai-health.service /etc/systemd/system/perez-ai-health.service
+          sudo install -m 0644 deploy/systemd/perez-ai-health.timer /etc/systemd/system/perez-ai-health.timer
           sudo systemctl daemon-reload
           sudo systemctl enable perez-ai.service
+          sudo systemctl enable --now perez-ai-health.timer
           sudo systemctl restart perez-ai.service
+          sudo systemctl start perez-ai-health.service || true
 
           echo "DEPLOY_OK"
           echo "HOST=$(hostname)"
@@ -80,12 +86,16 @@ jobs:
           set -euo pipefail
           echo "--- PEREZ systemd services ---"
           systemctl list-units --all --type=service --no-legend 'perez*' || true
+          echo "--- PEREZ timers ---"
+          systemctl list-timers --all --no-legend 'perez*' || true
           echo "--- PEREZ processes ---"
           pgrep -af 'PEREZ-AI-Trading-Bot.*main.py|python.*main.py' || true
           echo "--- runtime heartbeat ---"
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
           if test -f data/runtime/heartbeat.json; then cat data/runtime/heartbeat.json; else echo "HEARTBEAT_NOT_YET_CREATED"; fi
-          echo "--- recent journal ---"
+          echo "--- health journal ---"
+          journalctl --no-pager -n 40 -u perez-ai-health.service 2>/dev/null || true
+          echo "--- recent main journal ---"
           journalctl --no-pager -n 80 -u perez-ai.service 2>/dev/null || true
 
       - name: Check freshness and runtime errors
@@ -116,6 +126,14 @@ jobs:
           done
           if ! systemctl is-active --quiet perez-ai.service; then
             echo "ERROR: perez-ai.service is not active"
+            exit 1
+          fi
+          if ! systemctl is-enabled --quiet perez-ai-health.timer; then
+            echo "ERROR: perez-ai-health.timer is not enabled"
+            exit 1
+          fi
+          if ! systemctl is-active --quiet perez-ai-health.timer; then
+            echo "ERROR: perez-ai-health.timer is not active"
             exit 1
           fi
           echo "RUNTIME_ERROR_CHECK_COMPLETE"
