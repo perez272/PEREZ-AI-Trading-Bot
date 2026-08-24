@@ -94,51 +94,134 @@ def validate_candle_sources(
     max_disagreement_pct: float = 0.50,
     required_sources: tuple[str, ...] = (),
 ) -> IntegrityResult:
-    """Validate that required sources agree on the same latest closed candle."""
+    """Validate required sources against the same latest closed candle.
+
+    Fail closed on invalid, missing, stale, forming, mismatched, or
+    disagreeing market data.
+    """
     if interval_seconds <= 0 or max_age_seconds < 0:
         return IntegrityResult(False, "INVALID_INTEGRITY_CONFIGURATION")
 
     now = now or datetime.now(timezone.utc)
     closed_bucket = _bucket(now, interval_seconds) - timedelta(seconds=interval_seconds)
+
     usable: list[tuple[str, float, datetime]] = []
+    invalid_sources: list[str] = []
+    stale_sources: list[str] = []
+    forming_sources: list[str] = []
+    wrong_bucket_sources: list[str] = []
 
     for name, payload in sources.items():
         if not payload or "price" not in payload or "timestamp" not in payload:
+            invalid_sources.append(name)
             continue
+
         try:
             price = float(payload["price"])
         except (TypeError, ValueError):
+            invalid_sources.append(name)
             continue
+
         if not isfinite(price) or price <= 0:
+            invalid_sources.append(name)
             continue
+
         ts = _timestamp(payload["timestamp"])
         if ts is None:
+            invalid_sources.append(name)
             continue
+
         age = (now - ts).total_seconds()
-        if age < 0 or age > max_age_seconds:
+
+        if age < 0:
+            forming_sources.append(name)
             continue
+
+        if age > max_age_seconds:
+            stale_sources.append(name)
+            continue
+
         if _bucket(ts, interval_seconds) != closed_bucket:
+            wrong_bucket_sources.append(name)
             continue
+
         usable.append((name, price, ts))
 
-    missing = [name for name in required_sources if not any(src == name for src, _, _ in usable)]
-    if missing:
-        return IntegrityResult(False, "REQUIRED_SOURCE_MISSING_OR_STALE", sources=tuple(src for src, _, _ in usable))
+    # If every supplied source is invalid, this is specifically invalid data,
+    # not merely a missing/stale source.
+    if not usable and invalid_sources and not (
+        stale_sources or forming_sources or wrong_bucket_sources
+    ):
+        return IntegrityResult(
+            False,
+            "NO_FRESH_VALID_SOURCE",
+            sources=(),
+        )
+
+    # A source exists but cannot provide the required current closed candle.
     if not usable:
+        if forming_sources:
+            return IntegrityResult(
+                False,
+                "FORMING_CANDLE",
+                sources=tuple(forming_sources),
+            )
+
+        if stale_sources or wrong_bucket_sources:
+            return IntegrityResult(
+                False,
+                "REQUIRED_SOURCE_MISSING_OR_STALE",
+                sources=tuple(stale_sources + wrong_bucket_sources),
+            )
+
         return IntegrityResult(False, "NO_FRESH_VALID_SOURCE")
+
+    usable_names = tuple(src for src, _, _ in usable)
+
+    missing = [
+        name
+        for name in required_sources
+        if name not in usable_names
+    ]
+
+    if missing:
+        return IntegrityResult(
+            False,
+            "REQUIRED_SOURCE_MISSING_OR_STALE",
+            sources=usable_names,
+        )
+
     if len(required_sources) >= 2 and len(usable) < 2:
-        return IntegrityResult(False, "INSUFFICIENT_CORROBORATION", sources=tuple(src for src, _, _ in usable))
+        return IntegrityResult(
+            False,
+            "INSUFFICIENT_CORROBORATION",
+            sources=usable_names,
+        )
 
     prices = [price for _, price, _ in usable]
+
     if len(prices) > 1:
         midpoint = sum(prices) / len(prices)
+        if midpoint <= 0:
+            return IntegrityResult(
+                False,
+                "NO_FRESH_VALID_SOURCE",
+                sources=usable_names,
+            )
+
         spread_pct = (max(prices) - min(prices)) / midpoint * 100
+
         if spread_pct > max_disagreement_pct:
-            return IntegrityResult(False, "SOURCE_DISAGREEMENT", sources=tuple(src for src, _, _ in usable))
+            return IntegrityResult(
+                False,
+                "SOURCE_DISAGREEMENT",
+                sources=usable_names,
+            )
 
     return IntegrityResult(
         True,
         "FRESH_AGREED_CLOSED_CANDLE",
         price=sum(prices) / len(prices),
-        sources=tuple(src for src, _, _ in usable),
+        sources=usable_names,
     )
+

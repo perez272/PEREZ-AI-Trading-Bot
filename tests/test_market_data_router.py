@@ -1,13 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.broker.angel_client import AngelClient
 import src.fyers_market_data as fyers_market_data
 
 NOW = datetime(2026, 8, 24, 10, 0, tzinfo=timezone.utc)
-CLOSED = "2026-08-24T09:55:00+00:00"
-FORMING = "2026-08-24T10:00:00+00:00"
-OLD = "2026-08-24T09:40:00+00:00"
-PRIOR = "2026-08-24T09:50:00+00:00"
+CLOSED = (NOW - timedelta(minutes=5)).isoformat()
+FORMING = NOW.isoformat()
+OLD = (NOW - timedelta(minutes=20)).isoformat()
+PRIOR = (NOW - timedelta(minutes=10)).isoformat()
 
 
 def candle(price, timestamp=CLOSED):
@@ -29,18 +29,51 @@ def make_client(angel_response):
     return client
 
 
+def latest_closed_timestamp():
+    now = datetime.now(timezone.utc)
+    bucket_minute = (now.minute // 5) * 5
+    bucket = now.replace(
+        minute=bucket_minute,
+        second=0,
+        microsecond=0,
+    )
+    return (bucket - timedelta(minutes=5)).isoformat()
+
+
 def test_router_accepts_only_corroborated_closed_candle(monkeypatch):
-    angel = {"status": True, "data": [candle(100.0)]}
-    fyers = {"status": True, "data": [candle(100.2)]}
-    monkeypatch.setattr(fyers_market_data, "get_candles", lambda symbol, exchange: fyers)
+    # Use the real clock, but construct the latest completed 5-minute
+    # candle deterministically. Keep the timestamp 1 second after the
+    # bucket start so it is safely inside the validator's age window.
+    now = datetime.now(timezone.utc)
+    current_bucket = now.replace(
+        minute=(now.minute // 5) * 5,
+        second=0,
+        microsecond=0,
+    )
+    # Timestamp must belong to the latest COMPLETED 5-minute candle,
+    # not the current/forming candle.
+    latest_closed_bucket = current_bucket - timedelta(minutes=5)
+    ts = (latest_closed_bucket + timedelta(seconds=1)).isoformat()
+
+    angel = {"status": True, "data": [candle(100.0, ts)]}
+    fyers = {"status": True, "data": [candle(100.2, ts)]}
+
+    monkeypatch.setattr(
+        fyers_market_data,
+        "get_candles",
+        lambda symbol, exchange: fyers,
+    )
+
     client = make_client(angel)
 
-    result = client.get_candles({"exchange": "NSE", "symbol": "NIFTY"})
+    result = client.get_candles(
+        {"exchange": "NSE", "symbol": "NIFTY"}
+    )
 
     assert result is not None
     assert result["data_source"] == "ANGEL+FYERS_CORROBORATED"
     assert result["integrity"]["ok"] is True
-
+    assert set(result["integrity"]["sources"]) == {"ANGEL", "FYERS"}
 
 def test_router_rejects_source_disagreement(monkeypatch):
     angel = {"status": True, "data": [candle(100.0)]}

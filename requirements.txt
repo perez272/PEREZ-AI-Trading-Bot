@@ -8,5 +8,5 @@ beautifulsoup4>=4.12,<5
 smartapi-python==1.5.5
 fyers-apiv3==3.1.16
 logzero>=1.7,<2
-websocket-client>=1.8,<2
 pytest>=9,<10
+websocket-client==1.6.1

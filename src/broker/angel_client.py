@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import os
 import time
@@ -9,8 +10,8 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
-from src.market_data_integrity import validate_candle_sources
 
+from src.market_data_integrity import validate_candle_sources
 
 class AngelClient:
     CANDLE_REQUEST_INTERVAL = 3.0
@@ -72,7 +73,9 @@ class AngelClient:
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
-            state["cooldown_until"] = max(state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN)
+            state["cooldown_until"] = max(
+                state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
+            )
             self._write_shared_state(handle, state)
 
     def _is_invalid_token(self, response=None, error=None):
@@ -82,7 +85,10 @@ class AngelClient:
         if response is not None:
             text += " " + str(response)
         text = text.lower()
-        return "invalid token" in text or "ag8001" in text or "jwt" in text or "token expired" in text
+        return (
+            "invalid token" in text or "ag8001" in text or "jwt" in text
+            or "token expired" in text
+        )
 
     def _is_rate_limited(self, response=None, error=None):
         text = ""
@@ -91,7 +97,11 @@ class AngelClient:
         if response is not None:
             text += " " + str(response)
         text = text.lower()
-        return "access rate" in text or "rate limit" in text or "too many requests" in text or "ab1021" in text or "exceeding access rate" in text
+        return (
+            "access rate" in text or "rate limit" in text
+            or "too many requests" in text or "ab1021" in text
+            or "exceeding access rate" in text
+        )
 
     def refresh_session(self):
         if not self.session_manager:
@@ -130,7 +140,10 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(response=response):
                     self._set_rate_limit_cooldown()
-                    print("[API RATE LIMIT] Angel One rejected request. Global market-data cooldown active for 90s.")
+                    print(
+                        "[API RATE LIMIT] Angel One rejected request. "
+                        f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
+                    )
                     return None
                 return response
             except Exception as e:
@@ -146,7 +159,10 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(error=e):
                     self._set_rate_limit_cooldown()
-                    print("[API RATE LIMIT] Angel One rejected request. Global market-data cooldown active for 90s.")
+                    print(
+                        "[API RATE LIMIT] Angel One rejected request. "
+                        f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
+                    )
                     return None
                 print(f"[API attempt {attempt + 1}/2] {e}")
                 if attempt == 0:
@@ -173,7 +189,11 @@ class AngelClient:
             state["requests"] = requests
             if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
                 retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
-                print(f"[MARKET DATA BUDGET] Global request budget exhausted — {len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in {self.MARKET_DATA_BUDGET_WINDOW:.0f}s; retry in ~{retry_in}s.")
+                print(
+                    "[MARKET DATA BUDGET] Global request budget exhausted — "
+                    f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
+                    f"{self.MARKET_DATA_BUDGET_WINDOW:.0f}s; retry in ~{retry_in}s."
+                )
                 self._write_shared_state(handle, state)
                 return False
             state["requests"].append(now)
@@ -197,51 +217,76 @@ class AngelClient:
             pass
         return ""
 
-    @staticmethod
-    def _latest_close(response):
-        if not isinstance(response, dict):
-            return None
-        rows = response.get("data")
-        if not isinstance(rows, list) or not rows:
-            return None
-        row = rows[-1]
-        if not isinstance(row, (list, tuple)) or len(row) < 5:
-            return None
-        try:
-            return {"price": float(row[4]), "timestamp": row[0]}
-        except (TypeError, ValueError):
-            return None
-
     def get_candles(self, params):
-        """Return candles only when Angel and FYERS corroborate the same closed candle."""
+        """Read Angel + FYERS candles and fail closed on integrity failure."""
         angel_response = None
         fyers_response = None
 
-        if self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
-            response = self._retry(self.api.getCandleData, params)
-            if response and isinstance(response, dict) and response.get("status"):
-                angel_response = response
+        if self._reserve_market_data_request(
+            "_last_candle_request", self.CANDLE_REQUEST_INTERVAL
+        ):
+            try:
+                response = self._retry(self.api.getCandleData, params)
+                if response and isinstance(response, dict) and response.get("status"):
+                    angel_response = response
+            except Exception as exc:
+                print(f"[ANGEL MARKET DATA] Request failed: {exc}")
 
         try:
             from src.fyers_market_data import get_candles as fyers_get_candles
+
             exchange = params.get("exchange", "NSE")
-            symbol = str(params.get("symbol", "")).strip() or self._symbol_from_token(params.get("symboltoken", ""))
+            symbol = (
+                str(params.get("symbol", "")).strip()
+                or self._symbol_from_token(params.get("symboltoken", ""))
+            )
+
             if symbol:
                 fyers_response = fyers_get_candles(symbol, exchange)
-            else:
-                print("[FYERS MARKET DATA] Cannot resolve symbol — SKIP")
+
         except Exception as exc:
             print(f"[FYERS MARKET DATA] Request failed: {exc}")
 
+        def latest_close(response):
+            if not isinstance(response, dict):
+                return None
+
+            rows = response.get("data")
+            if not isinstance(rows, list) or not rows:
+                return None
+
+            row = rows[-1]
+
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                return None
+
+            try:
+                return {
+                    "price": float(row[4]),
+                    "timestamp": row[0],
+                }
+            except (TypeError, ValueError):
+                return None
+
+        angel_quote = latest_close(angel_response)
+        fyers_quote = latest_close(fyers_response)
+
         integrity = validate_candle_sources(
-            {"ANGEL": self._latest_close(angel_response), "FYERS": self._latest_close(fyers_response)},
-            required_sources=("ANGEL", "FYERS"),
+            {
+                "ANGEL": angel_quote,
+                "FYERS": fyers_quote,
+            },
             interval_seconds=300,
             max_age_seconds=600.0,
             max_disagreement_pct=0.50,
+            required_sources=("ANGEL", "FYERS"),
         )
+
         if not integrity.ok:
-            print(f"[MARKET DATA INTEGRITY] FAIL-CLOSED — {integrity.reason} | sources={integrity.sources}")
+            print(
+                "[MARKET DATA INTEGRITY] FAIL-CLOSED — "
+                f"{integrity.reason} | sources={integrity.sources}"
+            )
             return None
 
         angel_response["data_source"] = "ANGEL+FYERS_CORROBORATED"
@@ -251,6 +296,7 @@ class AngelClient:
             "sources": integrity.sources,
             "reference_price": integrity.price,
         }
+
         return angel_response
 
     def get_ltp(self, exchange, symbol, token):
