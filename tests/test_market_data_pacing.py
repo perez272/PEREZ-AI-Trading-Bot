@@ -17,9 +17,10 @@ def test_market_data_request_is_paced(tmp_path):
     api = _FakeSmartApi()
     client = AngelClient(api)
     client.MARKET_DATA_BUDGET_FILE = str(tmp_path / "budget.json")
-    # Keep the unit test fast while verifying the same wait-before-request
-    # contract used by the production 5-second candle pacing interval.
-    client.CANDLE_REQUEST_INTERVAL = 0.02
+    # Use a deliberately larger interval so the assertion is not sensitive to
+    # sub-millisecond scheduler/timing jitter while still exercising the real
+    # wait-before-request pacing path.
+    client.CANDLE_REQUEST_INTERVAL = 0.05
 
     started = time.monotonic()
     first = client.get_candles({"interval": "FIVE_MINUTE"})
@@ -31,7 +32,7 @@ def test_market_data_request_is_paced(tmp_path):
     assert second == {"status": True, "data": []}
     assert api.calls == 2
     assert first_finished - started < 0.02
-    assert second_finished - first_finished >= 0.019
+    assert second_finished - first_finished >= 0.045
     status = client.market_data_status()
     assert status["requests_in_window"] == 2
     assert status["requests_remaining"] == client.MARKET_DATA_BUDGET_MAX_REQUESTS - 2
