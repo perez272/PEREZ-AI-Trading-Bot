@@ -20,12 +20,7 @@ class MarketDataRouter:
         self.angel_client = angel_client
         self.upstox = get_upstox_client()
         self.mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
-        self.stats = {
-            "angel_attempts": 0,
-            "angel_successes": 0,
-            "upstox_attempts": 0,
-            "upstox_successes": 0,
-        }
+        self.stats = {"angel_attempts": 0, "angel_successes": 0, "upstox_attempts": 0, "upstox_successes": 0}
 
     def _angel_allowed(self) -> bool:
         if self.mode == "upstox":
@@ -36,20 +31,14 @@ class MarketDataRouter:
             return True
         return status.get("cooldown_remaining", 0) <= 0 and status.get("requests_remaining", 1) > 0
 
-    def get_candles(self, symbol: str, exchange: str, token: str, interval: str = "FIVE_MINUTE") -> tuple[list[Any] | None, str]:
+    def get_candles(self, symbol: str, params: dict[str, Any], interval_minutes: int = 5) -> tuple[list[Any] | None, str]:
         if self.mode not in {"auto", "angel", "upstox"}:
             raise ValueError("MARKET_DATA_PROVIDER must be auto, angel, or upstox")
 
         if self._angel_allowed():
             self.stats["angel_attempts"] += 1
             try:
-                response = self.angel_client.get_candles({
-                    "exchange": exchange,
-                    "symboltoken": token,
-                    "interval": interval,
-                    "fromdate": "",
-                    "todate": "",
-                })
+                response = self.angel_client.get_candles(params)
             except Exception as exc:
                 print(f"[MARKET DATA] Angel One exception for {symbol}: {exc}")
                 response = None
@@ -62,7 +51,7 @@ class MarketDataRouter:
 
         if self.upstox.available():
             self.stats["upstox_attempts"] += 1
-            candles = self.upstox.get_candles(symbol, interval_minutes=5)
+            candles = self.upstox.get_candles(symbol, interval_minutes=interval_minutes)
             if candles:
                 self.stats["upstox_successes"] += 1
                 print(f"[MARKET DATA] Upstox fallback supplied {symbol} after Angel One unavailable.")
