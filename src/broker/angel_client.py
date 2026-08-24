@@ -11,18 +11,12 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 
 class AngelClient:
-    # Conservative pacing for Angel One historical/market-data traffic.
     CANDLE_REQUEST_INTERVAL = 3.0
     MARKET_DATA_REQUEST_INTERVAL = 3.0
-
-    # One global rolling budget for all local processes using this client.
     MARKET_DATA_BUDGET_WINDOW = 60.0
     MARKET_DATA_BUDGET_MAX_REQUESTS = 12
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
-
-    # Shared cooldown prevents any process from hammering Angel One after a
-    # rate-limit response from another process.
     RATE_LIMIT_COOLDOWN = 90.0
 
     def __init__(self, smartapi, session_manager=None):
@@ -89,9 +83,7 @@ class AngelClient:
             text += " " + str(response)
         text = text.lower()
         return (
-            "invalid token" in text
-            or "ag8001" in text
-            or "jwt" in text
+            "invalid token" in text or "ag8001" in text or "jwt" in text
             or "token expired" in text
         )
 
@@ -103,10 +95,8 @@ class AngelClient:
             text += " " + str(response)
         text = text.lower()
         return (
-            "access rate" in text
-            or "rate limit" in text
-            or "too many requests" in text
-            or "ab1021" in text
+            "access rate" in text or "rate limit" in text
+            or "too many requests" in text or "ab1021" in text
             or "exceeding access rate" in text
         )
 
@@ -123,7 +113,6 @@ class AngelClient:
             return False
 
     def _retry(self, func, *args, **kwargs):
-        """Call SmartAPI defensively without a rate-limit retry storm."""
         if self._shared_cooldown_remaining() > 0:
             remaining = int(self._shared_cooldown_remaining())
             print(f"[API RATE LIMIT] Global cooldown active — skipping request ({remaining}s remaining).")
@@ -136,7 +125,6 @@ class AngelClient:
                 if response is None:
                     print("[API] Empty response — skipping request.")
                     return None
-
                 if self._is_invalid_token(response=response):
                     if self.session_manager and not token_refresh_attempted:
                         token_refresh_attempted = True
@@ -147,7 +135,6 @@ class AngelClient:
                             continue
                     print("[AUTH] Invalid token and session refresh failed.")
                     return None
-
                 if self._is_rate_limited(response=response):
                     self._set_rate_limit_cooldown()
                     print(
@@ -155,7 +142,6 @@ class AngelClient:
                         f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
                     )
                     return None
-
                 return response
             except Exception as e:
                 if self._is_invalid_token(error=e):
@@ -168,7 +154,6 @@ class AngelClient:
                             continue
                     print("[AUTH] Could not refresh Angel One session.")
                     return None
-
                 if self._is_rate_limited(error=e):
                     self._set_rate_limit_cooldown()
                     print(
@@ -176,11 +161,9 @@ class AngelClient:
                         f"Global market-data cooldown active for {self.RATE_LIMIT_COOLDOWN:.0f}s."
                     )
                     return None
-
                 print(f"[API attempt {attempt + 1}/2] {e}")
                 if attempt == 0:
                     time.sleep(4)
-
         print("[API] Request failed after retries — skipping.")
         return None
 
@@ -189,31 +172,20 @@ class AngelClient:
         last_request = getattr(self, last_request_attr)
         local_remaining = interval - (now - last_request)
         if local_remaining > 0:
-            print(
-                f"[MARKET DATA PACE] Request skipped — "
-                f"{local_remaining:.1f}s until next permitted request."
-            )
+            print(f"[MARKET DATA PACE] Request skipped — {local_remaining:.1f}s until next permitted request.")
             return False
-
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
             cooldown_remaining = max(0.0, state["cooldown_until"] - now)
             if cooldown_remaining > 0:
-                print(
-                    f"[API RATE LIMIT] Global cooldown active — "
-                    f"skipping request ({int(cooldown_remaining)}s remaining)."
-                )
+                print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(cooldown_remaining)}s remaining).")
                 self._write_shared_state(handle, state)
                 return False
-
             cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
             requests = [x for x in state["requests"] if x > cutoff]
             state["requests"] = requests
-
             if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
-                retry_in = max(
-                    0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0]))
-                )
+                retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
                 print(
                     "[MARKET DATA BUDGET] Global request budget exhausted — "
                     f"{len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS} requests in "
@@ -221,30 +193,41 @@ class AngelClient:
                 )
                 self._write_shared_state(handle, state)
                 return False
-
             state["requests"].append(now)
             self._write_shared_state(handle, state)
-
         setattr(self, last_request_attr, now)
         return True
 
+    @staticmethod
+    def _symbol_from_token(token):
+        """Resolve an Angel instrument token to a symbol for FYERS fallback."""
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "data", "instruments.json")
+        path = os.path.abspath(path)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                instruments = json.load(handle)
+            target = str(token).strip()
+            for item in instruments:
+                if str(item.get("token", "")).strip() == target:
+                    return str(item.get("symbol") or item.get("name") or "").strip()
+        except Exception:
+            pass
+        return ""
+
     def get_candles(self, params):
-        """Angel One first; FYERS is a read-only fallback when Angel fails."""
-        if self._reserve_market_data_request(
-            "_last_candle_request", self.CANDLE_REQUEST_INTERVAL
-        ):
+        """Angel One first; FYERS is an independent read-only fallback."""
+        if self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
             response = self._retry(self.api.getCandleData, params)
             if response and isinstance(response, dict) and response.get("status"):
                 return response
 
-        # Never retry Angel after a block/rate-limit. Use the independent FYERS
-        # data path so a broker-data outage cannot silently become a trade.
         try:
             from src.fyers_market_data import get_candles as fyers_get_candles
-
             exchange = params.get("exchange", "NSE")
-            token = str(params.get("symboltoken", ""))
-            symbol = params.get("symbol") or token
+            symbol = str(params.get("symbol", "")).strip() or self._symbol_from_token(params.get("symboltoken", ""))
+            if not symbol:
+                print("[FYERS FALLBACK] Could not resolve symbol from Angel instrument token — SKIP.")
+                return None
             response = fyers_get_candles(symbol, exchange)
             if response:
                 return response
@@ -253,9 +236,7 @@ class AngelClient:
         return None
 
     def get_ltp(self, exchange, symbol, token):
-        if not self._reserve_market_data_request(
-            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
-        ):
+        if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.ltpData, exchange, symbol, token)
 
@@ -263,8 +244,6 @@ class AngelClient:
         return self._retry(self.api.rmsLimit)
 
     def get_market_data(self, mode, exchange_tokens):
-        if not self._reserve_market_data_request(
-            "_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL
-        ):
+        if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.getMarketData, mode, exchange_tokens)
