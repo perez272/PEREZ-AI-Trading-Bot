@@ -20,17 +20,32 @@ MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
 IST = ZoneInfo("Asia/Kolkata")
 CANDLE_INTERVAL_MINUTES = 5
-# A candle is considered usable only while it is both the latest closed bucket
-# and within this explicit age ceiling.  The bucket check alone is insufficient:
-# a delayed API/cache can otherwise make a many-minute-old candle appear fresh.
 MAX_CANDLE_AGE_SECONDS = FRESHNESS_MAX_AGE_MINUTES * 60
-
-# H1 confirmation needs EMA50 history. Five calendar days can be
-# insufficient at the start of a trading week.
 HISTORICAL_LOOKBACK_DAYS = 15
 _CANDLE_CACHE = {}
+_SCAN_STATS = {}
 _session = None
 _client = None
+
+
+def _reset_scan_stats():
+    global _SCAN_STATS
+    _SCAN_STATS = {
+        "symbols": len(SYMBOLS),
+        "api_attempts": 0,
+        "live_refreshes": 0,
+        "cache_hits": 0,
+        "fresh_candles": 0,
+        "fresh_to_decision_engine": 0,
+        "stale_or_invalid": 0,
+        "api_blocked_or_failed": 0,
+        "decision_evaluations": 0,
+        "results": 0,
+    }
+
+
+def get_scan_stats():
+    return dict(_SCAN_STATS)
 
 
 def get_client():
@@ -98,7 +113,6 @@ def _validate_candle_freshness(candles, symbol):
     timestamp = _parse_candle_timestamp(normalized[-1][0])
     now = datetime.now(IST)
     age_seconds = (now - timestamp).total_seconds()
-    # Never allow future timestamps or stale closed candles into scoring.
     if age_seconds < -60 or age_seconds > MAX_CANDLE_AGE_SECONDS:
         return None
     if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now):
@@ -120,6 +134,7 @@ def _scan_one(symbol, exchange, token):
         candles = _normalize_closed_candles(entry.get("candles"), symbol)
     cache_hit = candles is not None
     if candles is None:
+        _SCAN_STATS["api_attempts"] += 1
         to_date = datetime.now(IST)
         params = {
             "exchange": exchange,
@@ -131,21 +146,26 @@ def _scan_one(symbol, exchange, token):
         try:
             response = get_client().get_candles(params)
         except Exception:
+            _SCAN_STATS["api_blocked_or_failed"] += 1
             return None, False
         if not isinstance(response, dict) or not response.get("status"):
+            _SCAN_STATS["api_blocked_or_failed"] += 1
             return None, False
         candles = _normalize_closed_candles(response.get("data"), symbol)
-        if candles is None:
-            return None, False
-        if _validate_candle_freshness(candles, symbol) is None:
+        if candles is None or _validate_candle_freshness(candles, symbol) is None:
+            _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
         bucket = _candle_bucket(candles)
         if bucket is None:
+            _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
         _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket}
+        _SCAN_STATS["live_refreshes"] += 1
     freshness_age = _validate_candle_freshness(candles, symbol)
     if freshness_age is None or len(candles) < 30:
+        _SCAN_STATS["stale_or_invalid"] += 1
         return None, cache_hit
+    _SCAN_STATS["fresh_candles"] += 1
     try:
         df = calculate_indicators(candles)
         if df is None or df.empty or len(df) < 30:
@@ -154,6 +174,7 @@ def _scan_one(symbol, exchange, token):
         required = ("RSI", "EMA20", "EMA50", "close")
         if any(key not in df.columns for key in required) or any(last[key] != last[key] for key in required):
             return None, cache_hit
+        _SCAN_STATS["fresh_to_decision_engine"] += 1
         base_score = calculate_score(df)
         signal, trend = get_trade_decision(
             base_score,
@@ -162,6 +183,7 @@ def _scan_one(symbol, exchange, token):
             float(last["EMA50"]),
             float(last["close"]),
         )
+        _SCAN_STATS["decision_evaluations"] += 1
         mtf = confirm_multi_timeframe(candles)
         score = max(0, min(100, int(base_score) + int(mtf["quality"])))
         if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
@@ -196,15 +218,42 @@ def _scan_one(symbol, exchange, token):
 
 
 def scan_market():
-    results, refreshed, cached, failed = [], 0, 0, 0
+    _reset_scan_stats()
+    results, refreshed, cached = [], 0, 0
+
+    # Do not walk every symbol when the shared provider cooldown/budget already
+    # says that no network request can succeed. This prevents a single blocked
+    # request from producing a burst of identical provider calls/logs. Cached
+    # candles remain usable only if they independently pass the same freshness
+    # gate, so this optimization cannot create stale-data trades.
+    try:
+        status = get_client().market_data_status()
+    except Exception:
+        status = None
+    if status and (status["cooldown_remaining"] > 0 or status["requests_remaining"] <= 0):
+        current_bucket = _closed_candle_bucket(datetime.now(IST))
+        cache_available = any(
+            entry.get("bucket") == current_bucket and _normalize_closed_candles(entry.get("candles"), symbol)
+            for symbol, entry in _CANDLE_CACHE.items()
+        )
+        if not cache_available:
+            _SCAN_STATS["api_blocked_or_failed"] = 1
+            print(
+                "MARKET DATA THROTTLED — scan deferred; "
+                f"cooldown={status['cooldown_remaining']:.1f}s "
+                f"budget_remaining={status['requests_remaining']}."
+            )
+            return []
+
     for symbol, (exchange, token) in SYMBOLS.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
             results.append(item)
             cached += int(cache_hit)
             refreshed += int(not cache_hit)
-        else:
-            failed += 1
+    _SCAN_STATS["cache_hits"] = cached
+    _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed)
+    _SCAN_STATS["results"] = len(results)
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
@@ -239,6 +288,16 @@ def print_results(results):
             f"Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} "
             f"Integrity={item.get('market_integrity_ok')}"
         )
+    stats = get_scan_stats()
+    print(
+        "MARKET DATA QUALITY: "
+        f"API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} "
+        f"Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} "
+        f"FreshToDecision={stats['fresh_to_decision_engine']} "
+        f"Decisions={stats['decision_evaluations']} "
+        f"BlockedOrFailed={stats['api_blocked_or_failed']} "
+        f"InvalidOrStale={stats['stale_or_invalid']}"
+    )
 
 
 if __name__ == "__main__":

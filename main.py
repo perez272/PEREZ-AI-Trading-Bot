@@ -4,7 +4,7 @@ from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 from src.live_trade_monitor import run_monitor
-from src.market_scanner import print_results, scan_market, select_best_candidate, get_client
+from src.market_scanner import print_results, scan_market, select_best_candidate, get_client, get_scan_stats
 from src.production_guard import acquire_single_instance, release_single_instance, write_heartbeat
 from src.capital_manager import get_available_capital
 from src.risk_manager import can_open_new_trade
@@ -94,7 +94,21 @@ def main():
             try: results = scan_market()
             except Exception as exc:
                 write_heartbeat("scan_error", error=str(exc), capital=capital); print(f"MARKET SCAN FAILED — skipping this cycle: {exc}"); time.sleep(RESCAN_DELAY_SECONDS); continue
-            print_results(results); write_heartbeat("scanned", candidates=len(results), capital=capital)
+            print_results(results)
+            scan_stats = get_scan_stats()
+            write_heartbeat(
+                "scanned",
+                candidates=len(results),
+                capital=capital,
+                market_data_api_attempts=scan_stats["api_attempts"],
+                market_data_live_refreshes=scan_stats["live_refreshes"],
+                market_data_cache_hits=scan_stats["cache_hits"],
+                market_data_fresh_candles=scan_stats["fresh_candles"],
+                market_data_fresh_to_decision=scan_stats["fresh_to_decision_engine"],
+                decision_evaluations=scan_stats["decision_evaluations"],
+                market_data_blocked_or_failed=scan_stats["api_blocked_or_failed"],
+                market_data_invalid_or_stale=scan_stats["stale_or_invalid"],
+            )
 
             try: admitted, rejected = discover()
             except Exception as exc:
