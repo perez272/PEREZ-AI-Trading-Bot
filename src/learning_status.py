@@ -36,9 +36,6 @@ def record_cycle(*, observations: int = 0, rejections: int = 0, lessons_events: 
     data = _load()
     data["rejections"] = int(data.get("rejections", 0)) + max(0, int(rejections))
     data["lessons_events"] = int(data.get("lessons_events", 0)) + max(0, int(lessons_events))
-    if observations:
-        from datetime import datetime, timezone
-        data["last_observation"] = datetime.now(timezone.utc).isoformat()
     if events:
         data["last_events"] = events[-10:]
     _persist(data)
@@ -72,17 +69,21 @@ def get_learning_status() -> dict[str, Any]:
     data = _load()
     risk = daily_summary()
     wins, win_rate = _historical_trade_stats()
+    observations = int(observer_stats.get("observations", 0) or 0)
+    # A timestamp in learning_status.json is only bookkeeping. The authoritative
+    # observation count comes from the observer's persisted SQLite evidence.
+    last_observation = data.get("last_observation") if observations > 0 else None
     return {
         "completed_paper_trades": risk["closed_trades"],
         "wins": wins,
         "learned_win_rate": win_rate,
         "learned_pnl": risk["pnl"],
-        "observations": observer_stats.get("observations", 0),
+        "observations": observations,
         "rejections": int(data.get("rejections", 0)),
         "lessons_events": int(data.get("lessons_events", 0)),
         "option_surge_events": observer_stats.get("surge_events", 0),
         "outcome_learning": "READY" if risk["closed_trades"] else "WAITING_FOR_FIRST_CLOSED_TRADE",
-        "pattern_learning": "READY" if observer_stats.get("observations", 0) else "WAITING_FOR_OBSERVATIONS",
-        "last_observation": data.get("last_observation"),
+        "pattern_learning": "READY" if observations else "WAITING_FOR_OBSERVATIONS",
+        "last_observation": last_observation,
         "last_events": data.get("last_events", []),
     }
