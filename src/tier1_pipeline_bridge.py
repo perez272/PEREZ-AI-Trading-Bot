@@ -50,17 +50,11 @@ def _option_from_rich(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any],
         "live_market_data": True,
     }
     candidate = {
-        "symbol": row["symbol"],
-        "option_type": row["option_type"],
-        "contract": row["contract"],
-        "expiry": row["expiry"],
-        "strike": row["strike"],
-        "ltp": row["ltp"],
-        "spot_ltp": rich.get("spot_ltp"),
-        "futures_ltp": rich.get("futures_ltp"),
+        "symbol": row["symbol"], "option_type": row["option_type"], "contract": row["contract"],
+        "expiry": row["expiry"], "strike": row["strike"], "ltp": row["ltp"],
+        "spot_ltp": rich.get("spot_ltp"), "futures_ltp": rich.get("futures_ltp"),
         "distance_to_spot_pct": rich.get("distance_to_spot_pct"),
-        "minutes_to_expiry": rich.get("minutes_to_expiry"),
-        "expiry_bucket": rich.get("expiry_bucket"),
+        "minutes_to_expiry": rich.get("minutes_to_expiry"), "expiry_bucket": rich.get("expiry_bucket"),
         "live_market_data": True,
     }
     return candidate, market, rich
@@ -76,16 +70,13 @@ def _history(tier: sqlite3.Connection, row: sqlite3.Row) -> list[dict[str, Any]]
     for old in reversed(rows):
         rich = json.loads(old["features_json"] or "{}")
         greeks = {k: rich.get(k) for k in ("iv", "delta", "gamma", "theta", "vega", "rho") if rich.get(k) is not None}
-        result.append({
-            "instrument_key": old["instrument_key"],
-            "market_data": rich,
-            "option_greeks": greeks,
-        })
+        result.append({"instrument_key": old["instrument_key"], "market_data": rich, "option_greeks": greeks})
     return result
 
 
-def _ensure_pipeline_table(memory: sqlite3.Connection) -> None:
-    memory.execute(
+def _ensure_pipeline_table(tier: sqlite3.Connection) -> None:
+    """The processed marker belongs to the Tier-1 source database."""
+    tier.execute(
         """CREATE TABLE IF NOT EXISTS tier1_pipeline_processed (
             source_id INTEGER PRIMARY KEY,
             processed_ts TEXT NOT NULL,
@@ -97,11 +88,28 @@ def _ensure_pipeline_table(memory: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_memory_tables(memory: sqlite3.Connection) -> None:
+    """Create only the bridge-owned memory tables needed by isolated tests."""
+    memory.execute(
+        """CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, signal TEXT,
+            score REAL, options_score REAL, regime TEXT, features_json TEXT
+        )"""
+    )
+    memory.execute(
+        """CREATE TABLE IF NOT EXISTS lessons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, category TEXT,
+            lesson TEXT, evidence_json TEXT
+        )"""
+    )
+
+
 def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
     """Process every unprocessed raw Tier-1 snapshot exactly once."""
     processed = analyzed = early = surge = lessons = 0
     with _connect(TIER1_DB) as tier, _connect(MEMORY_DB) as memory:
-        _ensure_pipeline_table(memory)
+        _ensure_pipeline_table(tier)
+        _ensure_memory_tables(memory)
         rows = tier.execute(
             """SELECT r.* FROM raw_option_snapshots r
                LEFT JOIN tier1_pipeline_processed p ON p.source_id=r.id
@@ -141,7 +149,6 @@ def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
                      json.dumps(event, default=str)),
                 )
 
-            # Keep an auditable general observation in the same learning DB.
             features = dict(rich)
             features["pipeline_source_id"] = row["id"]
             features["analysis"] = {
@@ -158,23 +165,28 @@ def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
                  float(getattr(signal, "score", 0.0) if signal else 0.0),
                  "tier1_observation", json.dumps(features, default=str)),
             )
-            memory.execute(
-                "INSERT INTO tier1_pipeline_processed(source_id,processed_ts,analysis_score,early_signal,surge_events,expiry_learning_json) VALUES(?,?,?,?,?,?)",
+            tier.execute(
+                """INSERT INTO tier1_pipeline_processed
+                   (source_id,processed_ts,analysis_score,early_signal,surge_events,expiry_learning_json)
+                   VALUES(?,?,?,?,?,?)""",
                 (row["id"], datetime.now(timezone.utc).isoformat(),
                  float(getattr(signal, "precursor_score", 0.0) if signal else 0.0),
                  int(bool(signal and signal.early)), len(events), json.dumps(expiry_evidence, default=str)),
             )
             processed += 1
+        tier.commit()
         memory.commit()
+
     return {"captured": len(rows), "processed": processed, "analyzed": analyzed,
             "early_signals": early, "surge_events": surge, "lessons": lessons}
 
 
 def pipeline_status() -> dict[str, int]:
     with _connect(TIER1_DB) as tier, _connect(MEMORY_DB) as memory:
-        _ensure_pipeline_table(memory)
+        _ensure_pipeline_table(tier)
+        _ensure_memory_tables(memory)
         raw = tier.execute("SELECT COUNT(*) FROM raw_option_snapshots").fetchone()[0]
-        processed = memory.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0]
+        processed = tier.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0]
         snapshots = memory.execute("SELECT COUNT(*) FROM option_snapshots").fetchone()[0]
         surges = memory.execute("SELECT COUNT(*) FROM option_surge_events").fetchone()[0]
         observations = memory.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
