@@ -28,7 +28,8 @@ def test_does_not_signal_without_history():
 
 def test_wide_spread_is_penalized():
     history = [_snap(100), _snap(101), _snap(102)]
-    signal = detect_explosive_move("NIFTY", "CE", _snap(106, 3000, 5, 10), history)
+    # Use a spread that is unambiguously above the detector's 5% threshold.
+    signal = detect_explosive_move("NIFTY", "CE", _snap(106, 3000, 5, 11), history)
     assert signal is not None
     assert signal.spread_pct > 5
     assert "wide_spread_penalty" in signal.reasons
