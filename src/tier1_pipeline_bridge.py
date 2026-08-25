@@ -22,13 +22,17 @@ ROOT = Path(os.getenv("PEREZ_AI_ROOT", "/home/ubuntu/PEREZ-AI-Trading-Bot"))
 TIER1_DB = Path(os.getenv("TIER1_OPTION_MEMORY", str(ROOT / "data/memory/tier1_option_moves.sqlite3")))
 MEMORY_DB = Path(os.getenv("PEREZ_AI_MEMORY_DB", str(ROOT / "data/memory/perez_ai_memory.db")))
 BATCH_LIMIT = int(os.getenv("TIER1_PIPELINE_BATCH", "5000"))
+SQLITE_TIMEOUT_SECONDS = float(os.getenv("PEREZ_SQLITE_TIMEOUT", "15"))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("PEREZ_SQLITE_BUSY_TIMEOUT_MS", "15000"))
 
 
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -83,9 +87,13 @@ def _ensure_pipeline_table(tier: sqlite3.Connection) -> None:
             analysis_score REAL,
             early_signal INTEGER NOT NULL DEFAULT 0,
             surge_events INTEGER NOT NULL DEFAULT 0,
-            expiry_learning_json TEXT
+            expiry_learning_json TEXT,
+            processing_error TEXT
         )"""
     )
+    columns = {row[1] for row in tier.execute("PRAGMA table_info(tier1_pipeline_processed)").fetchall()}
+    if "processing_error" not in columns:
+        tier.execute("ALTER TABLE tier1_pipeline_processed ADD COLUMN processing_error TEXT")
 
 
 def _ensure_memory_tables(memory: sqlite3.Connection) -> None:
@@ -104,12 +112,49 @@ def _ensure_memory_tables(memory: sqlite3.Connection) -> None:
     )
 
 
-def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
-    """Process every unprocessed raw Tier-1 snapshot exactly once."""
-    processed = analyzed = early = surge = lessons = 0
-    with _connect(TIER1_DB) as tier, _connect(MEMORY_DB) as memory:
-        _ensure_pipeline_table(tier)
+def _record_observation(memory_db: Path, row: sqlite3.Row, rich: dict[str, Any], signal: Any, events: list[dict[str, Any]], error: str | None) -> None:
+    """Write memory data in a short transaction, never while Tier-1 is held."""
+    features = dict(rich)
+    features["pipeline_source_id"] = row["id"]
+    features["analysis"] = {
+        "precursor_score": getattr(signal, "precursor_score", 0.0) if signal else 0.0,
+        "early": bool(signal and signal.early),
+        "reasons": list(signal.reasons) if signal else [],
+        "surge_events": len(events),
+    }
+    if error:
+        features["pipeline_error"] = error
+    with _connect(memory_db) as memory:
         _ensure_memory_tables(memory)
+        memory.execute(
+            "INSERT INTO observations(ts,symbol,signal,score,options_score,regime,features_json) VALUES(?,?,?,?,?,?,?)",
+            (row["observed_ts"], row["symbol"],
+             "EARLY_EXPLOSIVE" if signal and signal.early else "OBSERVATION",
+             float(getattr(signal, "precursor_score", 0.0) if signal else 0.0),
+             float(getattr(signal, "score", 0.0) if signal else 0.0),
+             "tier1_observation", json.dumps(features, default=str)),
+        )
+        for event in events:
+            memory.execute(
+                "INSERT INTO lessons(ts,category,lesson,evidence_json) VALUES(?,?,?,?)",
+                (datetime.now(timezone.utc).isoformat(), "OPTIONS_SURGE",
+                 "Tier-1 surge captured with precursor and expiry context; retained for outcome learning.",
+                 json.dumps(event, default=str)),
+            )
+
+
+def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
+    """Process every unprocessed raw Tier-1 snapshot exactly once.
+
+    Transactions are deliberately short. In particular, the Tier-1 marker is
+    committed on the source DB even when the optional surge/memory path fails,
+    so a transient SQLite lock cannot make a raw observation permanently
+    invisible to the pipeline.
+    """
+    processed = analyzed = early = surge = lessons = 0
+    with _connect(TIER1_DB) as tier:
+        _ensure_pipeline_table(tier)
+        tier.commit()
         rows = tier.execute(
             """SELECT r.* FROM raw_option_snapshots r
                LEFT JOIN tier1_pipeline_processed p ON p.source_id=r.id
@@ -134,59 +179,54 @@ def process_new_observations(limit: int = BATCH_LIMIT) -> dict[str, int]:
                 rich["oi_change_pct"] = signal.oi_change_pct
                 rich["iv_change_pct"] = signal.iv_change_pct
 
-            events = observe_option(candidate, option, regime="tier1_observation")
-            surge += len(events)
-            expiry_evidence = []
-            for event in events:
-                evidence = learn_from_surge(event)
-                event["expiry_learning"] = evidence
-                expiry_evidence.append(evidence)
-                lessons += 1
-                memory.execute(
-                    "INSERT INTO lessons(ts,category,lesson,evidence_json) VALUES(?,?,?,?)",
-                    (datetime.now(timezone.utc).isoformat(), "OPTIONS_SURGE",
-                     "Tier-1 surge captured with precursor and expiry context; retained for outcome learning.",
-                     json.dumps(event, default=str)),
-                )
+            events: list[dict[str, Any]] = []
+            expiry_evidence: list[Any] = []
+            processing_error: str | None = None
+            try:
+                events = observe_option(candidate, option, regime="tier1_observation")
+                surge += len(events)
+                for event in events:
+                    evidence = learn_from_surge(event)
+                    event["expiry_learning"] = evidence
+                    expiry_evidence.append(evidence)
+                    lessons += 1
+            except Exception as exc:
+                # Do not let an optional memory/surge failure block the source marker.
+                processing_error = f"{type(exc).__name__}: {exc}"
 
-            features = dict(rich)
-            features["pipeline_source_id"] = row["id"]
-            features["analysis"] = {
-                "precursor_score": getattr(signal, "precursor_score", 0.0) if signal else 0.0,
-                "early": bool(signal and signal.early),
-                "reasons": list(signal.reasons) if signal else [],
-                "surge_events": len(events),
-            }
-            memory.execute(
-                "INSERT INTO observations(ts,symbol,signal,score,options_score,regime,features_json) VALUES(?,?,?,?,?,?,?)",
-                (row["observed_ts"], row["symbol"],
-                 "EARLY_EXPLOSIVE" if signal and signal.early else "OBSERVATION",
-                 float(getattr(signal, "precursor_score", 0.0) if signal else 0.0),
-                 float(getattr(signal, "score", 0.0) if signal else 0.0),
-                 "tier1_observation", json.dumps(features, default=str)),
-            )
+            try:
+                _record_observation(MEMORY_DB, row, rich, signal, events, processing_error)
+            except Exception as exc:
+                processing_error = (processing_error + " | " if processing_error else "") + f"memory:{type(exc).__name__}: {exc}"
+
+            # The marker is source-of-truth state. Commit it immediately so a
+            # failure in the richer path cannot leave this raw row permanently
+            # unmarked. Errors are retained for diagnosis.
             tier.execute(
                 """INSERT INTO tier1_pipeline_processed
-                   (source_id,processed_ts,analysis_score,early_signal,surge_events,expiry_learning_json)
-                   VALUES(?,?,?,?,?,?)""",
+                   (source_id,processed_ts,analysis_score,early_signal,surge_events,expiry_learning_json,processing_error)
+                   VALUES(?,?,?,?,?,?,?)""",
                 (row["id"], datetime.now(timezone.utc).isoformat(),
                  float(getattr(signal, "precursor_score", 0.0) if signal else 0.0),
-                 int(bool(signal and signal.early)), len(events), json.dumps(expiry_evidence, default=str)),
+                 int(bool(signal and signal.early)), len(events),
+                 json.dumps(expiry_evidence, default=str), processing_error),
             )
+            tier.commit()
             processed += 1
-        tier.commit()
-        memory.commit()
 
     return {"captured": len(rows), "processed": processed, "analyzed": analyzed,
             "early_signals": early, "surge_events": surge, "lessons": lessons}
 
 
 def pipeline_status() -> dict[str, int]:
-    with _connect(TIER1_DB) as tier, _connect(MEMORY_DB) as memory:
+    with _connect(TIER1_DB) as tier:
         _ensure_pipeline_table(tier)
-        _ensure_memory_tables(memory)
+        tier.commit()
         raw = tier.execute("SELECT COUNT(*) FROM raw_option_snapshots").fetchone()[0]
         processed = tier.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0]
+    with _connect(MEMORY_DB) as memory:
+        _ensure_memory_tables(memory)
+        memory.commit()
         snapshots = memory.execute("SELECT COUNT(*) FROM option_snapshots").fetchone()[0]
         surges = memory.execute("SELECT COUNT(*) FROM option_surge_events").fetchone()[0]
         observations = memory.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
