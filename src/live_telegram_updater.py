@@ -79,6 +79,14 @@ def _read_heartbeat():
     return {}
 
 
+def _provider_telemetry():
+    """Expose configured provider state only; never performs a market-data request."""
+    mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
+    upstox_enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    upstox_configured = bool(os.getenv("UPSTOX_ACCESS_TOKEN", "").strip())
+    return mode, upstox_enabled, upstox_configured
+
+
 def _scan_message(heartbeat):
     safety = "\n\n🛡️ Scan telemetry is read-only; it does not alter trading or risk decisions."
     if not heartbeat:
@@ -108,6 +116,8 @@ def _scan_message(heartbeat):
         ("decision_evaluations", "Decision evaluations"),
         ("market_data_blocked_or_failed", "Provider blocked/failed"),
         ("market_data_invalid_or_stale", "Invalid/stale data"),
+        ("upstox_fallback_attempts", "Upstox fallback attempts"),
+        ("upstox_fallback_successes", "Upstox fallback successes"),
     )
     present = [(label, heartbeat[key]) for key, label in fields if key in heartbeat]
     if present:
@@ -115,6 +125,21 @@ def _scan_message(heartbeat):
         lines.append("📡 MARKET-DATA PIPELINE")
         for label, value in present:
             lines.append(f"{label}: {_fmt_value(value)}")
+
+    mode, upstox_enabled, upstox_configured = _provider_telemetry()
+    lines.append("")
+    lines.append("🔌 PROVIDER ROUTING")
+    lines.append(f"Market-data mode: {mode}")
+    lines.append(f"Upstox enabled: {'YES' if upstox_enabled else 'NO'}")
+    lines.append(f"Upstox credentials configured: {'YES' if upstox_configured else 'NO'}")
+
+    fresh_to_decision = heartbeat.get("market_data_fresh_to_decision")
+    blocked = heartbeat.get("market_data_blocked_or_failed")
+    if isinstance(fresh_to_decision, (int, float)) and isinstance(blocked, (int, float)) and blocked > 0 and fresh_to_decision == 0:
+        lines.append("")
+        lines.append("🚫 FAIL-CLOSED MARKET DATA")
+        lines.append("No fresh provider data reached the decision engine in this scan.")
+        lines.append("No trade decision was allowed from stale/missing data.")
 
     if heartbeat.get("symbol"):
         lines.append("")
