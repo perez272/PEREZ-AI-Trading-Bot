@@ -1,8 +1,8 @@
-
 """Continuous Tier-1 option-chain observer and persistent move learner.
 
 Observational only: never places or forces a trade. Persists successful chain
-observations and move events so Telegram can report genuine evidence.
+observations, rich option snapshots and move events so Telegram and research
+can report genuine evidence.
 """
 from __future__ import annotations
 from dotenv import load_dotenv
@@ -30,6 +30,7 @@ MOVE_THRESHOLDS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0)
 MEMORY_PATH = Path(os.getenv("TIER1_OPTION_MEMORY", "data/memory/tier1_option_moves.sqlite3"))
 BASELINE_TTL_SECONDS = int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS", "900"))
 MAX_MEMORY_ROWS = int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS", "50000"))
+MAX_SNAPSHOT_ROWS = int(os.getenv("TIER1_OPTION_MAX_SNAPSHOT_ROWS", "50000"))
 HISTORY_POINTS = 6
 
 
@@ -64,8 +65,15 @@ class Tier1OptionObserver:
                 observed_ts TEXT NOT NULL, contracts_seen INTEGER NOT NULL,
                 events_count INTEGER NOT NULL DEFAULT 0
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS raw_option_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_ts TEXT NOT NULL, symbol TEXT NOT NULL, option_type TEXT,
+                instrument_key TEXT, contract TEXT, expiry TEXT, strike REAL,
+                ltp REAL NOT NULL, features_json TEXT NOT NULL
+            )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol, threshold)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_raw_option_symbol_ts ON raw_option_snapshots(symbol, observed_ts)")
 
     @staticmethod
     def _contract_key(symbol: str, row: dict[str, Any], option_type: str) -> str:
@@ -75,6 +83,94 @@ class Tier1OptionObserver:
     @staticmethod
     def _market(row: dict[str, Any], option_type: str) -> dict[str, Any]:
         return row.get("call_options" if option_type == "CE" else "put_options") or {}
+
+    @staticmethod
+    def _num(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _rich_option(self, symbol: str, option_type: str, row: dict[str, Any], market: dict[str, Any],
+                     chain_stats: dict[str, Any], observed_ts: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        md = market.get("market_data") or {}
+        greeks = market.get("option_greeks") if isinstance(market.get("option_greeks"), dict) else {}
+        strike = self._num(row.get("strike_price"), 0.0)
+        spot = self._num(row.get("spot_ltp", row.get("underlying_ltp", row.get("underlying_price"))), 0.0)
+        futures = self._num(row.get("futures_ltp", row.get("future_ltp", row.get("futures_price"))), 0.0)
+        ltp = self._num(md.get("ltp"), 0.0)
+        bid = self._num(md.get("bid_price", md.get("bid")), 0.0)
+        ask = self._num(md.get("ask_price", md.get("ask")), 0.0)
+        spread_pct = ((ask - bid) / ltp * 100.0) if ltp > 0 and ask >= bid > 0 else None
+        distance = (strike - spot) if spot > 0 else None
+        distance_pct = (distance / spot * 100.0) if spot > 0 and distance is not None else None
+        expiry = row.get("expiry")
+        minutes_to_expiry = None
+        if expiry:
+            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y", "%d/%m/%y"):
+                try:
+                    exp = datetime.strptime(str(expiry), fmt).replace(hour=15, minute=30, tzinfo=timezone.utc)
+                    minutes_to_expiry = max(0.0, (exp - datetime.now(timezone.utc)).total_seconds() / 60.0)
+                    break
+                except ValueError:
+                    continue
+        feature = {
+            "symbol": symbol, "option_type": option_type,
+            "instrument_key": market.get("instrument_key"),
+            "contract": market.get("trading_symbol") or row.get("trading_symbol"),
+            "expiry": expiry, "strike": strike, "observed_ts": observed_ts,
+            "ltp": ltp, "open": md.get("open"), "high": md.get("high"), "low": md.get("low"),
+            "previous_close": md.get("previous_close"), "percent_change": md.get("percent_change"),
+            "bid": bid, "ask": ask, "best_bid": bid, "best_ask": ask, "spread_pct": spread_pct,
+            "volume": md.get("volume"), "avg_price": md.get("avg_price"),
+            "oi": md.get("oi"), "open_interest": md.get("oi"), "oi_change": md.get("oi_change"),
+            "oi_change_pct": md.get("oi_change_pct"),
+            "iv": greeks.get("iv"), "delta": greeks.get("delta"), "gamma": greeks.get("gamma"),
+            "theta": greeks.get("theta"), "vega": greeks.get("vega"), "rho": greeks.get("rho"),
+            "spot_ltp": spot or None, "futures_ltp": futures or None,
+            "distance_to_spot": distance, "distance_to_spot_pct": distance_pct,
+            "atm_distance": abs(distance) if distance is not None else None,
+            "ce_volume": chain_stats.get("ce_volume"), "pe_volume": chain_stats.get("pe_volume"),
+            "ce_oi": chain_stats.get("ce_oi"), "pe_oi": chain_stats.get("pe_oi"),
+            "ce_pe_volume_ratio": chain_stats.get("ce_pe_volume_ratio"),
+            "ce_pe_oi_ratio": chain_stats.get("ce_pe_oi_ratio"),
+            "minutes_to_expiry": minutes_to_expiry,
+            "expiry_bucket": chain_stats.get("expiry_bucket", "UNKNOWN"),
+            "live_market_data": True,
+        }
+        candidate = {
+            "symbol": symbol, "option_type": option_type, "contract": feature["contract"],
+            "expiry": expiry, "strike": strike, "ltp": ltp,
+            "spot_ltp": spot or None, "futures_ltp": futures or None,
+            "distance_to_spot": distance, "distance_to_spot_pct": distance_pct,
+            "ce_pe_volume_ratio": chain_stats.get("ce_pe_volume_ratio"),
+            "ce_pe_oi_ratio": chain_stats.get("ce_pe_oi_ratio"),
+            "minutes_to_expiry": minutes_to_expiry,
+            "expiry_bucket": chain_stats.get("expiry_bucket", "UNKNOWN"),
+            "live_market_data": True,
+        }
+        return candidate, feature
+
+    @staticmethod
+    def _chain_stats(chain: list[dict[str, Any]]) -> dict[str, Any]:
+        ce_volume = pe_volume = ce_oi = pe_oi = 0.0
+        for row in chain or []:
+            for option_type in ("CE", "PE"):
+                market = row.get("call_options" if option_type == "CE" else "put_options") or {}
+                md = market.get("market_data") or {}
+                vol = Tier1OptionObserver._num(md.get("volume"), 0.0)
+                oi = Tier1OptionObserver._num(md.get("oi"), 0.0)
+                if option_type == "CE":
+                    ce_volume += max(0.0, vol); ce_oi += max(0.0, oi)
+                else:
+                    pe_volume += max(0.0, vol); pe_oi += max(0.0, oi)
+        return {
+            "ce_volume": ce_volume, "pe_volume": pe_volume,
+            "ce_oi": ce_oi, "pe_oi": pe_oi,
+            "ce_pe_volume_ratio": ce_volume / pe_volume if pe_volume > 0 else None,
+            "ce_pe_oi_ratio": ce_oi / pe_oi if pe_oi > 0 else None,
+            "expiry_bucket": "UNKNOWN",
+        }
 
     def _features(self, symbol: str, option_type: str, row: dict[str, Any], market: dict[str, Any], move_pct: float, baseline: float) -> dict[str, Any]:
         md = market.get("market_data") or {}
@@ -86,7 +182,7 @@ class Tier1OptionObserver:
             "expiry": row.get("expiry"), "strike": row.get("strike_price"),
             "move_pct": round(move_pct, 4), "baseline_ltp": round(baseline, 4),
             "ltp": md.get("ltp"), "bid": md.get("bid_price"), "ask": md.get("ask_price"),
-            "volume": md.get("volume"), "oi": md.get("oi"),
+            "volume": md.get("volume"), "oi": md.get("oi"), "oi_change": md.get("oi_change"),
             "iv": greeks.get("iv"), "delta": greeks.get("delta"), "gamma": greeks.get("gamma"),
             "theta": greeks.get("theta"), "vega": greeks.get("vega"),
         }
@@ -109,6 +205,7 @@ class Tier1OptionObserver:
         now_epoch = time.time()
         events: list[dict[str, Any]] = []
         valid_contracts = 0
+        chain_stats = self._chain_stats(chain)
         with self._connect() as db:
             for row in chain or []:
                 for option_type in ("CE", "PE"):
@@ -121,6 +218,13 @@ class Tier1OptionObserver:
                     if ltp <= 0 or not market.get("instrument_key"):
                         continue
                     valid_contracts += 1
+                    candidate, rich = self._rich_option(symbol, option_type, row, market, chain_stats, observed_ts)
+
+                    db.execute(
+                        "INSERT INTO raw_option_snapshots(observed_ts,symbol,option_type,instrument_key,contract,expiry,strike,ltp,features_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (observed_ts, symbol, option_type, market.get("instrument_key"), rich.get("contract"),
+                         row.get("expiry"), row.get("strike_price"), ltp, json.dumps(rich, default=str, separators=(",", ":")))
+                    )
 
                     fast = self._record_fast_signal(symbol, option_type, market, observed_ts)
                     if fast and fast.early:
@@ -135,86 +239,58 @@ class Tier1OptionObserver:
                     existing = db.execute("SELECT baseline_ltp, baseline_ts, last_ltp FROM baselines WHERE contract_key=?", (key,)).fetchone()
                     if not existing:
                         db.execute("INSERT INTO baselines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (key, symbol, option_type, row.get("expiry"), row.get("strike_price"), ltp, observed_ts, ltp, observed_ts))
-                        continue
-                    baseline, baseline_ts, _ = existing
-                    try:
-                        baseline_age = now_epoch - datetime.fromisoformat(baseline_ts).timestamp()
-                    except (ValueError, TypeError):
-                        baseline_age = BASELINE_TTL_SECONDS + 1
-                    if baseline_age > BASELINE_TTL_SECONDS or ltp < baseline * 0.5:
-                        db.execute("UPDATE baselines SET baseline_ltp=?, baseline_ts=?, last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, ltp, observed_ts, key))
-                        continue
-                    move_pct = (ltp - baseline) / baseline * 100.0
-                    for threshold in MOVE_THRESHOLDS:
-                        if move_pct < threshold:
-                            continue
-                        event_key = f"{key}|{threshold}|{observed_ts[:16]}"
-                        features = self._features(symbol, option_type, row, market, move_pct, baseline)
+                    else:
+                        baseline, baseline_ts, _ = existing
                         try:
-                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, json.dumps(features, separators=(",", ":"))))
-                            events.append({"type": "THRESHOLD", "threshold": threshold, **features})
-                        except sqlite3.IntegrityError:
-                            pass
-                    db.execute("UPDATE baselines SET last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, key))
+                            baseline_age = now_epoch - datetime.fromisoformat(baseline_ts).timestamp()
+                        except (ValueError, TypeError):
+                            baseline_age = BASELINE_TTL_SECONDS + 1
+                        if baseline_age > BASELINE_TTL_SECONDS or ltp < baseline * 0.5:
+                            db.execute("UPDATE baselines SET baseline_ltp=?, baseline_ts=?, last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, ltp, observed_ts, key))
+                            continue
+                        move_pct = (ltp - baseline) / baseline * 100.0
+                        for threshold in MOVE_THRESHOLDS:
+                            if move_pct < threshold:
+                                continue
+                            event_key = f"{key}|{threshold}|{observed_ts[:16]}"
+                            features = self._features(symbol, option_type, row, market, move_pct, baseline)
+                            try:
+                                db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, json.dumps(features, separators=(",", ":"))))
+                                events.append({"type": "THRESHOLD", "threshold": threshold, **features})
+                            except sqlite3.IntegrityError:
+                                pass
+                        db.execute("UPDATE baselines SET last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, key))
             if valid_contracts:
                 db.execute("INSERT INTO observations(symbol,observed_ts,contracts_seen,events_count) VALUES (?,?,?,?)", (symbol, observed_ts, valid_contracts, len(events)))
+            db.execute("DELETE FROM raw_option_snapshots WHERE id NOT IN (SELECT id FROM raw_option_snapshots ORDER BY id DESC LIMIT ?)", (MAX_SNAPSHOT_ROWS,))
             db.execute("DELETE FROM move_events WHERE id NOT IN (SELECT id FROM move_events ORDER BY id DESC LIMIT ?)", (MAX_MEMORY_ROWS,))
         return events
 
     def observe_all(self) -> list[dict[str, Any]]:
-        """
-        Angel-only observation path.
-
-        Tier-1 never creates an independent broker session and never uses
-        Upstox.  It reuses the authenticated Angel session and the same
-        market-data router/budget contract as the production consumers.
-        """
+        """Angel-only observation path; observational/paper-only and fail-closed."""
         api_key = os.getenv("ANGEL_API_KEY")
         client_id = os.getenv("ANGEL_CLIENT_ID")
         password = os.getenv("ANGEL_PASSWORD")
         totp_secret = os.getenv("ANGEL_TOTP_SECRET")
-
         if not all((api_key, client_id, password, totp_secret)):
             print("[TIER1 ANGEL] credentials unavailable; fail closed")
             return []
-
         try:
-            session = SessionManager(
-                api_key,
-                client_id,
-                password,
-                totp_secret,
-            )
+            session = SessionManager(api_key, client_id, password, totp_secret)
             smartapi = session.get_client()
             angel = AngelClient(smartapi, session_manager=session)
             router = MarketDataRouter(angel)
-
             events: list[dict[str, Any]] = []
-
-            # Angel REST option-chain discovery is deliberately not guessed.
-            # Until a verified Angel chain/token source is available, Tier-1
-            # must not manufacture contracts or hammer searchScrip/getMarketData.
             status = angel.market_data_status()
-            print(
-                "[TIER1 ANGEL] authenticated="
-                f"{bool(smartapi)} "
-                f"cooldown={status.get('cooldown_remaining', 0)} "
-                f"remaining={status.get('requests_remaining', 0)}"
-            )
-
+            print(f"[TIER1 ANGEL] authenticated={bool(smartapi)} cooldown={status.get('cooldown_remaining', 0)} remaining={status.get('requests_remaining', 0)}")
             for symbol in TIER1_SYMBOLS:
                 chain, source = router.get_option_chain(symbol)
-
                 if source != "angel_one" or not chain:
-                    print(
-                        f"[TIER1 ANGEL] {symbol}: "
-                        f"no verified Angel option chain; skipped safely"
-                    )
+                    print(f"[TIER1 ANGEL] {symbol}: no verified Angel option chain; skipped safely")
                     continue
-
                 observed = self.observe(symbol, chain)
                 events.extend(observed)
-
+                chain_stats = self._chain_stats(chain)
                 for row in chain:
                     for option_type in ("CE", "PE"):
                         market = self._market(row, option_type)
@@ -225,37 +301,13 @@ class Tier1OptionObserver:
                             continue
                         if ltp <= 0:
                             continue
-
-                        candidate = {
-                            "symbol": symbol,
-                            "option_type": option_type,
-                            "instrument_key": market.get("instrument_key"),
-                            "trading_symbol": (
-                                market.get("trading_symbol")
-                                or row.get("trading_symbol")
-                            ),
-                            "expiry": row.get("expiry"),
-                            "strike": row.get("strike_price"),
-                            "ltp": ltp,
-                        }
-
+                        candidate, rich = self._rich_option(symbol, option_type, row, market, chain_stats, datetime.now(timezone.utc).isoformat())
                         try:
-                            remember_observation(
-                                candidate,
-                                options_result=market,
-                            )
+                            remember_observation(candidate, options_result=rich)
                         except Exception as exc:
-                            print(
-                                f"[TIER1 MEMORY] observation skipped safely: {exc}"
-                            )
-
-                print(
-                    f"[TIER1 ANGEL] {symbol}: "
-                    f"contracts={len(chain)} events={len(observed)}"
-                )
-
+                            print(f"[TIER1 MEMORY] observation skipped safely: {exc}")
+                print(f"[TIER1 ANGEL] {symbol}: contracts={len(chain)} events={len(observed)}")
             return events
-
         except Exception as exc:
             print(f"[TIER1 ANGEL] cycle failed safely: {exc}")
             return []
@@ -263,8 +315,9 @@ class Tier1OptionObserver:
     def stats(self) -> dict[str, Any]:
         with self._connect() as db:
             observations = db.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+            snapshots = db.execute("SELECT COUNT(*) FROM raw_option_snapshots").fetchone()[0]
             surge_events = db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0]
-        return {"observations": int(observations), "surge_events": int(surge_events), "wins": 0, "win_rate": 0.0}
+        return {"observations": int(observations), "snapshots": int(snapshots), "surge_events": int(surge_events), "wins": 0, "win_rate": 0.0}
 
     def match(self, symbol: str, features: dict[str, Any], threshold: float | None = None, limit: int = 50) -> dict[str, Any]:
         clauses = ["symbol=?"]
@@ -276,7 +329,7 @@ class Tier1OptionObserver:
             rows = db.execute(f"SELECT threshold, features_json FROM move_events WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
         if not rows:
             return {"matches": 0, "confidence": 0.0}
-        numeric = ("volume", "oi", "iv", "delta", "gamma", "theta", "vega", "move_pct")
+        numeric = ("volume", "oi", "iv", "delta", "gamma", "theta", "vega", "move_pct", "spot_ltp", "futures_ltp", "distance_to_spot_pct")
         scores = []
         for _, raw in rows:
             try:
