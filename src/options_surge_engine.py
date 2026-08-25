@@ -117,7 +117,6 @@ def _expiry_bucket(expiry: Any) -> str:
 
 
 def _features(candidate: Dict[str, Any], option: Dict[str, Any], regime: str, previous: Optional[sqlite3.Row]) -> Dict[str, Any]:
-    """Capture available evidence and derive changes only from real observations."""
     keys = (
         "close", "open", "high", "low", "previous_close", "RSI", "rsi", "rsi_slope",
         "EMA20", "EMA50", "EMA200", "MACD", "VWAP", "ATR", "ADX", "volume_ratio",
@@ -131,7 +130,8 @@ def _features(candidate: Dict[str, Any], option: Dict[str, Any], regime: str, pr
         "minutes_to_expiry", "expiry_bucket",
     )
     out: Dict[str, Any] = {"regime": regime}
-    for source in (candidate, option):
+    market_data = option.get("market_data") if isinstance(option.get("market_data"), dict) else {}
+    for source in (candidate, option, market_data):
         for key in keys:
             if key in source and source[key] is not None:
                 out[key] = source[key]
@@ -140,7 +140,6 @@ def _features(candidate: Dict[str, Any], option: Dict[str, Any], regime: str, pr
     out["greeks_available"] = bool(option.get("greeks_available", any(out.get(k) is not None for k in ("delta", "gamma", "theta", "vega"))))
 
     if previous:
-        previous_features = {}
         try:
             previous_features = json.loads(previous["features_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -161,12 +160,15 @@ def _features(candidate: Dict[str, Any], option: Dict[str, Any], regime: str, pr
                 out[f"{key}_change"] = new - old
                 if old != 0:
                     out[f"{key}_change_pct"] = (new - old) / abs(old) * 100.0
-
     return out
 
 
-def _contract(option: Dict[str, Any]) -> str:
-    return str(option.get("contract") or option.get("trading_symbol") or option.get("symbol") or "").strip()
+def _contract(option: Dict[str, Any], candidate: Optional[Dict[str, Any]] = None) -> str:
+    candidate = candidate or {}
+    return str(
+        option.get("contract") or option.get("trading_symbol") or
+        candidate.get("contract") or option.get("symbol") or candidate.get("symbol") or ""
+    ).strip()
 
 
 def _previous(conn, contract: str, target_epoch: float):
@@ -178,16 +180,17 @@ def _previous(conn, contract: str, target_epoch: float):
 
 def observe_option(candidate: Dict[str, Any], option: Dict[str, Any], regime: str = "unknown") -> list[Dict[str, Any]]:
     """Persist every valid live snapshot and return newly detected surge events."""
-    contract = _contract(option)
-    ltp = _num(option.get("ltp"))
+    market_data = option.get("market_data") if isinstance(option.get("market_data"), dict) else {}
+    contract = _contract(option, candidate)
+    ltp = _num(option.get("ltp", market_data.get("ltp", candidate.get("ltp"))))
     if not contract or ltp <= 0 or not option.get("live_market_data"):
         return []
 
     now_ts = _now()
     now_epoch = _epoch(now_ts)
-    expiry = str(option.get("expiry") or "")
-    option_type = str(option.get("option_type") or "")
-    strike = _num(option.get("strike"), 0.0)
+    expiry = str(option.get("expiry") or candidate.get("expiry") or market_data.get("expiry") or "")
+    option_type = str(option.get("option_type") or candidate.get("option_type") or "")
+    strike = _num(option.get("strike", candidate.get("strike", market_data.get("strike"))), 0.0)
     expiry_class = _expiry_bucket(expiry)
     with _connect() as conn:
         previous = _previous(conn, contract, now_epoch - 90)
@@ -219,7 +222,7 @@ def observe_option(candidate: Dict[str, Any], option: Dict[str, Any], regime: st
                     "end_ltp": ltp, "expiry_bucket": expiry_class, "features": features,
                 }
                 conn.execute(
-                    "INSERT INTO option_surge_events VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO option_surge_events(ts,contract,symbol,option_type,expiry,strike,window_minutes,threshold_pct,change_pct,start_ltp,end_ltp,expiry_bucket,features_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (now_ts, contract, event["symbol"], option_type, expiry, strike,
                      window, threshold, change_pct, start_ltp, ltp,
                      expiry_class, json.dumps(features, default=str)),
