@@ -6,6 +6,7 @@ research can study the conditions before 8x/20x/50x/100x premium expansions.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,8 @@ DB_PATH = Path("data/memory/perez_ai_memory.db")
 WINDOWS = (5, 10, 15)
 THRESHOLDS = (5.0, 10.0, 15.0)
 MAX_SNAPSHOTS = 50000
+SQLITE_TIMEOUT_SECONDS = float(os.getenv("PEREZ_SQLITE_TIMEOUT", "15"))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("PEREZ_SQLITE_BUSY_TIMEOUT_MS", "15000"))
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -39,9 +42,11 @@ def _now() -> str:
 
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS option_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
