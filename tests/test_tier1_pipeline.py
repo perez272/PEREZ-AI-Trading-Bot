@@ -1,6 +1,5 @@
 import json
 import sqlite3
-from pathlib import Path
 
 
 def test_tier1_pipeline_captures_analyzes_and_stores(tmp_path, monkeypatch):
@@ -45,8 +44,17 @@ def test_tier1_pipeline_captures_analyzes_and_stores(tmp_path, monkeypatch):
     con = sqlite3.connect(memory_db)
     assert con.execute("SELECT COUNT(*) FROM option_snapshots").fetchone()[0] == 1
     assert con.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
-    assert con.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0] == 1
     con.close()
+
+    # The idempotency marker belongs to the Tier-1 source DB, not memory DB.
+    tier = sqlite3.connect(tier_db)
+    assert tier.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0] == 1
+    assert tier.execute("SELECT source_id FROM tier1_pipeline_processed").fetchone()[0] == 1
+    tier.close()
+
+    memory = sqlite3.connect(memory_db)
+    assert memory.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tier1_pipeline_processed'").fetchone() is None
+    memory.close()
 
 
 def test_tier1_pipeline_is_idempotent(tmp_path):
@@ -67,7 +75,8 @@ def test_tier1_pipeline_is_idempotent(tmp_path):
         "INSERT INTO raw_option_snapshots(observed_ts,symbol,option_type,instrument_key,contract,expiry,strike,ltp,features_json) VALUES(?,?,?,?,?,?,?,?,?)",
         ("2026-08-25T10:00:00+00:00", "BANKNIFTY", "PE", "NFO|TEST2", "BANKTESTPE", "2026-08-25", 55000, 2.0, json.dumps({"ltp": 2.0, "volume": 100, "oi": 1000, "live_market_data": True})),
     )
-    tier.commit(); tier.close()
+    tier.commit()
+    tier.close()
 
     first = bridge.process_new_observations()
     second = bridge.process_new_observations()
@@ -78,3 +87,7 @@ def test_tier1_pipeline_is_idempotent(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM option_snapshots").fetchone()[0] == 1
     assert con.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
     con.close()
+
+    tier = sqlite3.connect(tier_db)
+    assert tier.execute("SELECT COUNT(*) FROM tier1_pipeline_processed").fetchone()[0] == 1
+    tier.close()
