@@ -3,19 +3,23 @@ from typing import Any, Dict, Iterable, List
 from src.options_trade_gate import OptionEvidence, validate_trade
 from src.move_memory import record_move, similarity_bonus, memory_stats
 
-_live_option_client = None
+_market_data_router = None
 
 
-def _get_live_option_client():
-    global _live_option_client
-    if _live_option_client is not None:
-        return _live_option_client
+def _get_market_data_router():
+    """Return the single production market-data gateway for option quotes."""
+    global _market_data_router
+    if _market_data_router is not None:
+        return _market_data_router
     from src.broker.session_manager import SessionManager
     from src.broker.angel_client import AngelClient
     from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
+    from src.market_data_router import MarketDataRouter
+
     session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
-    _live_option_client = AngelClient(session.get_client())
-    return _live_option_client
+    angel_client = AngelClient(session.get_client())
+    _market_data_router = MarketDataRouter(angel_client)
+    return _market_data_router
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -49,12 +53,40 @@ def evidence_from_candidate(candidate: Dict[str, Any]) -> OptionEvidence:
     )
 
 
+def _apply_quote(result: Dict[str, Any], quote: Dict[str, Any]) -> None:
+    """Normalize Angel/Upstox quote fields into the existing option engine schema."""
+    ltp = _num(quote.get("ltp") or quote.get("last_price"))
+    result.update({
+        "ltp": ltp,
+        "volume": _num(quote.get("tradeVolume") or quote.get("volume")),
+        "open_interest": _num(quote.get("opnInterest") or quote.get("oi")),
+        "buy_quantity": _num(quote.get("totBuyQuan") or quote.get("total_buy_quantity")),
+        "sell_quantity": _num(quote.get("totSellQuan") or quote.get("total_sell_quantity")),
+        "last_trade_qty": _num(quote.get("lastTradeQty")),
+        "avg_price": _num(quote.get("avgPrice") or quote.get("average_price")),
+        "net_change": _num(quote.get("netChange") or quote.get("net_change")),
+        "percent_change": _num(quote.get("percentChange")),
+    })
+    depth = quote.get("depth") or {}
+    buys, sells = depth.get("buy") or [], depth.get("sell") or []
+    bid = _num(buys[0].get("price")) if buys else 0.0
+    ask = _num(sells[0].get("price")) if sells else 0.0
+    result["best_bid"], result["best_ask"] = bid, ask
+    if bid > 0 and ask > 0 and ask >= bid and ltp > 0:
+        result["spread_pct"] = max(0.0, (ask - bid) / ltp * 100.0)
+        result["slippage_pct"] = max(0.0, (ask - ltp) / ltp * 100.0)
+    else:
+        result["spread_pct"] = result["slippage_pct"] = 999.0
+
+
 def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(candidate)
-    for key in ("ltp", "volume", "open_interest", "best_bid", "best_ask", "spread_pct", "slippage_pct",
-                "buy_quantity", "sell_quantity", "last_trade_qty", "avg_price", "net_change", "percent_change",
-                "volume_score", "oi_score", "oi_change_score", "iv_score", "liquidity_score", "trend_score",
-                "momentum_score", "vwap_score"):
+    for key in (
+        "ltp", "volume", "open_interest", "best_bid", "best_ask", "spread_pct", "slippage_pct",
+        "buy_quantity", "sell_quantity", "last_trade_qty", "avg_price", "net_change", "percent_change",
+        "volume_score", "oi_score", "oi_change_score", "iv_score", "liquidity_score", "trend_score",
+        "momentum_score", "vwap_score",
+    ):
         result.pop(key, None)
     result["live_market_data"] = False
     result["live_data_error"] = "NOT_ATTEMPTED"
@@ -68,30 +100,18 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         result["live_data_error"] = "MISSING_OPTION_TOKEN"
         return result
     try:
-        response = _get_live_option_client().get_market_data("FULL", {exchange: [token]})
-        fetched = response.get("data", {}).get("fetched", []) if isinstance(response, dict) and response.get("status") else []
-        if not fetched:
+        quote, source = _get_market_data_router().get_option_quote(exchange, token)
+        if not quote:
             result["live_data_error"] = "NO_MARKET_DATA"
+            result["data_source"] = source
             return result
-        quote = fetched[0]
-        ltp = _num(quote.get("ltp"))
+        _apply_quote(result, quote)
+        ltp = _num(result.get("ltp"))
         if ltp <= 0:
             result["live_data_error"] = "INVALID_LTP"
+            result["data_source"] = source
             return result
-        result.update({"ltp": ltp, "volume": _num(quote.get("tradeVolume")), "open_interest": _num(quote.get("opnInterest")),
-                       "buy_quantity": _num(quote.get("totBuyQuan")), "sell_quantity": _num(quote.get("totSellQuan")),
-                       "last_trade_qty": _num(quote.get("lastTradeQty")), "avg_price": _num(quote.get("avgPrice")),
-                       "net_change": _num(quote.get("netChange")), "percent_change": _num(quote.get("percentChange"))})
-        depth = quote.get("depth") or {}
-        buys, sells = depth.get("buy") or [], depth.get("sell") or []
-        bid = _num(buys[0].get("price")) if buys else 0.0
-        ask = _num(sells[0].get("price")) if sells else 0.0
-        result["best_bid"], result["best_ask"] = bid, ask
-        if bid > 0 and ask > 0 and ask >= bid:
-            result["spread_pct"] = max(0.0, (ask - bid) / ltp * 100.0)
-            result["slippage_pct"] = max(0.0, (ask - ltp) / ltp * 100.0)
-        else:
-            result["spread_pct"] = result["slippage_pct"] = 999.0
+        result["data_source"] = source
 
         pct, avg = result["percent_change"], result["avg_price"]
         result["trend_score"] = min(15.0, max(0.0, pct * 3.0))
@@ -110,8 +130,6 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         else:
             result["liquidity_score"] = 0.0
 
-        # Persistent pattern learning. A 5/10/15/20% move becomes an event with
-        # the complete indicator state that existed at the moment of the move.
         if result.get("symbol", "").upper() in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "NIFTYFPI"}:
             written = record_move(result)
             memory = similarity_bonus(result, minimum_target=5.0)
@@ -133,9 +151,15 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
 def evaluate_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
     enriched = enrich_with_live_option_data(candidate)
     if not enriched.get("live_market_data"):
-        enriched["options_gate"] = {"score": 0, "eligible": False, "decision": "NO TRADE",
-                                     "reasons": ["LIVE_OPTION_DATA_UNAVAILABLE"], "levels": {},
-                                     "live_orders": False, "paper_trade": True}
+        enriched["options_gate"] = {
+            "score": 0,
+            "eligible": False,
+            "decision": "NO TRADE",
+            "reasons": ["LIVE_OPTION_DATA_UNAVAILABLE"],
+            "levels": {},
+            "live_orders": False,
+            "paper_trade": True,
+        }
         enriched["options_score"] = 0
         enriched["paper_trade_candidate"] = False
         enriched["live_orders"] = False
@@ -177,6 +201,7 @@ def print_gate_summary(result: Dict[str, Any]) -> None:
     print(f"DECISION      : {gate.get('decision', 'NO TRADE')}")
     if gate.get("reasons"):
         print("REJECT REASONS:", ", ".join(gate["reasons"]))
+    print("DATA SOURCE   :", result.get("data_source", "none"))
     print("PATTERN MEMORY:", result.get("move_memory", {}))
     print("PAPER TRADE   :", True)
     print("LIVE ORDERS   :", False)
