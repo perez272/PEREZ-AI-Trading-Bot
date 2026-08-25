@@ -80,10 +80,19 @@ def _read_heartbeat():
 
 
 def _provider_telemetry():
-    """Expose configured provider state only; never performs a market-data request."""
-    mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    upstox_enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-    upstox_configured = bool(os.getenv("UPSTOX_ACCESS_TOKEN", "").strip())
+    """Expose authoritative provider configuration without requesting market data."""
+    mode = os.getenv("MARKET_DATA_PROVIDER", "angel").strip().lower() or "angel"
+
+    # Read the environment at call time so telemetry reflects the same
+    # environment used by the running service. Default is fail-closed.
+    upstox_enabled = os.getenv(
+        "UPSTOX_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    upstox_configured = bool(
+        os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
+    )
+
     return mode, upstox_enabled, upstox_configured
 
 
@@ -106,6 +115,34 @@ def _scan_message(heartbeat):
         lines.append(f"Capital: Rs {_fmt_value(heartbeat['capital'])}")
     if heartbeat.get("candidates") is not None:
         lines.append(f"Candidates after scan: {heartbeat['candidates']}")
+
+    fresh_to_decision = heartbeat.get("market_data_fresh_to_decision")
+    decision_evaluations = heartbeat.get("decision_evaluations")
+
+    fresh_scan = (
+        isinstance(fresh_to_decision, (int, float))
+        and fresh_to_decision > 0
+        and isinstance(decision_evaluations, (int, float))
+        and decision_evaluations > 0
+    )
+
+    lines.append("")
+    lines.append(
+        "Fresh market calculation: "
+        + ("YES" if fresh_scan else "NO")
+    )
+
+    if not fresh_scan:
+        if status == "waiting_entry_window":
+            lines.append(
+                "No current market decision was calculated — "
+                "bot is outside the entry window."
+            )
+        else:
+            lines.append(
+                "No fresh market data reached the decision engine "
+                "for this heartbeat."
+            )
 
     fields = (
         ("market_data_api_attempts", "API attempts"),

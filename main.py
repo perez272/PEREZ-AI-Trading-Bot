@@ -14,7 +14,15 @@ from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover, CANDIDATE_FILE
 from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
 from src.tier1_option_observer import observe_tier1_option_chains
-from src.learning_status import record_cycle
+from src.learning_status import record_cycle, get_learning_status
+from src.ai_memory import (
+    remember_observation,
+    remember_rejection,
+    learned_confidence,
+    ai_suggestion,
+)
+from src.ensemble_engine import ensemble_score, decision_band
+from src.validation_engine import validation_status
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS, MINIMUM_SCORE, MAX_TECHNICAL_BYPASS_SCORE,
     MAX_TRADES_PER_DAY, OPTIONS_MIN_SCORE, OPTION_MAX_PREMIUM,
@@ -251,6 +259,109 @@ def main():
                     record_cycle(rejections=1)
                     continue
 
+                # CONTROLLED AI EVIDENCE LAYER
+                # Existing market, fundamental, contract, options and risk
+                # gates remain authoritative. AI is an additional veto only.
+                try:
+                    regime = str(
+                        candidate.get("regime")
+                        or mtf_direction
+                        or "unknown"
+                    )
+
+                    remember_observation(
+                        candidate,
+                        options_result,
+                        regime=regime,
+                    )
+
+                    learning = get_learning_status()
+
+                    learned = float(
+                        learned_confidence(symbol, regime)
+                    )
+
+                    ai_text = ai_suggestion(
+                        symbol,
+                        candidate.get("score", 0),
+                        candidate.get("signal", ""),
+                        regime,
+                    )
+
+                    ai_score, ai_details = ensemble_score(
+                        candidate,
+                        options_score=float(
+                            options_result.get("options_score", 0) or 0
+                        ),
+                        learned_confidence=learned,
+                        regime_bonus=50,
+                    )
+
+                    ai_band = decision_band(ai_score)
+
+                    validation_stats = {
+                        "trades": int(
+                            learning.get("completed_paper_trades", 0)
+                        ),
+                        "wins": int(
+                            learning.get("wins", 0)
+                        ),
+                        "pnl": float(
+                            learning.get("learned_pnl", 0.0)
+                        ),
+                    }
+
+                    evidence_status = validation_status(
+                        validation_stats
+                    )
+
+                    print(
+                        f"AI ENSEMBLE: {ai_score:.1f}/100 | "
+                        f"BAND={ai_band} | "
+                        f"LEARNED={learned:.1f} | "
+                        f"VALIDATION={evidence_status}"
+                    )
+                    print(f"AI SUGGESTION: {ai_text}")
+
+                    # Fail closed:
+                    # AI may reject a candidate but can never bypass
+                    # an existing market/options/risk gate.
+                    if ai_score < MINIMUM_SCORE:
+                        reason = (
+                            f"AI_ENSEMBLE_BELOW_MINIMUM:"
+                            f"{ai_score:.1f}<{MINIMUM_SCORE}"
+                        )
+
+                        print(
+                            f"AI ENSEMBLE REJECTED {symbol}: "
+                            f"{ai_score:.1f} < {MINIMUM_SCORE}"
+                        )
+
+                        remember_rejection(
+                            candidate,
+                            reason,
+                            options_result,
+                            regime=regime,
+                        )
+
+                        record_cycle(rejections=1)
+                        continue
+
+                except Exception as exc:
+                    # Never allow a broken learning/AI component to
+                    # accidentally permit a trade.
+                    write_heartbeat(
+                        "ai_integration_error",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
+                    print(
+                        f"AI INTEGRATION FAILED — "
+                        f"rejecting {symbol} safely: {exc}"
+                    )
+                    record_cycle(rejections=1)
+                    continue
+
                 live_ltp = float(options_result.get("ltp", 0) or 0)
                 if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
                     print(f"LIVE OPTION PRICE CHANGED — no trade for {symbol}: Rs {live_ltp:.2f}")
@@ -274,7 +385,7 @@ def main():
                     exits = build_dynamic_exits(live_ltp, candidate.get("atr", 0), live_ltp)
                     trade.update({"initial_stop_loss": exits["stop_loss"], "stop_loss": exits["stop_loss"], "target1": exits["target1"], "target2": exits["target2"], "target": exits["target2"], "strategy": "INDEX_MOMENTUM_SCALP", "momentum_score": candidate.get("momentum_score", 0), "momentum_reasons": candidate.get("momentum_reasons", [])})
 
-                trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": admission_reason == "FUNDAMENTALLY_ADMITTED", "underlying_score": candidate.get("score", 0), "option_live_ltp_at_gate": live_ltp, "mtf_direction": mtf_direction})
+                trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": admission_reason == "FUNDAMENTALLY_ADMITTED", "underlying_score": candidate.get("score", 0), "option_live_ltp_at_gate": live_ltp, "mtf_direction": mtf_direction, "ensemble_score": ai_score, "ensemble_band": ai_band, "learned_confidence": learned, "ai_suggestion": ai_text, "validation_status": evidence_status, "ai_details": ai_details})
                 print(f"PAPER TRADE: {trade['contract']} | strategy={trade.get('strategy', 'CORE')} | quantity={trade['quantity']} | investment=Rs {trade['investment']:.2f}")
                 print(f"EXITS: SL={trade['stop_loss']:.2f} | T1={trade['target1']:.2f} | T2={trade['target2']:.2f}")
                 try:

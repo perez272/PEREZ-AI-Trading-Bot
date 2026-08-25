@@ -34,6 +34,8 @@ symbol = nifty["symbol"]
 
 print(f"Fetching live price for {symbol}...")
 
-quote = obj.ltpData(exchange, symbol, token)
+from src.market_data_router import MarketDataRouter
+router = MarketDataRouter(obj)
+quote, source = router.get_option_quote(exchange, str(token))
 
 print(quote)

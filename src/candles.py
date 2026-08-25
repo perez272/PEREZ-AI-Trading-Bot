@@ -25,6 +25,7 @@ params = {
     "todate": to_date.strftime("%Y-%m-%d %H:%M"),
 }
 
-data = obj.getCandleData(params)
+# Direct Angel getCandleData removed: use MarketDataRouter.
+data = None
 
 print(data)

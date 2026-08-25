@@ -23,7 +23,6 @@ from src.market_data_router import MarketDataRouter
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
 from src.explosive_move_detector import ExplosiveMoveSignal, detect_explosive_move
-from src.ai_memory import remember_observation
 
 TIER1_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "NIFTYFPI")
 MOVE_THRESHOLDS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0)
@@ -214,40 +213,6 @@ class Tier1OptionObserver:
 
                 observed = self.observe(symbol, chain)
                 events.extend(observed)
-
-                for row in chain:
-                    for option_type in ("CE", "PE"):
-                        market = self._market(row, option_type)
-                        md = market.get("market_data") or {}
-                        try:
-                            ltp = float(md.get("ltp", 0) or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if ltp <= 0:
-                            continue
-
-                        candidate = {
-                            "symbol": symbol,
-                            "option_type": option_type,
-                            "instrument_key": market.get("instrument_key"),
-                            "trading_symbol": (
-                                market.get("trading_symbol")
-                                or row.get("trading_symbol")
-                            ),
-                            "expiry": row.get("expiry"),
-                            "strike": row.get("strike_price"),
-                            "ltp": ltp,
-                        }
-
-                        try:
-                            remember_observation(
-                                candidate,
-                                options_result=market,
-                            )
-                        except Exception as exc:
-                            print(
-                                f"[TIER1 MEMORY] observation skipped safely: {exc}"
-                            )
 
                 print(
                     f"[TIER1 ANGEL] {symbol}: "

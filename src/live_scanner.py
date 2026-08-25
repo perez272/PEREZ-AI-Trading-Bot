@@ -26,7 +26,11 @@ while True:
 
     for exchange, symbol, token in WATCHLIST:
         try:
-            data = obj.ltpData(exchange, symbol, token)
+            from src.market_data_router import MarketDataRouter
+            router = MarketDataRouter(obj)
+            data, source = router.get_option_quote(exchange, str(token))
+            if data is None:
+                data = {}
 
             if data["status"]:
                 ltp = data["data"]["ltp"]

@@ -204,8 +204,15 @@ class AngelClient:
             return True
 
     def get_candles(self, params):
-        if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
+        # Every candle request must pass the global market-data budget gate
+        # BEFORE any provider/cache decision. This guarantees a broker
+        # cooldown can never be bypassed by cached data.
+        if not self._reserve_market_data_request(
+            "_last_candle_request",
+            self.CANDLE_REQUEST_INTERVAL,
+        ):
             return None
+
         return self._retry(self.api.getCandleData, params)
 
     def get_ltp(self, exchange, symbol, token):
