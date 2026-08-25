@@ -101,7 +101,12 @@ class UpstoxMarketData:
             return None
         self._pace()
         try:
-            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
+            response = self._session.get(
+                url,
+                params=params,
+                headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"},
+                timeout=UPSTOX_TIMEOUT_SECONDS,
+            )
         except requests.RequestException as exc:
             print(f"[UPSTOX] request failed: {exc}")
             return None
@@ -133,14 +138,38 @@ class UpstoxMarketData:
         return candles if isinstance(candles, list) else None
 
     def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
+        """Return Upstox's exchange-backed put/call chain.
+
+        Upstox accepts relative expiry keywords such as current_week, so the
+        caller does not need to hard-code a calendar date.
+        """
         if not self.available():
             return None
         underlying_key = self.instrument_keys.get(symbol.upper())
         if not underlying_key:
+            print(f"[UPSTOX] No underlying instrument mapping for {symbol}.")
             return None
-        payload = self._get(f"{UPSTOX_V2_BASE_URL}/option/chain", {"instrument_key": underlying_key, "expiry_date": expiry})
+        payload = self._get(
+            f"{UPSTOX_V2_BASE_URL}/option/chain",
+            {"instrument_key": underlying_key, "expiry_date": expiry},
+        )
         data = payload.get("data") if payload else None
         return data if isinstance(data, list) else None
+
+    def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
+        """Get one full exchange quote using an Upstox instrument key."""
+        if not self.available() or not instrument_key or "|" not in instrument_key:
+            return None
+        payload = self._get(
+            f"{UPSTOX_V2_BASE_URL}/market-quote/quotes",
+            {"instrument_key": instrument_key},
+        )
+        data = payload.get("data") if payload else None
+        if not isinstance(data, dict) or not data:
+            return None
+        # Upstox returns a dict keyed by its instrument representation.
+        quote = next(iter(data.values()))
+        return quote if isinstance(quote, dict) else None
 
     def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
         chain = self.get_option_chain(symbol)
@@ -153,6 +182,7 @@ class UpstoxMarketData:
                 option = row.get("call_options" if option_type == "CE" else "put_options") or {}
                 instrument_key = option.get("instrument_key")
                 market = option.get("market_data") or {}
+                greeks = option.get("option_greeks") or {}
                 ltp = float(market.get("ltp", 0) or 0)
                 bid = float(market.get("bid_price", 0) or 0)
                 ask = float(market.get("ask_price", 0) or 0)
@@ -163,19 +193,21 @@ class UpstoxMarketData:
                 spread_pct = ((ask - bid) / ltp * 100.0) if bid > 0 and ask >= bid else 999.0
                 if spread_pct > 5.0:
                     continue
-                candidates.append((abs(strike - float(spot)), -volume, -oi, spread_pct, row, option, ltp))
+                candidates.append((abs(strike - float(spot)), -volume, -oi, spread_pct, row, option, ltp, greeks))
             except (TypeError, ValueError):
                 continue
         if not candidates:
             return None
         candidates.sort(key=lambda item: item[:4])
-        _, _, _, spread_pct, row, option, ltp = candidates[0]
+        _, _, _, spread_pct, row, option, ltp, greeks = candidates[0]
+        instrument_key = str(option.get("instrument_key", ""))
+        exchange = "NFO" if instrument_key.startswith("NSE_FO|") else "BFO" if instrument_key.startswith("BSE_FO|") else ""
         return {
             "status": "CONTRACT VALID",
             "option_type": option_type,
             "contract": option.get("trading_symbol") or row.get("trading_symbol", ""),
-            "exchange": "NFO" if str(option.get("instrument_key", "")).startswith("NSE_FO|") else "BFO",
-            "token": option.get("instrument_key", ""),
+            "exchange": exchange,
+            "token": instrument_key,
             "expiry": row.get("expiry", ""),
             "strike": float(row.get("strike_price")),
             "lotsize": int(option.get("lot_size") or row.get("lot_size") or 0),
@@ -183,6 +215,11 @@ class UpstoxMarketData:
             "spread_pct": round(spread_pct, 3),
             "volume": float((option.get("market_data") or {}).get("volume", 0) or 0),
             "oi": float((option.get("market_data") or {}).get("oi", 0) or 0),
+            "iv": float(greeks.get("iv", 0) or 0),
+            "delta": float(greeks.get("delta", 0) or 0),
+            "gamma": float(greeks.get("gamma", 0) or 0),
+            "theta": float(greeks.get("theta", 0) or 0),
+            "vega": float(greeks.get("vega", 0) or 0),
             "data_source": "upstox_option_chain",
         }
 
