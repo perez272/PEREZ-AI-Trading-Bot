@@ -5,10 +5,9 @@ import signal
 import time
 
 from src.tier1_option_observer import observe_tier1_option_chains
+from src.tier1_pipeline_bridge import process_new_observations
 
 RUNNING = True
-# Keep the observer responsive enough to see fast moves while retaining the
-# existing Upstox request pacing (one request/sec) inside the provider client.
 INTERVAL_SECONDS = 60
 
 
@@ -21,11 +20,12 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     print("PEREZ AI Tier-1 Option Observer — PAPER/OBSERVATION ONLY")
+    print("Pipeline: DETECTED -> CAPTURED -> ANALYZED -> STORED -> LEARNED")
     print("Universe: NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | NIFTYNXT50 | NIFTYFPI")
-    print("Explosive detector: 1m/3m/5m velocity + acceleration + volume + spread")
     while RUNNING:
         try:
             events = observe_tier1_option_chains()
+            pipeline = process_new_observations()
             early = [e for e in events if e.get("type") == "EARLY_EXPLOSIVE"]
             threshold = [e for e in events if e.get("type") == "THRESHOLD"]
             for event in early:
@@ -43,8 +43,14 @@ def main():
                     f"LTP={event['ltp']} baseline={event['baseline_ltp']} "
                     f"volume={event.get('volume')} OI={event.get('oi')} IV={event.get('iv')}"
                 )
-            if not events:
-                print("[TIER1 OBSERVER] no early explosive signal or new move threshold")
+            print(
+                "[TIER1 PIPELINE] "
+                f"captured={pipeline['captured']} processed={pipeline['processed']} "
+                f"analyzed={pipeline['analyzed']} early={pipeline['early_signals']} "
+                f"surges={pipeline['surge_events']} lessons={pipeline['lessons']}"
+            )
+            if not events and pipeline["processed"] == 0:
+                print("[TIER1 OBSERVER] no new signal or unprocessed observation")
         except Exception as exc:
             print(f"[TIER1 OBSERVER] cycle failed safely: {exc}")
         for _ in range(INTERVAL_SECONDS):
