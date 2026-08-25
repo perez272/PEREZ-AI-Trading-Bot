@@ -1,5 +1,9 @@
+import json
+import os
+import tempfile
 import time
 from datetime import datetime, timedelta, time as dt_time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.ai_scoring import calculate_score
@@ -20,11 +24,75 @@ IST = ZoneInfo("Asia/Kolkata")
 CANDLE_INTERVAL_MINUTES = 5
 MAX_CANDLE_AGE_SECONDS = FRESHNESS_MAX_AGE_MINUTES * 60
 HISTORICAL_LOOKBACK_DAYS = 15
+CANDLE_CACHE_FILE = Path(os.getenv("PEREZ_CANDLE_CACHE_FILE", "/tmp/perez_ai_candle_cache.json"))
 _CANDLE_CACHE = {}
 _SCAN_STATS = {}
 _session = None
 _client = None
 _router = None
+
+
+def _load_candle_cache():
+    """Load the last validated candle set so service restarts do not burst the API.
+
+    Cache entries are still subjected to the normal closed-candle and freshness
+    gates before they can reach indicators or the decision engine. A corrupt or
+    incompatible cache is discarded rather than trusted.
+    """
+    try:
+        raw = json.loads(CANDLE_CACHE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+        result = {}
+        for symbol, entry in raw.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("candles"), list):
+                continue
+            bucket_raw = entry.get("bucket")
+            try:
+                bucket = datetime.fromisoformat(str(bucket_raw))
+            except (TypeError, ValueError):
+                continue
+            result[str(symbol)] = {
+                "candles": entry["candles"],
+                "bucket": bucket,
+                "source": str(entry.get("source") or "cache"),
+            }
+        return result
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _persist_candle_cache():
+    """Atomically persist only validated scanner candles; never block on cache failure."""
+    payload = {}
+    for symbol, entry in _CANDLE_CACHE.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("candles"), list):
+            continue
+        bucket = entry.get("bucket")
+        if not isinstance(bucket, datetime):
+            continue
+        payload[symbol] = {
+            "candles": entry["candles"],
+            "bucket": bucket.isoformat(),
+            "source": entry.get("source", "cache"),
+        }
+    try:
+        CANDLE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix="perez-candle-cache-", dir=str(CANDLE_CACHE_FILE.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, CANDLE_CACHE_FILE)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"[MARKET DATA] Persistent candle cache write skipped: {exc}")
+
+
+_CANDLE_CACHE.update(_load_candle_cache())
 
 
 def _reset_scan_stats(symbol_count):
@@ -149,7 +217,6 @@ def _derive_momentum_fields(df):
     close = float(last["close"])
     candle_range = max(float(last["high"]) - float(last["low"]), 1e-9)
     body = abs(float(last["close"]) - float(last["open"]))
-    breakout = max(_safe_pct(close - prior_high, prior_high), _safe_pct(prior_low - close, prior_low), 0.0)
     direction_breakout = max(
         _safe_pct(close - prior_high, prior_high),
         _safe_pct(prior_low - close, prior_low),
@@ -204,6 +271,7 @@ def _scan_one(symbol, exchange, token):
             _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
         _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket, "source": source}
+        _persist_candle_cache()
         _SCAN_STATS["live_refreshes"] += 1
     else:
         source = entry.get("source", "cache") if entry else "cache"
