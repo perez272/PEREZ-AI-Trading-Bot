@@ -1,8 +1,7 @@
 """Continuous Tier-1 option-chain observer and persistent move learner.
 
-This layer is observational only: it never places or forces a trade. It records
-CE/PE contracts that cross +5/+10/+15/+20% and detects early acceleration
-precursors so the trading engine can evaluate them before a large move is complete.
+Observational only: never places or forces a trade. Persists successful chain
+observations and move events so Telegram can report genuine evidence.
 """
 from __future__ import annotations
 
@@ -53,7 +52,13 @@ class Tier1OptionObserver:
                 ltp REAL NOT NULL, move_pct REAL NOT NULL, observed_ts TEXT NOT NULL,
                 features_json TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+                observed_ts TEXT NOT NULL, contracts_seen INTEGER NOT NULL,
+                events_count INTEGER NOT NULL DEFAULT 0
+            )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol, threshold)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
 
     @staticmethod
     def _contract_key(symbol: str, row: dict[str, Any], option_type: str) -> str:
@@ -96,6 +101,7 @@ class Tier1OptionObserver:
         observed_ts = observed_ts or datetime.now(timezone.utc).isoformat()
         now_epoch = time.time()
         events: list[dict[str, Any]] = []
+        valid_contracts = 0
         with self._connect() as db:
             for row in chain or []:
                 for option_type in ("CE", "PE"):
@@ -107,6 +113,7 @@ class Tier1OptionObserver:
                         continue
                     if ltp <= 0 or not market.get("instrument_key"):
                         continue
+                    valid_contracts += 1
 
                     fast = self._record_fast_signal(symbol, option_type, market, observed_ts)
                     if fast and fast.early:
@@ -125,7 +132,7 @@ class Tier1OptionObserver:
                     baseline, baseline_ts, _ = existing
                     try:
                         baseline_age = now_epoch - datetime.fromisoformat(baseline_ts).timestamp()
-                    except ValueError:
+                    except (ValueError, TypeError):
                         baseline_age = BASELINE_TTL_SECONDS + 1
                     if baseline_age > BASELINE_TTL_SECONDS or ltp < baseline * 0.5:
                         db.execute("UPDATE baselines SET baseline_ltp=?, baseline_ts=?, last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, ltp, observed_ts, key))
@@ -142,6 +149,8 @@ class Tier1OptionObserver:
                         except sqlite3.IntegrityError:
                             pass
                     db.execute("UPDATE baselines SET last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, key))
+            if valid_contracts:
+                db.execute("INSERT INTO observations(symbol,observed_ts,contracts_seen,events_count) VALUES (?,?,?,?)", (symbol, observed_ts, valid_contracts, len(events)))
             db.execute("DELETE FROM move_events WHERE id NOT IN (SELECT id FROM move_events ORDER BY id DESC LIMIT ?)", (MAX_MEMORY_ROWS,))
         return events
 
@@ -158,6 +167,12 @@ class Tier1OptionObserver:
             except Exception as exc:
                 print(f"[TIER1 OBSERVER] {symbol}: {exc}")
         return events
+
+    def stats(self) -> dict[str, Any]:
+        with self._connect() as db:
+            observations = db.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+            surge_events = db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0]
+        return {"observations": int(observations), "surge_events": int(surge_events), "wins": 0, "win_rate": 0.0}
 
     def match(self, symbol: str, features: dict[str, Any], threshold: float | None = None, limit: int = 50) -> dict[str, Any]:
         clauses = ["symbol=?"]
