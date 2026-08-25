@@ -80,8 +80,9 @@ def _read_heartbeat():
 
 
 def _scan_message(heartbeat):
+    safety = "\n\n🛡️ Scan telemetry is read-only; it does not alter trading or risk decisions."
     if not heartbeat:
-        return "🔎 SCAN TELEMETRY\nNo heartbeat scan telemetry persisted yet."
+        return "🔎 SCAN TELEMETRY\nNo heartbeat scan telemetry persisted yet." + safety
 
     status = heartbeat.get("status", "unknown")
     lines = [
@@ -126,9 +127,7 @@ def _scan_message(heartbeat):
     if heartbeat.get("error"):
         lines.append(f"⚠️ Error: {heartbeat['error']}")
 
-    lines.append("")
-    lines.append("🛡️ Scan telemetry is read-only; it does not alter trading or risk decisions.")
-    return "\n".join(lines)
+    return "\n".join(lines) + safety
 
 
 def _learning_message(learning, heartbeat, now, hostname):
