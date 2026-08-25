@@ -13,6 +13,8 @@ from src.trade_engine import create_trade, resolve_option_contract
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover, CANDIDATE_FILE
 from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
+from src.tier1_option_observer import observe_tier1_option_chains
+from src.learning_status import record_cycle
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS, MINIMUM_SCORE, MAX_TECHNICAL_BYPASS_SCORE,
     MAX_TRADES_PER_DAY, OPTIONS_MIN_SCORE, OPTION_MAX_PREMIUM,
@@ -97,34 +99,18 @@ def _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momen
     else:
         trend_score = momentum_score = volume_score = structure_score = index_confirmation = 0
     return {
-        "symbol": candidate["symbol"],
-        "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
-        "expiry": contract_probe.get("expiry", ""),
-        "ltp": contract_probe.get("ltp", 0),
-        "exchange": contract_probe.get("exchange", "NFO"),
-        "token": contract_probe.get("token", ""),
-        "underlying_signal": candidate["signal"],
-        "mtf_direction": mtf_direction,
-        "trend_score": trend_score,
-        "momentum_score": momentum_score,
-        "volume_score": volume_score,
-        "vwap_score": 0,
-        "index_confirmation": index_confirmation,
-        "oi_score": 0,
-        "oi_change_score": 0,
-        "iv_score": 0,
-        "liquidity_score": 0,
-        "volatility_score": 0,
-        "structure_score": structure_score,
-        "news_confirmation": 0,
-        "event_risk_penalty": 0,
-        "spread_pct": 0,
-        "slippage_pct": 0,
+        "symbol": candidate["symbol"], "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
+        "expiry": contract_probe.get("expiry", ""), "ltp": contract_probe.get("ltp", 0),
+        "exchange": contract_probe.get("exchange", "NFO"), "token": contract_probe.get("token", ""),
+        "underlying_signal": candidate["signal"], "mtf_direction": mtf_direction,
+        "trend_score": trend_score, "momentum_score": momentum_score, "volume_score": volume_score,
+        "vwap_score": 0, "index_confirmation": index_confirmation, "oi_score": 0, "oi_change_score": 0,
+        "iv_score": 0, "liquidity_score": 0, "volatility_score": 0, "structure_score": structure_score,
+        "news_confirmation": 0, "event_risk_penalty": 0, "spread_pct": 0, "slippage_pct": 0,
     }
 
 
 def _candidate_queue(results, admitted):
-    """Build a ranked queue instead of stopping after one rejected candidate."""
     candidates = []
     index_candidate = select_index_momentum_candidate(results, INDEX_MOMENTUM_MIN_SCORE) if INDEX_MOMENTUM_ENABLED else None
     if index_candidate:
@@ -134,6 +120,22 @@ def _candidate_queue(results, admitted):
         candidates.append((technical, False))
     candidates.sort(key=lambda pair: (1 if pair[1] else 0, pair[0].get("momentum_score", 0), pair[0].get("score", 0)), reverse=True)
     return candidates
+
+
+def _observe_market_evidence():
+    """Run the observational learner independently from trade admission."""
+    try:
+        events = observe_tier1_option_chains()
+        record_cycle(observations=1, lessons_events=len(events), events=events)
+        if events:
+            print(f"[LEARNING] Tier-1 observer: {len(events)} genuine events")
+        else:
+            print("[LEARNING] Tier-1 observer: market observation persisted; no surge event")
+        return events
+    except Exception as exc:
+        # Observation must never stop or weaken the trading engine.
+        print(f"[LEARNING] Tier-1 observer unavailable — trading path unchanged: {exc}")
+        return []
 
 
 def main():
@@ -170,6 +172,8 @@ def main():
             if not allowed:
                 write_heartbeat("blocked", reason=reason, capital=capital)
                 print(f"Bot waiting: {reason}")
+                # Still collect observational evidence during the market session.
+                _observe_market_evidence()
                 time.sleep(min(60, RESCAN_DELAY_SECONDS))
                 continue
 
@@ -179,20 +183,20 @@ def main():
             except Exception as exc:
                 write_heartbeat("scan_error", error=str(exc), capital=capital)
                 print(f"TIER-1 MARKET SCAN FAILED — skipping this cycle: {exc}")
+                _observe_market_evidence()
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
             print_results(results)
             scan_stats = get_scan_stats()
             write_heartbeat("scanned", candidates=len(results), capital=capital, **{
-                "market_data_api_attempts": scan_stats["api_attempts"],
-                "market_data_live_refreshes": scan_stats["live_refreshes"],
-                "market_data_cache_hits": scan_stats["cache_hits"],
-                "market_data_fresh_candles": scan_stats["fresh_candles"],
-                "market_data_fresh_to_decision": scan_stats["fresh_to_decision_engine"],
-                "decision_evaluations": scan_stats["decision_evaluations"],
-                "market_data_blocked_or_failed": scan_stats["api_blocked_or_failed"],
-                "market_data_invalid_or_stale": scan_stats["stale_or_invalid"],
+                "market_data_api_attempts": scan_stats["api_attempts"], "market_data_live_refreshes": scan_stats["live_refreshes"],
+                "market_data_cache_hits": scan_stats["cache_hits"], "market_data_fresh_candles": scan_stats["fresh_candles"],
+                "market_data_fresh_to_decision": scan_stats["fresh_to_decision_engine"], "decision_evaluations": scan_stats["decision_evaluations"],
+                "market_data_blocked_or_failed": scan_stats["api_blocked_or_failed"], "market_data_invalid_or_stale": scan_stats["stale_or_invalid"],
             })
+
+            # Observation is deliberately decoupled from trade selection.
+            _observe_market_evidence()
 
             try:
                 admitted, rejected = discover()
@@ -201,6 +205,8 @@ def main():
                 write_heartbeat("discovery_error", error=str(exc), capital=capital)
                 print(f"FUNDAMENTAL DISCOVERY FAILED — continuing with technical admission: {exc}")
             print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
+            if rejected:
+                record_cycle(rejections=len(rejected))
 
             queue = _candidate_queue(results, admitted)
             if not queue:
@@ -214,6 +220,7 @@ def main():
                 admitted_ok, admission_reason = _fundamental_admission(admitted, symbol, candidate.get("score", 0), momentum_strategy)
                 if not admitted_ok:
                     write_heartbeat("fundamental_reject", symbol=symbol, reason=admission_reason)
+                    record_cycle(rejections=1)
                     print(f"FUNDAMENTAL GATE REJECTED {symbol}: {admission_reason}")
                     continue
 
@@ -222,9 +229,11 @@ def main():
                     contract_probe = resolve_option_contract(symbol, candidate["close"], candidate["signal"])
                 except Exception as exc:
                     print(f"OPTION CONTRACT LOOKUP FAILED for {symbol}: {exc}")
+                    record_cycle(rejections=1)
                     continue
                 if contract_probe.get("status") != "CONTRACT VALID":
                     print(f"OPTION CONTRACT REJECTED for {symbol}: {contract_probe}")
+                    record_cycle(rejections=1)
                     continue
 
                 print(f"AFFORDABLE OPTION: {contract_probe['contract']} Strike={contract_probe['strike']} LTP=Rs {contract_probe['ltp']:.2f} Expiry={contract_probe['expiry']} Lotsize={contract_probe['lotsize']}")
@@ -234,15 +243,18 @@ def main():
                     options_result = evaluate_option_candidate(gate_candidate)
                 except Exception as exc:
                     print(f"OPTIONS GATE FAILED for {symbol}: {exc}")
+                    record_cycle(rejections=1)
                     continue
                 gate = options_result.get("options_gate", {})
                 print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')} | {', '.join(gate.get('reasons', []))}")
                 if not options_result.get("paper_trade_candidate"):
+                    record_cycle(rejections=1)
                     continue
 
                 live_ltp = float(options_result.get("ltp", 0) or 0)
                 if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
                     print(f"LIVE OPTION PRICE CHANGED — no trade for {symbol}: Rs {live_ltp:.2f}")
+                    record_cycle(rejections=1)
                     continue
                 contract_probe["ltp"] = live_ltp
 
@@ -251,9 +263,11 @@ def main():
                     trade = create_trade(symbol, candidate["close"], candidate["signal"], capital, resolved_contract=contract_probe)
                 except Exception as exc:
                     print(f"TRADE CREATION FAILED for {symbol}: {exc}")
+                    record_cycle(rejections=1)
                     continue
                 if trade.get("status") != "PAPER TRADE ACTIVE":
                     print("Trade was not created:", trade)
+                    record_cycle(rejections=1)
                     continue
 
                 if momentum_strategy:
