@@ -9,12 +9,11 @@ from src.alternative_market_data import get_upstox_client
 
 
 class MarketDataRouter:
-    """Route verified market-data requests across configured legitimate providers.
+    """Single production gateway for candles and live option quotes.
 
-    ``auto`` keeps Angel One as the first provider and routes around a provider
-    failure/cooldown to Upstox. The router never manufactures or relaxes data;
-    the scanner's freshness/integrity gates remain authoritative before any
-    indicator or trade-decision code is reached.
+    The router never fabricates data. Provider selection is explicit, every
+    successful response is tagged with its source, and callers receive no
+    market data when all configured providers fail.
     """
 
     def __init__(self, angel_client):
@@ -28,7 +27,15 @@ class MarketDataRouter:
             "upstox_attempts": 0,
             "upstox_successes": 0,
             "provider_failures": 0,
+            "option_angel_attempts": 0,
+            "option_angel_successes": 0,
+            "option_upstox_attempts": 0,
+            "option_upstox_successes": 0,
         }
+
+    def _validate_mode(self) -> None:
+        if self.mode not in {"auto", "angel", "upstox"}:
+            raise ValueError("MARKET_DATA_PROVIDER must be auto, angel, or upstox")
 
     def _angel_allowed(self) -> bool:
         if self.mode == "upstox":
@@ -36,8 +43,6 @@ class MarketDataRouter:
         try:
             status = self.angel_client.market_data_status()
         except Exception:
-            # A status endpoint failure must not make Angel unusable; the
-            # actual request is still protected by the exception handler below.
             return True
         cooldown = float(status.get("cooldown_remaining", 0) or 0)
         remaining = int(status.get("requests_remaining", 1) or 0)
@@ -55,17 +60,18 @@ class MarketDataRouter:
             and bool(response.get("data"))
         )
 
+    @staticmethod
+    def _valid_option_quote(quote: Any) -> bool:
+        return isinstance(quote, dict) and float(quote.get("ltp", 0) or 0) > 0
+
     def get_candles(
         self,
         symbol: str,
         params: dict[str, Any],
         interval_minutes: int = 5,
     ) -> tuple[list[Any] | None, str]:
-        if self.mode not in {"auto", "angel", "upstox"}:
-            raise ValueError("MARKET_DATA_PROVIDER must be auto, angel, or upstox")
+        self._validate_mode()
 
-        # Angel is attempted when healthy. A cooldown is a provider-local
-        # condition, not a global market-data stop.
         if self._angel_allowed():
             self.stats["angel_attempts"] += 1
             try:
@@ -83,9 +89,6 @@ class MarketDataRouter:
         if self.mode == "angel":
             return None, "none"
 
-        # Upstox is an independent recovery path. It is attempted whenever
-        # Angel is unavailable, rate-limited, unhealthy, or returns unusable
-        # data. No decision threshold is changed by this fallback.
         if self.upstox.available():
             self.stats["upstox_attempts"] += 1
             try:
@@ -101,6 +104,116 @@ class MarketDataRouter:
             if candles is not None:
                 self.stats["provider_failures"] += 1
 
+        return None, "none"
+
+    def get_option_quote(self, exchange: str, token: str) -> tuple[dict[str, Any] | None, str]:
+        """Fetch one normalized option quote through the provider gateway.
+
+        Upstox instrument keys (for example ``NSE_FO|...``) are queried through
+        Upstox first. Numeric broker tokens use Angel One because they cannot be
+        safely translated into an Upstox instrument key without instrument
+        metadata. If Upstox is unavailable, Angel is the authenticated fallback.
+        """
+        self._validate_mode()
+        token = str(token or "").strip()
+        exchange = str(exchange or "NFO").strip().upper()
+        upstox_key = token if "|" in token else ""
+
+        if self.mode != "angel" and self.upstox.available() and upstox_key:
+            self.stats["option_upstox_attempts"] += 1
+            try:
+                quote = self.upstox.get_full_quote(upstox_key)
+            except Exception as exc:
+                self.stats["provider_failures"] += 1
+                print(f"[MARKET DATA] Upstox option quote exception: {exc}")
+                quote = None
+            if self._valid_option_quote(quote):
+                self.stats["option_upstox_successes"] += 1
+                return self._normalize_upstox_option_quote(quote), "upstox"
+
+        if self._angel_allowed():
+            self.stats["option_angel_attempts"] += 1
+            try:
+                response = self.angel_client.get_market_data("FULL", {exchange: [token]})
+            except Exception as exc:
+                self.stats["provider_failures"] += 1
+                print(f"[MARKET DATA] Angel One option quote exception: {exc}")
+                response = None
+            quote = self._extract_angel_quote(response)
+            if quote is not None:
+                self.stats["option_angel_successes"] += 1
+                return quote, "angel_one"
+
+        return None, "none"
+
+    @staticmethod
+    def _extract_angel_quote(response: Any) -> dict[str, Any] | None:
+        if not isinstance(response, dict) or not response.get("status"):
+            return None
+        fetched = response.get("data", {}).get("fetched", [])
+        if not isinstance(fetched, list) or not fetched or not isinstance(fetched[0], dict):
+            return None
+        return fetched[0]
+
+    @staticmethod
+    def _normalize_upstox_option_quote(quote: dict[str, Any]) -> dict[str, Any]:
+        depth = quote.get("depth") or {}
+        buys = depth.get("buy") or []
+        sells = depth.get("sell") or []
+        bid = float(buys[0].get("price", 0) or 0) if buys else 0.0
+        ask = float(sells[0].get("price", 0) or 0) if sells else 0.0
+        ltp = float(quote.get("last_price", 0) or 0)
+        return {
+            "ltp": ltp,
+            "tradeVolume": quote.get("volume", 0),
+            "opnInterest": quote.get("oi", 0),
+            "totBuyQuan": quote.get("total_buy_quantity", 0),
+            "totSellQuan": quote.get("total_sell_quantity", 0),
+            "lastTradeQty": 0,
+            "avgPrice": quote.get("average_price", 0),
+            "netChange": quote.get("net_change", 0),
+            "percentChange": 0.0,
+            "depth": {"buy": [{"price": bid}] if bid > 0 else [], "sell": [{"price": ask}] if ask > 0 else []},
+            "instrument_token": quote.get("instrument_token", ""),
+            "timestamp": quote.get("timestamp"),
+        }
+
+    def get_option_ltp(self, exchange: str, symbol: str, token: str) -> tuple[float | None, str]:
+        quote, source = self.get_option_quote(exchange, token)
+        if not quote:
+            return None, source
+        try:
+            ltp = float(quote.get("ltp", 0) or 0)
+        except (TypeError, ValueError):
+            return None, source
+        return (ltp if ltp > 0 else None), source
+
+    def get_option_ltp_batch(self, exchange: str, contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        results = []
+        for contract in contracts:
+            ltp, source = self.get_option_ltp(
+                exchange,
+                str(contract.get("symbol") or contract.get("contract") or ""),
+                str(contract.get("token") or contract.get("symbolToken") or ""),
+            )
+            item = dict(contract)
+            item["ltp"] = ltp
+            item["data_source"] = source
+            results.append(item)
+        return results
+
+    def get_option_chain(self, symbol: str, expiry: str = "current_week") -> tuple[list[dict[str, Any]] | None, str]:
+        """Use Upstox option-chain data when available; fail closed otherwise."""
+        self._validate_mode()
+        if self.mode != "angel" and self.upstox.available():
+            try:
+                chain = self.upstox.get_option_chain(symbol, expiry=expiry)
+            except Exception as exc:
+                self.stats["provider_failures"] += 1
+                print(f"[MARKET DATA] Upstox option chain exception for {symbol}: {exc}")
+                chain = None
+            if isinstance(chain, list) and chain:
+                return chain, "upstox"
         return None, "none"
 
     def summary(self) -> dict[str, int]:
