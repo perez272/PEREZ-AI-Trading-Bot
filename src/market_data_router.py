@@ -21,16 +21,10 @@ class MarketDataRouter:
         self.upstox = get_upstox_client()
         self.mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
         self.stats = {
-            "angel_attempts": 0,
-            "angel_successes": 0,
-            "angel_skipped_cooldown": 0,
-            "upstox_attempts": 0,
-            "upstox_successes": 0,
-            "provider_failures": 0,
-            "option_angel_attempts": 0,
-            "option_angel_successes": 0,
-            "option_upstox_attempts": 0,
-            "option_upstox_successes": 0,
+            "angel_attempts": 0, "angel_successes": 0, "angel_skipped_cooldown": 0,
+            "upstox_attempts": 0, "upstox_successes": 0, "provider_failures": 0,
+            "option_angel_attempts": 0, "option_angel_successes": 0,
+            "option_upstox_attempts": 0, "option_upstox_successes": 0,
         }
 
     def _validate_mode(self) -> None:
@@ -53,25 +47,19 @@ class MarketDataRouter:
 
     @staticmethod
     def _valid_payload(response: Any) -> bool:
-        return (
-            isinstance(response, dict)
-            and bool(response.get("status"))
-            and isinstance(response.get("data"), list)
-            and bool(response.get("data"))
-        )
+        return isinstance(response, dict) and bool(response.get("status")) and isinstance(response.get("data"), list) and bool(response.get("data"))
 
     @staticmethod
     def _valid_option_quote(quote: Any) -> bool:
-        return isinstance(quote, dict) and float(quote.get("ltp", 0) or 0) > 0
+        if not isinstance(quote, dict):
+            return False
+        try:
+            return float(quote.get("ltp") or quote.get("last_price") or 0) > 0
+        except (TypeError, ValueError):
+            return False
 
-    def get_candles(
-        self,
-        symbol: str,
-        params: dict[str, Any],
-        interval_minutes: int = 5,
-    ) -> tuple[list[Any] | None, str]:
+    def get_candles(self, symbol: str, params: dict[str, Any], interval_minutes: int = 5) -> tuple[list[Any] | None, str]:
         self._validate_mode()
-
         if self._angel_allowed():
             self.stats["angel_attempts"] += 1
             try:
@@ -85,10 +73,8 @@ class MarketDataRouter:
                 return response["data"], "angel_one"
             if response is not None:
                 self.stats["provider_failures"] += 1
-
         if self.mode == "angel":
             return None, "none"
-
         if self.upstox.available():
             self.stats["upstox_attempts"] += 1
             try:
@@ -103,22 +89,14 @@ class MarketDataRouter:
                 return candles, "upstox"
             if candles is not None:
                 self.stats["provider_failures"] += 1
-
         return None, "none"
 
     def get_option_quote(self, exchange: str, token: str) -> tuple[dict[str, Any] | None, str]:
-        """Fetch one normalized option quote through the provider gateway.
-
-        Upstox instrument keys (for example ``NSE_FO|...``) are queried through
-        Upstox first. Numeric broker tokens use Angel One because they cannot be
-        safely translated into an Upstox instrument key without instrument
-        metadata. If Upstox is unavailable, Angel is the authenticated fallback.
-        """
+        """Fetch one option quote through the single provider gateway."""
         self._validate_mode()
         token = str(token or "").strip()
         exchange = str(exchange or "NFO").strip().upper()
         upstox_key = token if "|" in token else ""
-
         if self.mode != "angel" and self.upstox.available() and upstox_key:
             self.stats["option_upstox_attempts"] += 1
             try:
@@ -130,7 +108,6 @@ class MarketDataRouter:
             if self._valid_option_quote(quote):
                 self.stats["option_upstox_successes"] += 1
                 return self._normalize_upstox_option_quote(quote), "upstox"
-
         if self._angel_allowed():
             self.stats["option_angel_attempts"] += 1
             try:
@@ -143,7 +120,6 @@ class MarketDataRouter:
             if quote is not None:
                 self.stats["option_angel_successes"] += 1
                 return quote, "angel_one"
-
         return None, "none"
 
     @staticmethod
@@ -151,31 +127,22 @@ class MarketDataRouter:
         if not isinstance(response, dict) or not response.get("status"):
             return None
         fetched = response.get("data", {}).get("fetched", [])
-        if not isinstance(fetched, list) or not fetched or not isinstance(fetched[0], dict):
-            return None
-        return fetched[0]
+        return fetched[0] if isinstance(fetched, list) and fetched and isinstance(fetched[0], dict) else None
 
     @staticmethod
     def _normalize_upstox_option_quote(quote: dict[str, Any]) -> dict[str, Any]:
         depth = quote.get("depth") or {}
-        buys = depth.get("buy") or []
-        sells = depth.get("sell") or []
+        buys, sells = depth.get("buy") or [], depth.get("sell") or []
         bid = float(buys[0].get("price", 0) or 0) if buys else 0.0
         ask = float(sells[0].get("price", 0) or 0) if sells else 0.0
-        ltp = float(quote.get("last_price", 0) or 0)
         return {
-            "ltp": ltp,
-            "tradeVolume": quote.get("volume", 0),
-            "opnInterest": quote.get("oi", 0),
-            "totBuyQuan": quote.get("total_buy_quantity", 0),
-            "totSellQuan": quote.get("total_sell_quantity", 0),
-            "lastTradeQty": 0,
-            "avgPrice": quote.get("average_price", 0),
-            "netChange": quote.get("net_change", 0),
+            "ltp": float(quote.get("last_price", 0) or 0),
+            "tradeVolume": quote.get("volume", 0), "opnInterest": quote.get("oi", 0),
+            "totBuyQuan": quote.get("total_buy_quantity", 0), "totSellQuan": quote.get("total_sell_quantity", 0),
+            "lastTradeQty": 0, "avgPrice": quote.get("average_price", 0), "netChange": quote.get("net_change", 0),
             "percentChange": 0.0,
             "depth": {"buy": [{"price": bid}] if bid > 0 else [], "sell": [{"price": ask}] if ask > 0 else []},
-            "instrument_token": quote.get("instrument_token", ""),
-            "timestamp": quote.get("timestamp"),
+            "instrument_token": quote.get("instrument_token", ""), "timestamp": quote.get("timestamp"),
         }
 
     def get_option_ltp(self, exchange: str, symbol: str, token: str) -> tuple[float | None, str]:
@@ -191,19 +158,13 @@ class MarketDataRouter:
     def get_option_ltp_batch(self, exchange: str, contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results = []
         for contract in contracts:
-            ltp, source = self.get_option_ltp(
-                exchange,
-                str(contract.get("symbol") or contract.get("contract") or ""),
-                str(contract.get("token") or contract.get("symbolToken") or ""),
-            )
+            ltp, source = self.get_option_ltp(exchange, str(contract.get("symbol") or contract.get("contract") or ""), str(contract.get("token") or contract.get("symbolToken") or ""))
             item = dict(contract)
-            item["ltp"] = ltp
-            item["data_source"] = source
+            item["ltp"], item["data_source"] = ltp, source
             results.append(item)
         return results
 
     def get_option_chain(self, symbol: str, expiry: str = "current_week") -> tuple[list[dict[str, Any]] | None, str]:
-        """Use Upstox option-chain data when available; fail closed otherwise."""
         self._validate_mode()
         if self.mode != "angel" and self.upstox.available():
             try:
