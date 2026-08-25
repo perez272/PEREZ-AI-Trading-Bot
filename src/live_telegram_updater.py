@@ -2,6 +2,7 @@ import os
 import time
 import socket
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,6 +20,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 INTERVAL = int(os.getenv("TELEGRAM_UPDATE_INTERVAL", "300"))
 IST = ZoneInfo("Asia/Kolkata")
 HEARTBEAT_PATH = ROOT / "data" / "runtime" / "heartbeat.json"
+TELEGRAM_FINGERPRINT_PATH = ROOT / "data" / "runtime" / "telegram_status_fingerprint.json"
 
 
 def telegram(method, payload):
@@ -80,11 +82,12 @@ def _read_heartbeat():
 
 
 def _provider_telemetry():
-    """Expose configured provider state only; never performs a market-data request."""
+    """Expose effective configured provider state only; never requests market data."""
     mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    upstox_enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    upstox_enabled = os.getenv("UPSTOX_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     upstox_configured = bool(os.getenv("UPSTOX_ACCESS_TOKEN", "").strip())
-    return mode, upstox_enabled, upstox_configured
+    effective_mode = "angel" if mode == "auto" and not upstox_enabled else mode
+    return effective_mode, upstox_enabled, upstox_configured
 
 
 def _scan_message(heartbeat):
@@ -187,6 +190,49 @@ def _learning_message(learning, heartbeat, now, hostname):
     )
 
 
+def _fingerprint_payload(learning, heartbeat):
+    """Use meaningful state only; timestamps alone must not trigger a new message."""
+    volatile = {"epoch", "timestamp_utc", "ts", "updated_at", "heartbeat", "telegram_snapshot", "pid"}
+    stable_heartbeat = {k: v for k, v in heartbeat.items() if k not in volatile}
+    stable_learning = {
+        k: v for k, v in learning.items()
+        if k not in {"last_observation_time", "generated_at", "telegram_snapshot"}
+    }
+    mode, upstox_enabled, upstox_configured = _provider_telemetry()
+    return {
+        "learning": stable_learning,
+        "heartbeat": stable_heartbeat,
+        "provider": {"mode": mode, "upstox_enabled": upstox_enabled, "upstox_configured": upstox_configured},
+        "paper_mode": True,
+        "orders_enabled": False,
+    }
+
+
+def _fingerprint(learning, heartbeat):
+    payload = json.dumps(_fingerprint_payload(learning, heartbeat), sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _last_fingerprint():
+    try:
+        if TELEGRAM_FINGERPRINT_PATH.exists():
+            data = json.loads(TELEGRAM_FINGERPRINT_PATH.read_text(encoding="utf-8"))
+            return str(data.get("fingerprint", "")) if isinstance(data, dict) else ""
+    except (OSError, ValueError, TypeError):
+        pass
+    return ""
+
+
+def _save_fingerprint(value):
+    try:
+        TELEGRAM_FINGERPRINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TELEGRAM_FINGERPRINT_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"fingerprint": value}, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(TELEGRAM_FINGERPRINT_PATH)
+    except OSError as exc:
+        print(f"Telegram dedup state write failed: {exc}", flush=True)
+
+
 def send_status():
     if not CHAT_ID:
         raise RuntimeError("Telegram chat ID not found in .env")
@@ -195,8 +241,14 @@ def send_status():
     hostname = socket.gethostname()
     learning = get_learning_status()
     heartbeat = _read_heartbeat()
+    fingerprint = _fingerprint(learning, heartbeat)
+    if fingerprint == _last_fingerprint():
+        return False
+
     message = _learning_message(learning, heartbeat, now, hostname)
     telegram("sendMessage", {"chat_id": CHAT_ID, "text": message})
+    _save_fingerprint(fingerprint)
+    return True
 
 
 def main():
@@ -204,14 +256,18 @@ def main():
     me = telegram("getMe", {})
     bot_name = me["result"].get("username", "unknown")
     print(f"Telegram API OK — @{bot_name}", flush=True)
-    send_status()
-    print("Initial Telegram heartbeat sent", flush=True)
+    if send_status():
+        print("Initial Telegram heartbeat sent", flush=True)
+    else:
+        print("Initial Telegram heartbeat unchanged; not sent", flush=True)
 
     while True:
         time.sleep(INTERVAL)
         try:
-            send_status()
-            print("Telegram heartbeat sent", flush=True)
+            if send_status():
+                print("Telegram heartbeat sent", flush=True)
+            else:
+                print("Telegram heartbeat unchanged; not sent", flush=True)
         except Exception as exc:
             print(f"Telegram heartbeat failed: {exc}", flush=True)
 
