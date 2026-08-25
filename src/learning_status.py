@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,18 @@ def _historical_trade_stats() -> tuple[int, float]:
     return wins, round((wins / closed * 100.0) if closed else 0.0, 2)
 
 
+def _persisted_observation_timestamp(observer: Any, observations: int) -> str | None:
+    """Return the timestamp of actual observer DB evidence, never a bookkeeping timestamp."""
+    if observations <= 0:
+        return None
+    try:
+        with observer._connect() as db:
+            row = db.execute("SELECT observed_ts FROM observations ORDER BY id DESC LIMIT 1").fetchone()
+        return str(row[0]) if row and row[0] else None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def get_learning_status() -> dict[str, Any]:
     observer = get_tier1_option_observer()
     observer_stats = observer.stats()
@@ -70,9 +83,7 @@ def get_learning_status() -> dict[str, Any]:
     risk = daily_summary()
     wins, win_rate = _historical_trade_stats()
     observations = int(observer_stats.get("observations", 0) or 0)
-    # A timestamp in learning_status.json is only bookkeeping. The authoritative
-    # observation count comes from the observer's persisted SQLite evidence.
-    last_observation = data.get("last_observation") if observations > 0 else None
+    last_observation = _persisted_observation_timestamp(observer, observations)
     return {
         "completed_paper_trades": risk["closed_trades"],
         "wins": wins,
