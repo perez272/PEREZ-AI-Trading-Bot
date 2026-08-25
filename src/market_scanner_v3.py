@@ -8,6 +8,7 @@ from src.trade_decision import get_trade_decision
 from src.config import API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET
 from src.broker.session_manager import SessionManager
 from src.broker.angel_client import AngelClient
+from src.market_data_router import MarketDataRouter
 from src.optionable_universe import get_optionable_universe
 from src.data_cache import load_cache, save_cache, cache_valid
 
@@ -19,6 +20,7 @@ CANDLE_CACHE = {}
 CACHE_EXPIRY = CACHE_MAX_AGE_MINUTES * 60
 _session = None
 _client = None
+_router = None
 
 
 def get_client():
@@ -27,6 +29,13 @@ def get_client():
         _session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
         _client = AngelClient(_session.get_client())
     return _client
+
+
+def _get_router():
+    global _router
+    if _router is None:
+        _router = MarketDataRouter(get_client())
+    return _router
 
 
 def get_universe():
@@ -59,14 +68,11 @@ def _validate_candles(candles):
         last = candles[-1]
         if not isinstance(last, (list, tuple)) or len(last) < 6:
             return False
-        # Angel One candle timestamp is the first field.
         raw_ts = str(last[0]).replace("Z", "+00:00")
         ts = datetime.fromisoformat(raw_ts)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
         now = datetime.now(ts.tzinfo)
-        # During market hours a 5-minute candle should not be older than 10 min.
-        # Outside market hours, allow the latest completed session candle.
         age = (now - ts).total_seconds()
         if age < -60 or age > 15 * 60:
             return False
@@ -95,7 +101,6 @@ def get_candles(symbol, exchange, token):
     except Exception as e:
         print(f"{symbol}: persistent cache error -> {e}")
 
-    # With live refreshes disabled, stale/missing data is a hard NO-DATA result.
     if MAX_API_REFRESHES_PER_SCAN <= 0:
         return None
 
@@ -108,12 +113,12 @@ def get_candles(symbol, exchange, token):
         "todate": now.strftime("%Y-%m-%d %H:%M"),
     }
     try:
-        response = get_client().get_candles(params)
-        candles = response.get("data") if response and response.get("status") else None
+        candles, source = _get_router().get_candles(symbol, params, interval_minutes=5)
         if not _validate_candles(candles):
             return None
         CANDLE_CACHE[symbol] = {"data": candles, "time": time.time()}
         save_cache(symbol, candles)
+        print(f"{symbol}: live candle source={source}")
         return candles
     except Exception as e:
         print(f"{symbol}: candle error -> {e}")
@@ -178,7 +183,7 @@ def hype_score(df):
 
 def scan_market():
     universe = get_universe()
-    print(f"\nPEREZ AI HYPE RADAR")
+    print("\nPEREZ AI HYPE RADAR")
     print(f"OPTIONABLE NSE STOCKS: {len(universe)}")
     results = []
     cached_count = 0
