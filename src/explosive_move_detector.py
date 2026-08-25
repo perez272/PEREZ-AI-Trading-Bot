@@ -1,7 +1,7 @@
 """Low-latency Tier-1 option explosive-move detector.
 
 Observational/paper-only signal layer. It detects acceleration BEFORE a large
-5-100% option move is complete; it never places orders and never overrides risk gates.
+option move is complete; it never places orders and never overrides risk gates.
 """
 from __future__ import annotations
 
@@ -25,6 +25,15 @@ class ExplosiveMoveSignal:
     score: float
     early: bool
     reasons: tuple[str, ...]
+    oi_change_pct: float = 0.0
+    iv_change_pct: float = 0.0
+    delta_change: float = 0.0
+    gamma_change: float = 0.0
+    spot_change_pct: float = 0.0
+    futures_change_pct: float = 0.0
+    distance_to_spot_pct: float = 0.0
+    minutes_to_expiry: float = 0.0
+    precursor_score: float = 0.0
 
 
 def _pct(now: float, old: float) -> float:
@@ -38,11 +47,27 @@ def _value(row: dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
+def _series_change(current: dict[str, Any], history: list[dict[str, Any]], key: str) -> float:
+    now = _value(current, key)
+    old = 0.0
+    for item in history:
+        old = _value(item, key)
+        if old != 0:
+            break
+    return _pct(now, old) if old != 0 else 0.0
+
+
+def _nested(row: dict[str, Any], key: str) -> float:
+    md = row.get("market_data") or {}
+    greeks = row.get("option_greeks") if isinstance(row.get("option_greeks"), dict) else {}
+    return _value(row, key, _value(md, key, _value(greeks, key)))
+
+
 def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any], history: list[dict[str, Any]]) -> ExplosiveMoveSignal | None:
-    """Detect early acceleration from recent option observations.
+    """Detect early acceleration plus richer option/underlying precursor evidence.
 
     history is oldest -> newest and should contain observations no older than 5 minutes.
-    Thresholds are deliberately precursor thresholds, not trade triggers.
+    Thresholds remain research/precursor thresholds, not trade triggers.
     """
     md = current.get("market_data") or current
     ltp = _value(md, "ltp")
@@ -74,6 +99,21 @@ def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any]
     ask = _value(md, "ask_price", _value(md, "ask"))
     spread_pct = ((ask - bid) / ltp * 100.0) if ltp > 0 and ask >= bid > 0 else 999.0
 
+    oi_change_pct = _series_change(current, history, "open_interest")
+    if oi_change_pct == 0:
+        oi_change_pct = _series_change(current, history, "oi")
+    iv_change_pct = _series_change(current, history, "iv")
+    delta_now = _nested(current, "delta")
+    delta_old = _nested(history[-1], "delta") if history else 0.0
+    gamma_now = _nested(current, "gamma")
+    gamma_old = _nested(history[-1], "gamma") if history else 0.0
+    delta_change = delta_now - delta_old if delta_old or delta_now else 0.0
+    gamma_change = gamma_now - gamma_old if gamma_old or gamma_now else 0.0
+    spot_change_pct = _series_change(current, history, "spot_ltp")
+    futures_change_pct = _series_change(current, history, "futures_ltp")
+    distance_to_spot_pct = _value(current, "distance_to_spot_pct")
+    minutes_to_expiry = _value(current, "minutes_to_expiry")
+
     reasons: list[str] = []
     score = 0.0
     if move_1m >= 1.5:
@@ -93,7 +133,25 @@ def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any]
     elif spread_pct > 5.0:
         score -= 20; reasons.append("wide_spread_penalty")
 
-    early = score >= 55 and acceleration >= 0.5 and move_5m < 20.0
+    # Rich evidence is additive and only scores when the field is genuinely available.
+    precursor = score
+    if oi_change_pct >= 10:
+        precursor += 8; reasons.append("oi_expansion")
+    if iv_change_pct >= 5:
+        precursor += 7; reasons.append("iv_expansion")
+    if abs(gamma_change) > 0:
+        precursor += 5; reasons.append("gamma_change")
+    if abs(delta_change) >= 0.03:
+        precursor += 5; reasons.append("delta_shift")
+    if abs(spot_change_pct) >= 0.15:
+        precursor += 7; reasons.append("underlying_acceleration")
+    if abs(futures_change_pct) >= 0.15:
+        precursor += 5; reasons.append("futures_confirmation")
+    if minutes_to_expiry > 0 and minutes_to_expiry <= 180:
+        precursor += 5; reasons.append("near_expiry")
+
+    precursor = max(0.0, min(100.0, precursor))
+    early = precursor >= 55 and acceleration >= 0.5 and move_5m < 20.0
     return ExplosiveMoveSignal(
         symbol=symbol,
         option_type=option_type,
@@ -109,4 +167,13 @@ def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any]
         score=round(max(0.0, min(100.0, score)), 2),
         early=early,
         reasons=tuple(reasons),
+        oi_change_pct=round(oi_change_pct, 4),
+        iv_change_pct=round(iv_change_pct, 4),
+        delta_change=round(delta_change, 6),
+        gamma_change=round(gamma_change, 6),
+        spot_change_pct=round(spot_change_pct, 4),
+        futures_change_pct=round(futures_change_pct, 4),
+        distance_to_spot_pct=round(distance_to_spot_pct, 4),
+        minutes_to_expiry=round(minutes_to_expiry, 2),
+        precursor_score=round(precursor, 2),
     )
