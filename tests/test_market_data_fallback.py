@@ -2,121 +2,68 @@ from src.market_data_router import MarketDataRouter
 
 
 class FakeAngel:
-    def __init__(self, response=None, cooldown=300):
+    def __init__(self, response=None, cooldown=0):
         self.response = response
         self.cooldown = cooldown
+        self.calls = 0
 
     def market_data_status(self):
-        return {"cooldown_remaining": self.cooldown, "requests_remaining": 0 if self.cooldown else 10}
+        return {"cooldown_remaining": self.cooldown, "requests_remaining": 10 if not self.cooldown else 0}
 
     def get_candles(self, params):
+        self.calls += 1
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
 
-
-class FakeUpstox:
-    def __init__(self, candles):
-        self.candles = candles
-
-    def available(self):
-        return True
-
-    def status(self):
-        return {"provider": "upstox", "enabled": True, "configured": True, "available": True}
-
-    def get_candles(self, symbol, interval_minutes=5):
-        return self.candles
+    def get_market_data(self, mode, exchange_tokens):
+        self.calls += 1
+        return self.response
 
 
-def test_router_falls_back_when_angel_is_in_cooldown(monkeypatch):
-    candles = [["2026-08-24T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
-    router = MarketDataRouter(FakeAngel(cooldown=300))
-    router.upstox = FakeUpstox(candles)
-    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
-    router.mode = "auto"
+def test_router_uses_angel_only_when_healthy():
+    candles = [["2026-08-26T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
+    angel = FakeAngel(response={"status": True, "data": candles})
+    router = MarketDataRouter(angel)
 
-    result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
+    result, source = router.get_candles("NIFTY", {"exchange": "NSE", "symboltoken": "999"})
 
     assert result == candles
-    assert source == "upstox"
-    assert router.summary()["upstox_successes"] == 1
-    assert router.summary()["angel_skipped_cooldown"] == 1
-
-
-def test_router_falls_back_after_angel_returns_bad_data(monkeypatch):
-    candles = [["2026-08-24T11:25:00+05:30", 100, 101, 99, 100.5, 1000, 0]]
-    bad_angel = {"status": True, "data": []}
-    router = MarketDataRouter(FakeAngel(response=bad_angel, cooldown=0))
-    router.upstox = FakeUpstox(candles)
-    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
-    router.mode = "auto"
-
-    result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
-
-    assert result == candles
-    assert source == "upstox"
-    assert router.summary()["angel_attempts"] == 1
-    assert router.summary()["upstox_attempts"] == 1
-
-
-def test_router_fail_closed_without_configured_upstox(monkeypatch):
-    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
-    router = MarketDataRouter(FakeAngel(cooldown=300))
-
-    class Unavailable:
-        def available(self):
-            return False
-
-        def status(self):
-            return {"provider": "upstox", "available": False}
-
-    router.upstox = Unavailable()
-    result, source = router.get_candles("RELIANCE", {"exchange": "NSE", "symboltoken": "2885"})
-
-    assert result is None
-    assert source == "none"
+    assert source == "angel_one"
+    assert angel.calls == 1
     assert router.summary()["upstox_attempts"] == 0
 
 
-def test_provider_status_exposes_both_legitimate_paths(monkeypatch):
-    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
-    router = MarketDataRouter(FakeAngel(cooldown=0))
-    router.upstox = FakeUpstox([])
+def test_router_fails_closed_during_angel_cooldown():
+    angel = FakeAngel(cooldown=300)
+    router = MarketDataRouter(angel)
 
+    result, source = router.get_candles("NIFTY", {"exchange": "NSE", "symboltoken": "999"})
+
+    assert result is None
+    assert source == "none"
+    assert angel.calls == 0
+    assert router.summary()["angel_skipped_cooldown"] == 1
+    assert router.summary()["upstox_attempts"] == 0
+
+
+def test_router_fails_closed_on_bad_angel_data():
+    angel = FakeAngel(response={"status": True, "data": []})
+    router = MarketDataRouter(angel)
+
+    result, source = router.get_candles("NIFTY", {"exchange": "NSE", "symboltoken": "999"})
+
+    assert result is None
+    assert source == "none"
+    assert angel.calls == 1
+    assert router.summary()["upstox_attempts"] == 0
+
+
+def test_router_provider_status_explicitly_disables_upstox():
+    router = MarketDataRouter(FakeAngel())
     status = router.provider_status()
 
-    assert status["mode"] == "auto"
-    assert "angel" in status
-    assert "upstox" in status
-    assert status["upstox"]["available"] is True
-
-
-def test_upstox_provider_mapping_contains_core_universe():
-    from src.alternative_market_data import DEFAULT_INSTRUMENT_KEYS
-
-    tier1 = (
-        "NIFTY",
-        "BANKNIFTY",
-        "FINNIFTY",
-        "MIDCPNIFTY",
-        "NIFTYNXT50",
-        "NIFTYFPI",
-    )
-
-    tier2 = (
-        "RELIANCE",
-        "TCS",
-        "INFY",
-        "HDFCBANK",
-        "ICICIBANK",
-        "SBIN",
-        "AXISBANK",
-    )
-
-    for symbol in tier1:
-        assert symbol in DEFAULT_INSTRUMENT_KEYS
-        assert "|" in DEFAULT_INSTRUMENT_KEYS[symbol]
-
-    for symbol in tier2:
-        assert symbol not in DEFAULT_INSTRUMENT_KEYS
+    assert status["mode"] == "angel"
+    assert status["angel"] is not None
+    assert status["upstox"]["enabled"] is False
+    assert status["upstox"]["available"] is False

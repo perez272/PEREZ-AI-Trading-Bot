@@ -11,10 +11,13 @@ except ImportError:
 
 
 class AngelClient:
-    CANDLE_REQUEST_INTERVAL = 1.0
-    MARKET_DATA_REQUEST_INTERVAL = 1.0
+    # Conservative pacing for Angel One market-data endpoints. The scanner
+    # only needs five index candle requests per cycle; spacing them avoids
+    # burst behaviour while retaining sub-minute freshness.
+    CANDLE_REQUEST_INTERVAL = 5.0
+    MARKET_DATA_REQUEST_INTERVAL = 2.0
     MARKET_DATA_BUDGET_WINDOW = 60.0
-    MARKET_DATA_BUDGET_MAX_REQUESTS = 60
+    MARKET_DATA_BUDGET_MAX_REQUESTS = 12
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
     CANDLE_RATE_LIMIT_COOLDOWN = 900.0
     CANDLE_COOLDOWN_FILE = "/tmp/perez_ai_candle_rate_limit.json"
