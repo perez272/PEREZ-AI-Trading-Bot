@@ -1,7 +1,8 @@
 """Validated 5/10/15-minute option surge detection.
 
-Observational only: never places orders. Input must be fresh, positive-LTP
-option snapshots carrying a stable contract key and UTC observation time.
+Observational only: never places orders. Inputs must have positive LTP, a stable
+contract key, and a parseable UTC observation time. Current observations must be
+fresh; older timestamped observations may be retained as historical baselines.
 """
 from __future__ import annotations
 
@@ -47,39 +48,71 @@ class OptionsSurgeEngine:
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError): return None
 
-    def _valid(self, snapshot: dict[str, Any]) -> tuple[bool, datetime | None]:
+    def _validate(self, snapshot: dict[str, Any]) -> tuple[bool, datetime | None, bool]:
+        """Return (structurally_valid, timestamp, fresh_for_event_generation)."""
         md = snapshot.get("market_data") or snapshot
         ltp = self._num(md.get("ltp"))
         key = str(snapshot.get("instrument_key") or md.get("instrument_key") or "").strip()
         dt = self._ts(snapshot.get("observed_ts") or snapshot.get("timestamp"))
-        if ltp <= 0 or not key or dt is None: return False, None
+        if ltp <= 0 or not key or dt is None:
+            return False, None, False
         now = self._clock()
-        if now.tzinfo is None: now = now.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         age = (now - dt).total_seconds()
-        if age > self.max_age_seconds or age < -30: return False, None
-        return True, dt
+        if age < -30:
+            return False, None, False
+        return True, dt, age <= self.max_age_seconds
 
     def observe(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-        ok, dt = self._valid(snapshot)
-        if not ok: return []
+        valid, dt, fresh = self._validate(snapshot)
+        if not valid or dt is None:
+            return []
+
         md = snapshot.get("market_data") or snapshot
         key = str(snapshot.get("instrument_key") or md.get("instrument_key"))
+        current = {
+            "ts": dt,
+            "ltp": self._num(md.get("ltp")),
+            "volume": self._num(md.get("volume")),
+            "oi": self._num(md.get("oi")),
+            "iv": self._num((snapshot.get("option_greeks") or {}).get("iv")),
+        }
         history = self._history.setdefault(key, [])
-        current = {"ts": dt, "ltp": self._num(md.get("ltp")), "volume": self._num(md.get("volume")), "oi": self._num(md.get("oi")), "iv": self._num((snapshot.get("option_greeks") or {}).get("iv"))}
         history.append(current)
         cutoff = dt.timestamp() - 15 * 60 - 30
         self._history[key] = [x for x in history if x["ts"].timestamp() >= cutoff][-30:]
+
+        # Historical observations are valid baselines but must never themselves
+        # emit a trading signal. Only a fresh observation can produce an event.
+        if not fresh:
+            return []
+
         history = self._history[key]
         events: list[dict[str, Any]] = []
         for minutes in WINDOWS:
             target = dt.timestamp() - minutes * 60
             eligible = [x for x in history if x["ts"].timestamp() <= target]
-            if not eligible: continue
+            if not eligible:
+                continue
             baseline = min(eligible, key=lambda x: abs(x["ts"].timestamp() - target))
-            if abs(baseline["ts"].timestamp() - target) > 90: continue
+            if abs(baseline["ts"].timestamp() - target) > 90:
+                continue
             move = (current["ltp"] - baseline["ltp"]) / baseline["ltp"] * 100.0 if baseline["ltp"] > 0 else 0.0
             if move >= self.threshold_pct:
-                event = SurgeEvent(str(snapshot.get("symbol", "")), str(snapshot.get("option_type", "")).upper(), key, minutes, round(move, 4), current["ltp"], baseline["ltp"], dt.isoformat(), current["volume"], current["oi"], current["iv"])
+                event = SurgeEvent(
+                    str(snapshot.get("symbol", "")),
+                    str(snapshot.get("option_type", "")).upper(),
+                    key,
+                    minutes,
+                    round(move, 4),
+                    current["ltp"],
+                    baseline["ltp"],
+                    dt.isoformat(),
+                    current["volume"],
+                    current["oi"],
+                    current["iv"],
+                )
                 events.append(asdict(event))
         return events
 
@@ -89,6 +122,14 @@ class OptionsSurgeEngine:
             for option_type, field in (("CE", "call_options"), ("PE", "put_options")):
                 market = row.get(field) or {}
                 md = market.get("market_data") or {}
-                if self._num(md.get("ltp")) <= 0 or not market.get("instrument_key"): continue
-                events.extend(self.observe({"symbol": symbol, "option_type": option_type, "instrument_key": market.get("instrument_key"), "market_data": md, "option_greeks": market.get("option_greeks") or {}, "observed_ts": observed_ts}))
+                if self._num(md.get("ltp")) <= 0 or not market.get("instrument_key"):
+                    continue
+                events.extend(self.observe({
+                    "symbol": symbol,
+                    "option_type": option_type,
+                    "instrument_key": market.get("instrument_key"),
+                    "market_data": md,
+                    "option_greeks": market.get("option_greeks") or {},
+                    "observed_ts": observed_ts,
+                }))
         return events
