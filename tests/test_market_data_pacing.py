@@ -17,6 +17,7 @@ def test_market_data_request_is_paced(tmp_path):
     api = _FakeSmartApi()
     client = AngelClient(api)
     client.MARKET_DATA_BUDGET_FILE = str(tmp_path / "budget.json")
+    client.CANDLE_COOLDOWN_FILE = str(tmp_path / "candle_cooldown.json")
     # Use a deliberately larger interval so the assertion is not sensitive to
     # sub-millisecond scheduler/timing jitter while still exercising the real
     # wait-before-request pacing path.
@@ -42,6 +43,7 @@ def test_global_cooldown_blocks_without_touching_provider(tmp_path):
     api = _FakeSmartApi()
     client = AngelClient(api)
     client.MARKET_DATA_BUDGET_FILE = str(tmp_path / "budget.json")
+    client.CANDLE_COOLDOWN_FILE = str(tmp_path / "candle_cooldown.json")
     with open(client.MARKET_DATA_BUDGET_FILE, "w", encoding="utf-8") as handle:
         json.dump({"requests": [], "cooldown_until": time.monotonic() + 30}, handle)
 
