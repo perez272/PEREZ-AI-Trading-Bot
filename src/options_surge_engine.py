@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 WINDOWS = (5, 10, 15)
 SURGE_PCT = 5.0
@@ -27,9 +27,11 @@ class SurgeEvent:
     iv: float = 0.0
 
 class OptionsSurgeEngine:
-    def __init__(self, threshold_pct: float = SURGE_PCT, max_age_seconds: int = 120):
+    def __init__(self, threshold_pct: float = SURGE_PCT, max_age_seconds: int = 120,
+                 clock: Callable[[], datetime] | None = None):
         self.threshold_pct = float(threshold_pct)
         self.max_age_seconds = int(max_age_seconds)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._history: dict[str, list[dict[str, Any]]] = {}
 
     @staticmethod
@@ -51,7 +53,9 @@ class OptionsSurgeEngine:
         key = str(snapshot.get("instrument_key") or md.get("instrument_key") or "").strip()
         dt = self._ts(snapshot.get("observed_ts") or snapshot.get("timestamp"))
         if ltp <= 0 or not key or dt is None: return False, None
-        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        now = self._clock()
+        if now.tzinfo is None: now = now.replace(tzinfo=timezone.utc)
+        age = (now - dt).total_seconds()
         if age > self.max_age_seconds or age < -30: return False, None
         return True, dt
 
