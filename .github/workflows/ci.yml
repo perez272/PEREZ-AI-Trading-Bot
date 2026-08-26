@@ -2,7 +2,7 @@ name: PEREZ AI CI
 
 on:
   push:
-    branches: [main, 'iq-200-*']
+    branches: [main, 'iq-200-*', 'fix/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
