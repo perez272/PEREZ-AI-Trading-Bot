@@ -76,6 +76,7 @@ class AngelClient:
                 "last_request_at": 0.0,
                 "market_data_cooldown_until": 0.0,
                 "rate_limit_events": [],
+                "global_breaker_armed": False,
             }
         try:
             state = json.loads(raw)
@@ -85,6 +86,7 @@ class AngelClient:
                 "last_request_at": float(state.get("last_request_at", 0.0)),
                 "market_data_cooldown_until": float(state.get("market_data_cooldown_until", 0.0)),
                 "rate_limit_events": [float(x) for x in state.get("rate_limit_events", [])],
+                "global_breaker_armed": bool(state.get("global_breaker_armed", False)),
             }
         except (TypeError, ValueError, json.JSONDecodeError):
             return {
@@ -93,6 +95,7 @@ class AngelClient:
                 "last_request_at": 0.0,
                 "market_data_cooldown_until": 0.0,
                 "rate_limit_events": [],
+                "global_breaker_armed": False,
             }
 
     def _write_shared_state(self, handle, state):
@@ -148,13 +151,24 @@ class AngelClient:
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
-            # Old versions stored only cooldown_until. That state represented
-            # a one-off endpoint rejection, not proof of a repeated account
-            # throttle, so do not carry that legacy lock into the new policy.
-            if state["cooldown_until"] > now and not state["rate_limit_events"]:
+
+            # Only an explicitly armed breaker is a global breaker.
+            # Legacy cooldown-only state must never freeze fresh candle
+            # ingestion after a restart/deployment.
+            if not state.get("global_breaker_armed", False):
+                if state["cooldown_until"] != 0.0:
+                    state["cooldown_until"] = 0.0
+                    self._write_shared_state(handle, state)
+                return 0.0
+
+            remaining = max(0.0, state["cooldown_until"] - now)
+            if remaining <= 0:
                 state["cooldown_until"] = 0.0
+                state["global_breaker_armed"] = False
                 self._write_shared_state(handle, state)
-            return max(0.0, state["cooldown_until"] - now)
+                return 0.0
+
+            return remaining
 
     def market_data_status(self):
         now = time.monotonic()
@@ -164,8 +178,11 @@ class AngelClient:
             state["requests"] = [x for x in state["requests"] if x > cutoff]
             event_cutoff = now - self.RATE_LIMIT_EVENT_WINDOW
             state["rate_limit_events"] = [x for x in state["rate_limit_events"] if x > event_cutoff]
-            if state["cooldown_until"] > now and not state["rate_limit_events"]:
+            if not state.get("global_breaker_armed", False):
                 state["cooldown_until"] = 0.0
+            elif state["cooldown_until"] <= now:
+                state["cooldown_until"] = 0.0
+                state["global_breaker_armed"] = False
             self._write_shared_state(handle, state)
             return {
                 "cooldown_remaining": max(0.0, state["cooldown_until"] - now),
@@ -197,6 +214,7 @@ class AngelClient:
                 state["cooldown_until"] = max(
                     state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
                 )
+                state["global_breaker_armed"] = True
                 global_armed = True
             else:
                 global_armed = False
@@ -209,7 +227,10 @@ class AngelClient:
         now = time.monotonic()
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
-            state["cooldown_until"] = max(state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN)
+            state["cooldown_until"] = max(
+                state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
+            )
+            state["global_breaker_armed"] = True
             self._write_shared_state(handle, state)
 
     def _is_invalid_token(self, response=None, error=None):
@@ -313,9 +334,16 @@ class AngelClient:
             sleep_for = max(0.0, local_remaining)
             with self._budget_file_lock() as handle:
                 state = self._read_shared_state(handle)
-                cooldown_remaining = max(0.0, state["cooldown_until"] - now)
+                cooldown_remaining = (
+                    max(0.0, state["cooldown_until"] - now)
+                    if state.get("global_breaker_armed", False)
+                    else 0.0
+                )
                 if cooldown_remaining > 0:
-                    print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(cooldown_remaining)}s remaining).")
+                    print(
+                        f"[API RATE LIMIT] Global cooldown active — skipping request "
+                        f"({int(cooldown_remaining)}s remaining)."
+                    )
                     return False
                 shared_remaining = max(0.0, interval - (now - state["last_request_at"]))
                 sleep_for = max(sleep_for, shared_remaining)
