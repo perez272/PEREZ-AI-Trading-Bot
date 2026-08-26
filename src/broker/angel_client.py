@@ -11,15 +11,18 @@ except ImportError:
 
 
 class AngelClient:
-    # Conservative pacing for Angel One market-data endpoints. The scanner
-    # only needs five index candle requests per cycle; spacing them avoids
-    # burst behaviour while retaining sub-minute freshness.
-    CANDLE_REQUEST_INTERVAL = 5.0
-    MARKET_DATA_REQUEST_INTERVAL = 2.0
+    # Angel's published getCandleData limit is 3 requests/second and 150/minute.
+    # We deliberately use 1 request/second plus a small shared budget so the
+    # five Tier-1 index candles are fetched safely without burst behaviour.
+    CANDLE_REQUEST_INTERVAL = 1.0
+    MARKET_DATA_REQUEST_INTERVAL = 1.0
     MARKET_DATA_BUDGET_WINDOW = 60.0
     MARKET_DATA_BUDGET_MAX_REQUESTS = 12
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
-    CANDLE_RATE_LIMIT_COOLDOWN = 900.0
+    # A real candle rate-limit response pauses candle requests briefly.  The
+    # previous 900s value was unnecessarily disruptive and could freeze an
+    # entire market session.  The global breaker still protects all requests.
+    CANDLE_RATE_LIMIT_COOLDOWN = 60.0
     CANDLE_COOLDOWN_FILE = "/tmp/perez_ai_candle_rate_limit.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
     RATE_LIMIT_COOLDOWN = 300.0
@@ -65,7 +68,10 @@ class AngelClient:
             return {"requests": [], "cooldown_until": 0.0}
         try:
             state = json.loads(raw)
-            return {"requests": [float(x) for x in state.get("requests", [])], "cooldown_until": float(state.get("cooldown_until", 0.0))}
+            return {
+                "requests": [float(x) for x in state.get("requests", [])],
+                "cooldown_until": float(state.get("cooldown_until", 0.0)),
+            }
         except (TypeError, ValueError, json.JSONDecodeError):
             return {"requests": [], "cooldown_until": 0.0}
 
@@ -89,7 +95,13 @@ class AngelClient:
             return 0.0
 
     def _shared_candle_cooldown_remaining(self):
-        return max(0.0, self._read_candle_cooldown_until() - time.monotonic())
+        remaining = max(0.0, self._read_candle_cooldown_until() - time.monotonic())
+        # Ignore a legacy cooldown longer than the current policy. This makes
+        # deployment of the shorter breaker self-healing instead of requiring
+        # operators to delete runtime state by hand.
+        if remaining > self.CANDLE_RATE_LIMIT_COOLDOWN:
+            return 0.0
+        return remaining
 
     def _set_candle_rate_limit_cooldown(self):
         now = time.monotonic()
@@ -104,9 +116,14 @@ class AngelClient:
                         current = float(value.get("candle_cooldown_until", 0.0)) if isinstance(value, dict) else float(value)
                     except (TypeError, ValueError, json.JSONDecodeError):
                         pass
+                # Do not allow a legacy long cooldown to survive a real new
+                # rate-limit event under the shorter policy.
+                new_until = now + self.CANDLE_RATE_LIMIT_COOLDOWN
+                if current > now + self.CANDLE_RATE_LIMIT_COOLDOWN:
+                    current = 0.0
                 handle.seek(0)
                 handle.truncate()
-                json.dump({"candle_cooldown_until": max(current, now + self.CANDLE_RATE_LIMIT_COOLDOWN)}, handle)
+                json.dump({"candle_cooldown_until": max(current, new_until)}, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
         except OSError as exc:
@@ -159,7 +176,7 @@ class AngelClient:
             print(f"[AUTH] Session refresh failed: {e}")
             return False
 
-    def _retry(self, func, *args, **kwargs):
+    def _retry(self, func, *args, endpoint="market_data", **kwargs):
         remaining = self._shared_cooldown_remaining()
         if remaining > 0:
             print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
@@ -183,7 +200,8 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(response=response):
                     self._set_rate_limit_cooldown()
-                    self._set_candle_rate_limit_cooldown()
+                    if endpoint == "candle":
+                        self._set_candle_rate_limit_cooldown()
                     print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
                 return response
@@ -200,7 +218,8 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(error=e):
                     self._set_rate_limit_cooldown()
-                    self._set_candle_rate_limit_cooldown()
+                    if endpoint == "candle":
+                        self._set_candle_rate_limit_cooldown()
                     print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
                 print(f"[API attempt {attempt + 1}/2] {e}")
@@ -210,32 +229,31 @@ class AngelClient:
         return None
 
     def _reserve_market_data_request(self, last_request_attr, interval):
-        while True:
+        now = time.monotonic()
+        last_request = getattr(self, last_request_attr)
+        local_remaining = interval - (now - last_request)
+        if local_remaining > 0:
+            time.sleep(local_remaining)
             now = time.monotonic()
-            last_request = getattr(self, last_request_attr)
-            local_remaining = interval - (now - last_request)
-            if local_remaining > 0:
-                time.sleep(local_remaining)
-                continue
-            with self._budget_file_lock() as handle:
-                state = self._read_shared_state(handle)
-                cooldown_remaining = max(0.0, state["cooldown_until"] - now)
-                if cooldown_remaining > 0:
-                    print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(cooldown_remaining)}s remaining).")
-                    self._write_shared_state(handle, state)
-                    return False
-                cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
-                requests = [x for x in state["requests"] if x > cutoff]
-                state["requests"] = requests
-                if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
-                    retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
-                    print(f"[MARKET DATA BUDGET] Global request budget exhausted — {len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS}; retry in ~{retry_in}s.")
-                    self._write_shared_state(handle, state)
-                    return False
-                state["requests"].append(now)
+        with self._budget_file_lock() as handle:
+            state = self._read_shared_state(handle)
+            cooldown_remaining = max(0.0, state["cooldown_until"] - now)
+            if cooldown_remaining > 0:
+                print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(cooldown_remaining)}s remaining).")
                 self._write_shared_state(handle, state)
-            setattr(self, last_request_attr, now)
-            return True
+                return False
+            cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
+            requests = [x for x in state["requests"] if x > cutoff]
+            state["requests"] = requests
+            if len(requests) >= self.MARKET_DATA_BUDGET_MAX_REQUESTS:
+                retry_in = max(0, int(self.MARKET_DATA_BUDGET_WINDOW - (now - requests[0])))
+                print(f"[MARKET DATA BUDGET] Global request budget exhausted — {len(requests)}/{self.MARKET_DATA_BUDGET_MAX_REQUESTS}; retry in ~{retry_in}s.")
+                self._write_shared_state(handle, state)
+                return False
+            state["requests"].append(now)
+            self._write_shared_state(handle, state)
+        setattr(self, last_request_attr, now)
+        return True
 
     def get_candles(self, params):
         candle_remaining = self._shared_candle_cooldown_remaining()
@@ -244,17 +262,17 @@ class AngelClient:
             return None
         if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.getCandleData, params)
+        return self._retry(self.api.getCandleData, params, endpoint="candle")
 
     def get_ltp(self, exchange, symbol, token):
         if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.ltpData, exchange, symbol, token)
+        return self._retry(self.api.ltpData, exchange, symbol, token, endpoint="ltp")
 
     def get_rms_limit(self):
-        return self._retry(self.api.rmsLimit)
+        return self._retry(self.api.rmsLimit, endpoint="rms")
 
     def get_market_data(self, mode, exchange_tokens):
         if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.getMarketData, mode, exchange_tokens)
+        return self._retry(self.api.getMarketData, mode, exchange_tokens, endpoint="market_data")
