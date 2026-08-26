@@ -1,12 +1,11 @@
 """Persistent pattern memory for large Tier-1 index option moves.
 
-This is an evidence store, not an automatic black-box trader.  It records the
+This is an evidence store, not an automatic black-box trader. It records the
 indicator state observed when an option reaches +5/+10/+15/+20% and uses prior
 successful states as a similarity bonus on future scans.
 """
 from __future__ import annotations
 
-import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +37,13 @@ def _connect():
             target_pct REAL NOT NULL,
             """ + ",".join(f"{f} REAL" for f in FEATURES) + ", UNIQUE(symbol, contract, target_pct, ts_utc))"
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(move_events)")}
+    if "target_pct" not in columns:
+        conn.execute("ALTER TABLE move_events ADD COLUMN target_pct REAL")
+        conn.execute("UPDATE move_events SET target_pct = ? WHERE target_pct IS NULL", (TARGETS[0],))
+    for feature in FEATURES:
+        if feature not in columns:
+            conn.execute(f"ALTER TABLE move_events ADD COLUMN {feature} REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_move_target ON move_events(target_pct)")
     conn.commit()
     return conn
@@ -67,11 +73,12 @@ def record_move(candidate: dict[str, Any]) -> list[float]:
             ts, str(candidate.get("symbol", "")), str(candidate.get("option_type", "")),
             str(candidate.get("expiry", "")), str(candidate.get("contract", "")), target, *values,
         ]
+        before = conn.total_changes
         conn.execute(
             f"INSERT OR IGNORE INTO move_events (ts_utc,symbol,option_type,expiry,contract,target_pct,{','.join(FEATURES)}) VALUES ({','.join('?' for _ in row)})",
             row,
         )
-        if conn.total_changes:
+        if conn.total_changes > before:
             written.append(target)
     conn.commit()
     conn.close()
@@ -79,7 +86,6 @@ def record_move(candidate: dict[str, Any]) -> list[float]:
 
 
 def _similarity(candidate: dict[str, Any], row: sqlite3.Row) -> float:
-    # Bounded, scale-aware similarity. No future price information is used.
     scales = {
         "percent_change": 10, "trend_score": 15, "momentum_score": 10, "vwap_score": 7,
         "volume_score": 8, "oi_score": 10, "oi_change_score": 8, "iv_score": 5,
@@ -104,7 +110,7 @@ def similarity_bonus(candidate: dict[str, Any], minimum_target: float = 5.0) -> 
     conn = _connect()
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        f"SELECT * FROM move_events WHERE target_pct >= ? ORDER BY id DESC LIMIT 500",
+        "SELECT * FROM move_events WHERE target_pct >= ? ORDER BY id DESC LIMIT 500",
         (minimum_target,),
     ).fetchall()
     conn.close()
