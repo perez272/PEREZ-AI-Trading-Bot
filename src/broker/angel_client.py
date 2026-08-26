@@ -6,24 +6,19 @@ from threading import Lock
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
+except ImportError:
     fcntl = None
 
 
 class AngelClient:
-    # Conservative but useful pacing. Angel One documents historical candle
-    # access at up to 3 requests/sec and 150/min; we deliberately stay below
-    # that with one request/sec and a 60/min rolling budget.
     CANDLE_REQUEST_INTERVAL = 1.0
     MARKET_DATA_REQUEST_INTERVAL = 1.0
     MARKET_DATA_BUDGET_WINDOW = 60.0
     MARKET_DATA_BUDGET_MAX_REQUESTS = 60
     MARKET_DATA_BUDGET_FILE = "/tmp/perez_ai_market_data_budget.json"
+    CANDLE_RATE_LIMIT_COOLDOWN = 900.0
+    CANDLE_COOLDOWN_FILE = "/tmp/perez_ai_candle_rate_limit.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
-
-    # A provider rate-limit is treated as a circuit-breaker event. Do not probe
-    # again every scan cycle; repeated probes can turn a transient block into a
-    # persistent one. The state is shared across local processes.
     RATE_LIMIT_COOLDOWN = 300.0
 
     def __init__(self, smartapi, session_manager=None):
@@ -46,6 +41,20 @@ class AngelClient:
                 if fcntl is not None:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _candle_cooldown_lock(self):
+        directory = os.path.dirname(self.CANDLE_COOLDOWN_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self.CANDLE_COOLDOWN_FILE, "a+", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield handle
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def _read_shared_state(self, handle):
         handle.seek(0)
         raw = handle.read().strip()
@@ -53,10 +62,7 @@ class AngelClient:
             return {"requests": [], "cooldown_until": 0.0}
         try:
             state = json.loads(raw)
-            return {
-                "requests": [float(x) for x in state.get("requests", [])],
-                "cooldown_until": float(state.get("cooldown_until", 0.0)),
-            }
+            return {"requests": [float(x) for x in state.get("requests", [])], "cooldown_until": float(state.get("cooldown_until", 0.0))}
         except (TypeError, ValueError, json.JSONDecodeError):
             return {"requests": [], "cooldown_until": 0.0}
 
@@ -66,6 +72,42 @@ class AngelClient:
         json.dump(state, handle)
         handle.flush()
         os.fsync(handle.fileno())
+
+    def _read_candle_cooldown_until(self):
+        try:
+            with self._candle_cooldown_lock() as handle:
+                handle.seek(0)
+                raw = handle.read().strip()
+                if not raw:
+                    return 0.0
+                value = json.loads(raw)
+                return float(value.get("candle_cooldown_until", 0.0)) if isinstance(value, dict) else float(value)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return 0.0
+
+    def _shared_candle_cooldown_remaining(self):
+        return max(0.0, self._read_candle_cooldown_until() - time.monotonic())
+
+    def _set_candle_rate_limit_cooldown(self):
+        now = time.monotonic()
+        try:
+            with self._candle_cooldown_lock() as handle:
+                handle.seek(0)
+                raw = handle.read().strip()
+                current = 0.0
+                if raw:
+                    try:
+                        value = json.loads(raw)
+                        current = float(value.get("candle_cooldown_until", 0.0)) if isinstance(value, dict) else float(value)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                handle.seek(0)
+                handle.truncate()
+                json.dump({"candle_cooldown_until": max(current, now + self.CANDLE_RATE_LIMIT_COOLDOWN)}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            print(f"[CANDLE RATE LIMIT] Could not persist endpoint cooldown: {exc}")
 
     def _shared_cooldown_remaining(self):
         now = time.monotonic()
@@ -78,14 +120,13 @@ class AngelClient:
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
             cutoff = now - self.MARKET_DATA_BUDGET_WINDOW
-            requests = [x for x in state["requests"] if x > cutoff]
-            state["requests"] = requests
+            state["requests"] = [x for x in state["requests"] if x > cutoff]
             self._write_shared_state(handle, state)
-            cooldown_remaining = max(0.0, state["cooldown_until"] - now)
             return {
-                "cooldown_remaining": cooldown_remaining,
-                "requests_in_window": len(requests),
-                "requests_remaining": max(0, self.MARKET_DATA_BUDGET_MAX_REQUESTS - len(requests)),
+                "cooldown_remaining": max(0.0, state["cooldown_until"] - now),
+                "candle_cooldown_remaining": self._shared_candle_cooldown_remaining(),
+                "requests_in_window": len(state["requests"]),
+                "requests_remaining": max(0, self.MARKET_DATA_BUDGET_MAX_REQUESTS - len(state["requests"])),
             }
 
     def _set_rate_limit_cooldown(self):
@@ -96,21 +137,11 @@ class AngelClient:
             self._write_shared_state(handle, state)
 
     def _is_invalid_token(self, response=None, error=None):
-        text = ""
-        if error is not None:
-            text += " " + str(error)
-        if response is not None:
-            text += " " + str(response)
-        text = text.lower()
+        text = f"{error or ''} {response or ''}".lower()
         return "invalid token" in text or "ag8001" in text or "jwt" in text or "token expired" in text
 
     def _is_rate_limited(self, response=None, error=None):
-        text = ""
-        if error is not None:
-            text += " " + str(error)
-        if response is not None:
-            text += " " + str(response)
-        text = text.lower()
+        text = f"{error or ''} {response or ''}".lower()
         return "access rate" in text or "rate limit" in text or "too many requests" in text or "ab1021" in text or "exceeding access rate" in text
 
     def refresh_session(self):
@@ -130,7 +161,6 @@ class AngelClient:
         if remaining > 0:
             print(f"[API RATE LIMIT] Global cooldown active — skipping request ({int(remaining)}s remaining).")
             return None
-
         token_refresh_attempted = False
         for attempt in range(2):
             try:
@@ -150,6 +180,7 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(response=response):
                     self._set_rate_limit_cooldown()
+                    self._set_candle_rate_limit_cooldown()
                     print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
                 return response
@@ -166,6 +197,7 @@ class AngelClient:
                     return None
                 if self._is_rate_limited(error=e):
                     self._set_rate_limit_cooldown()
+                    self._set_candle_rate_limit_cooldown()
                     print(f"[API RATE LIMIT] Angel One rejected request. Global market-data circuit breaker active for {self.RATE_LIMIT_COOLDOWN:.0f}s.")
                     return None
                 print(f"[API attempt {attempt + 1}/2] {e}")
@@ -182,7 +214,6 @@ class AngelClient:
             if local_remaining > 0:
                 time.sleep(local_remaining)
                 continue
-
             with self._budget_file_lock() as handle:
                 state = self._read_shared_state(handle)
                 cooldown_remaining = max(0.0, state["cooldown_until"] - now)
@@ -204,6 +235,10 @@ class AngelClient:
             return True
 
     def get_candles(self, params):
+        candle_remaining = self._shared_candle_cooldown_remaining()
+        if candle_remaining > 0:
+            print(f"[CANDLE RATE LIMIT] Endpoint cooldown active — skipping candle request ({int(candle_remaining)}s remaining).")
+            return None
         if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
             return None
         return self._retry(self.api.getCandleData, params)
