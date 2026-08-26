@@ -2,8 +2,13 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 logs/
 data/
+*.log
+*.bak
+*backup*
 PEREZ-AI-Trading-Bot_backup_20260804_100023.tar.gz
 
 # Local backup files
