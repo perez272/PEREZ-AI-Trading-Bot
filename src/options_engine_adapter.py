@@ -17,8 +17,7 @@ def _get_market_data_router():
     from src.market_data_router import MarketDataRouter
 
     session = SessionManager(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
-    angel_client = AngelClient(session.get_client())
-    _market_data_router = MarketDataRouter(angel_client)
+    _market_data_router = MarketDataRouter(AngelClient(session.get_client(), session_manager=session))
     return _market_data_router
 
 
