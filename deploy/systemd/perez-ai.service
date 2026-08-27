@@ -12,6 +12,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PAPER_MODE=true
 Environment=PAPER_CAPITAL=50000
 Environment=ORDERS_ENABLED=false
+Environment=MARKET_DATA_PROVIDER=angel
+Environment=UPSTOX_ENABLED=false
+Environment=ANGEL_ONLY_DATA=true
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGINT

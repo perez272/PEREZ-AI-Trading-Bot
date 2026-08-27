@@ -1,3 +1,5 @@
+import os
+
 from src.affordable_options import find_affordable_contract
 from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.alternative_market_data import get_upstox_client
@@ -10,7 +12,7 @@ MAX_CAPITAL_UTILIZATION = 0.90
 
 
 def resolve_option_contract(symbol, spot, signal):
-    """Resolve an affordable, live-priced option with provider failover."""
+    """Resolve an affordable, live-priced option without fabricating data."""
     if signal not in ("BUY CE", "BUY PE"):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
 
@@ -27,9 +29,17 @@ def resolve_option_contract(symbol, spot, signal):
             "data_source": "angel_one_option_chain",
         }
 
-    # Angel One may be rate-limited while the underlying scanner is healthy via
-    # Upstox. Use the same premium cap and a live option-chain quote; never
-    # synthesize a contract or price. The downstream options gate still runs.
+    # Alternate providers remain available to isolated development tests, but
+    # production paper mode is explicitly Angel One only.
+    angel_only = os.getenv("ANGEL_ONLY_DATA", "false").strip().lower() in {"1", "true", "yes", "on"}
+    paper_mode = os.getenv("PAPER_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    provider_mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
+
+    # Production paper trading is deliberately Angel-One-only.
+    # Do not bypass the market-data gateway with an alternate option source.
+    if paper_mode or angel_only or provider_mode == "angel":
+        return affordable
+
     fallback = get_upstox_client().resolve_affordable_option(symbol, float(spot), option_type, OPTION_MAX_PREMIUM)
     if fallback and fallback.get("status") == "CONTRACT VALID":
         fallback["max_premium"] = OPTION_MAX_PREMIUM
