@@ -64,11 +64,9 @@ def _local_instrument_keys() -> dict[str, str]:
         token = str(item.get("token", "")).strip()
         if not token:
             continue
-        # data/instruments.json is the Angel instrument master, not an
-        # Upstox instrument-key source. Never construct Upstox keys from it.
-        # Upstox keys remain sourced from DEFAULT_INSTRUMENT_KEYS or the
-        # explicit UPSTOX_INSTRUMENT_KEYS_JSON environment override.
-        continue
+        for canonical, accepted in aliases.items():
+            if symbol in accepted or name in accepted:
+                result[canonical] = f"NSE_INDEX|{name or symbol}"
     return result
 
 

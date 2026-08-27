@@ -28,7 +28,7 @@ class AngelClient:
     RATE_LIMIT_EVENT_WINDOW = 300.0
     RATE_LIMIT_EVENTS_FOR_GLOBAL_BREAKER = 3
 
-    CANDLE_RATE_LIMIT_COOLDOWN = ENDPOINT_RATE_LIMIT_COOLDOWN
+    CANDLE_RATE_LIMIT_COOLDOWN = float(os.getenv("CANDLE_RATE_LIMIT_COOLDOWN", "300.0"))
     CANDLE_COOLDOWN_FILE = "/tmp/perez_ai_candle_rate_limit.json"
     _GLOBAL_MARKET_DATA_LOCK = Lock()
 
@@ -194,30 +194,52 @@ class AngelClient:
             }
 
     def _record_rate_limit(self, endpoint):
+        """
+        Record broker rate-limit events with endpoint isolation.
+
+        Historical candle throttles are endpoint-local and MUST NOT
+        contribute to the global market-data circuit breaker. This keeps
+        live quote/RMS paths available when Angel One throttles candles.
+        """
         now = time.monotonic()
+
+        # Candle throttling is deliberately isolated from the global
+        # market-data breaker.
+        if endpoint == "candle":
+            self._set_candle_rate_limit_cooldown()
+            return False, 0
+
         with self._budget_file_lock() as handle:
             state = self._read_shared_state(handle)
+
             cutoff = now - self.RATE_LIMIT_EVENT_WINDOW
-            events = [x for x in state["rate_limit_events"] if x > cutoff]
+            events = [
+                x for x in state["rate_limit_events"]
+                if x > cutoff
+            ]
             events.append(now)
             state["rate_limit_events"] = events
 
             endpoint_until = now + self.ENDPOINT_RATE_LIMIT_COOLDOWN
+
             if endpoint == "market_data":
                 state["market_data_cooldown_until"] = max(
-                    state["market_data_cooldown_until"], endpoint_until
+                    state["market_data_cooldown_until"],
+                    endpoint_until,
                 )
-            if endpoint == "candle":
-                self._set_candle_rate_limit_cooldown()
 
+            # Only non-candle market-data rate limits can arm the global
+            # breaker. Candle failures are endpoint-local by design.
             if len(events) >= self.RATE_LIMIT_EVENTS_FOR_GLOBAL_BREAKER:
                 state["cooldown_until"] = max(
-                    state["cooldown_until"], now + self.RATE_LIMIT_COOLDOWN
+                    state["cooldown_until"],
+                    now + self.RATE_LIMIT_COOLDOWN,
                 )
                 state["global_breaker_armed"] = True
                 global_armed = True
             else:
                 global_armed = False
+
             self._write_shared_state(handle, state)
             return global_armed, len(events)
 
