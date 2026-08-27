@@ -33,6 +33,17 @@ class MarketDataRouter:
         if self.mode not in {"auto", "angel", "upstox"}:
             raise ValueError("MARKET_DATA_PROVIDER must be auto, angel, or upstox")
 
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _paper_angel_only(self) -> bool:
+        """Paper production must never silently switch market-data providers."""
+        return (
+            self._truthy(os.getenv("PAPER_MODE", "false"))
+            or self._truthy(os.getenv("ANGEL_ONLY_DATA", "false"))
+        )
+
     def _angel_allowed(self) -> bool:
         if self.mode == "upstox":
             return False
@@ -80,7 +91,7 @@ class MarketDataRouter:
                 return response["data"], "angel_one"
             if response is not None:
                 self.stats["provider_failures"] += 1
-        if self.mode == "angel":
+        if self.mode == "angel" or self._paper_angel_only():
             return None, "none"
         if self.upstox.available():
             self.stats["upstox_attempts"] += 1
@@ -104,17 +115,8 @@ class MarketDataRouter:
         token = str(token or "").strip()
         exchange = str(exchange or "NFO").strip().upper()
         upstox_key = token if "|" in token else ""
-        if self.mode != "angel" and self.upstox.available() and upstox_key:
-            self.stats["option_upstox_attempts"] += 1
-            try:
-                quote = self.upstox.get_full_quote(upstox_key)
-            except Exception as exc:
-                self.stats["provider_failures"] += 1
-                print(f"[MARKET DATA] Upstox option quote exception: {exc}")
-                quote = None
-            if self._valid_option_quote(quote):
-                self.stats["option_upstox_successes"] += 1
-                return self._normalize_upstox_option_quote(quote), "upstox"
+
+        # Angel One is always attempted first for production option data.
         if self._angel_allowed():
             self.stats["option_angel_attempts"] += 1
             try:
@@ -127,6 +129,23 @@ class MarketDataRouter:
             if quote is not None:
                 self.stats["option_angel_successes"] += 1
                 return quote, "angel_one"
+
+        # Paper production is fail-closed: never silently substitute Upstox.
+        if self._paper_angel_only():
+            return None, "none"
+
+        if self.mode != "angel" and self.upstox.available() and upstox_key:
+            self.stats["option_upstox_attempts"] += 1
+            try:
+                quote = self.upstox.get_full_quote(upstox_key)
+            except Exception as exc:
+                self.stats["provider_failures"] += 1
+                print(f"[MARKET DATA] Upstox option quote exception: {exc}")
+                quote = None
+            if self._valid_option_quote(quote):
+                self.stats["option_upstox_successes"] += 1
+                return self._normalize_upstox_option_quote(quote), "upstox"
+
         return None, "none"
 
     @staticmethod
@@ -268,7 +287,7 @@ class MarketDataRouter:
                     return chain, "angel_one"
             if response is not None:
                 self.stats["provider_failures"] += 1
-        if self.mode == "angel":
+        if self.mode == "angel" or self._paper_angel_only():
             return None, "none"
         if self.upstox.available():
             try:
