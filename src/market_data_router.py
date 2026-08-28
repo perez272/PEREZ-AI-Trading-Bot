@@ -11,9 +11,10 @@ from src.alternative_market_data import get_upstox_client
 class MarketDataRouter:
     """Single production gateway for candles and live option quotes.
 
-    The router never fabricates data. Provider selection is explicit, every
-    successful response is tagged with its source, and callers receive no
-    market data when all configured providers fail.
+    Auto mode is ordered Angel One -> Upstox. PAPER_MODE is an execution
+    safety setting and never disables a configured market-data fallback.
+    Every provider response is structurally validated before it crosses the
+    router boundary; no provider is allowed to fabricate or pass empty data.
     """
 
     def __init__(self, angel_client):
@@ -46,8 +47,31 @@ class MarketDataRouter:
         return True
 
     @staticmethod
-    def _valid_payload(response: Any) -> bool:
-        return isinstance(response, dict) and bool(response.get("status")) and isinstance(response.get("data"), list) and bool(response.get("data"))
+    def _valid_candles(candles: Any) -> bool:
+        if not isinstance(candles, list) or not candles:
+            return False
+        valid_rows = 0
+        for row in candles:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            try:
+                o, h, low, close = (float(row[i]) for i in range(1, 5))
+                if min(o, h, low, close) < 0 or close <= 0:
+                    continue
+                if h < max(o, low, close) or low > min(o, h, close):
+                    continue
+                valid_rows += 1
+            except (TypeError, ValueError, IndexError):
+                continue
+        return valid_rows > 0
+
+    @classmethod
+    def _valid_payload(cls, response: Any) -> bool:
+        return (
+            isinstance(response, dict)
+            and bool(response.get("status"))
+            and cls._valid_candles(response.get("data"))
+        )
 
     @staticmethod
     def _valid_option_quote(quote: Any) -> bool:
@@ -83,7 +107,7 @@ class MarketDataRouter:
                 self.stats["provider_failures"] += 1
                 print(f"[MARKET DATA] Upstox exception for {symbol}: {exc}")
                 candles = None
-            if isinstance(candles, list) and candles:
+            if self._valid_candles(candles):
                 self.stats["upstox_successes"] += 1
                 print(f"[MARKET DATA] Upstox fallback supplied {symbol} after Angel One unavailable.")
                 return candles, "upstox"
@@ -92,11 +116,25 @@ class MarketDataRouter:
         return None, "none"
 
     def get_option_quote(self, exchange: str, token: str) -> tuple[dict[str, Any] | None, str]:
-        """Fetch one option quote through the single provider gateway."""
+        """Fetch an option quote with the same Angel-first auto ordering as candles."""
         self._validate_mode()
         token = str(token or "").strip()
         exchange = str(exchange or "NFO").strip().upper()
         upstox_key = token if "|" in token else ""
+
+        if self._angel_allowed():
+            self.stats["option_angel_attempts"] += 1
+            try:
+                response = self.angel_client.get_market_data("FULL", {exchange: [token]})
+            except Exception as exc:
+                self.stats["provider_failures"] += 1
+                print(f"[MARKET DATA] Angel One option quote exception: {exc}")
+                response = None
+            quote = self._extract_angel_quote(response)
+            if self._valid_option_quote(quote):
+                self.stats["option_angel_successes"] += 1
+                return quote, "angel_one"
+
         if self.mode != "angel" and self.upstox.available() and upstox_key:
             self.stats["option_upstox_attempts"] += 1
             try:
@@ -108,18 +146,6 @@ class MarketDataRouter:
             if self._valid_option_quote(quote):
                 self.stats["option_upstox_successes"] += 1
                 return self._normalize_upstox_option_quote(quote), "upstox"
-        if self._angel_allowed():
-            self.stats["option_angel_attempts"] += 1
-            try:
-                response = self.angel_client.get_market_data("FULL", {exchange: [token]})
-            except Exception as exc:
-                self.stats["provider_failures"] += 1
-                print(f"[MARKET DATA] Angel One option quote exception: {exc}")
-                response = None
-            quote = self._extract_angel_quote(response)
-            if quote is not None:
-                self.stats["option_angel_successes"] += 1
-                return quote, "angel_one"
         return None, "none"
 
     @staticmethod
@@ -136,10 +162,10 @@ class MarketDataRouter:
         bid = float(buys[0].get("price", 0) or 0) if buys else 0.0
         ask = float(sells[0].get("price", 0) or 0) if sells else 0.0
         return {
-            "ltp": float(quote.get("last_price", 0) or 0),
-            "tradeVolume": quote.get("volume", 0), "opnInterest": quote.get("oi", 0),
-            "totBuyQuan": quote.get("total_buy_quantity", 0), "totSellQuan": quote.get("total_sell_quantity", 0),
-            "lastTradeQty": 0, "avgPrice": quote.get("average_price", 0), "netChange": quote.get("net_change", 0),
+            "ltp": float(quote.get("last_price", 0) or 0), "tradeVolume": quote.get("volume", 0),
+            "opnInterest": quote.get("oi", 0), "totBuyQuan": quote.get("total_buy_quantity", 0),
+            "totSellQuan": quote.get("total_sell_quantity", 0), "lastTradeQty": 0,
+            "avgPrice": quote.get("average_price", 0), "netChange": quote.get("net_change", 0),
             "percentChange": 0.0,
             "depth": {"buy": [{"price": bid}] if bid > 0 else [], "sell": [{"price": ask}] if ask > 0 else []},
             "instrument_token": quote.get("instrument_token", ""), "timestamp": quote.get("timestamp"),
