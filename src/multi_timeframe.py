@@ -4,6 +4,9 @@ No extra broker requests are made: the scanner's 5-minute candles are
 resampled locally into 15-minute and 60-minute bars. Indicator calculations
 use pandas-only operations so scanner behavior does not depend on pandas-ta
 compatibility.
+
+Both timeframes use EMA50, so fewer than 50 completed bars cannot produce a
+valid trend. Returning INSUFFICIENT is intentional fail-closed behavior.
 """
 
 import pandas as pd
@@ -39,7 +42,9 @@ def _frame(candles, rule):
 
 
 def _trend_score(df):
-    if len(df) < 25:
+    # EMA50 is the slowest required indicator; do not label a shorter series
+    # as a neutral trend because that would turn missing history into a signal.
+    if len(df) < 50:
         return 0, "INSUFFICIENT"
     close_series = df["close"]
     ema20_series = _ema(close_series, 20)
