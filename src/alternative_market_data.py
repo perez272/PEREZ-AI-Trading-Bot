@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -15,6 +16,7 @@ UPSTOX_BASE_URL = "https://api.upstox.com/v3"
 UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
+UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(2, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
 INSTRUMENT_FILE = Path("data/instruments.json")
 
 DEFAULT_INSTRUMENT_KEYS = {
@@ -40,38 +42,12 @@ def _env_instrument_keys() -> dict[str, str]:
 
 
 def _local_instrument_keys() -> dict[str, str]:
-    """Use current index mappings from the local instrument master when present."""
-    if not INSTRUMENT_FILE.exists():
-        return {}
-    try:
-        data = json.loads(INSTRUMENT_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return {}
-    result = {}
-    aliases = {
-        "NIFTY": {"NIFTY", "NIFTY 50"},
-        "BANKNIFTY": {"BANKNIFTY", "NIFTY BANK"},
-        "FINNIFTY": {"FINNIFTY", "NIFTY FIN SERVICE", "NIFTY FINANCIAL SERVICES"},
-        "MIDCPNIFTY": {"MIDCPNIFTY", "NIFTY MIDCAP SELECT"},
-        "NIFTYNXT50": {"NIFTYNXT50", "NIFTY NEXT 50"},
-        "NIFTYFPI": {"NIFTYFPI", "NIFTY INDIA FPI 150"},
-    }
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict) or str(item.get("exch_seg", "")).upper() != "NSE":
-            continue
-        symbol = str(item.get("symbol", "")).strip().upper()
-        name = str(item.get("name", "")).strip().upper()
-        token = str(item.get("token", "")).strip()
-        if not token:
-            continue
-        for canonical, accepted in aliases.items():
-            if symbol in accepted or name in accepted:
-                result[canonical] = f"NSE_INDEX|{name or symbol}"
-    return result
+    """Never derive Upstox keys from the Angel instrument master."""
+    return {}
 
 
 class UpstoxMarketData:
-    """Defensive wrapper around Upstox V3 candles and V2 option APIs."""
+    """Defensive wrapper around Upstox V3 historical candles and V2 option APIs."""
 
     provider_name = "upstox"
 
@@ -101,12 +77,7 @@ class UpstoxMarketData:
             return None
         self._pace()
         try:
-            response = self._session.get(
-                url,
-                params=params,
-                headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"},
-                timeout=UPSTOX_TIMEOUT_SECONDS,
-            )
+            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
         except requests.RequestException as exc:
             print(f"[UPSTOX] request failed: {exc}")
             return None
@@ -123,51 +94,77 @@ class UpstoxMarketData:
             return None
         return payload
 
+    @staticmethod
+    def _normalize_candles(candles: Any) -> list[list[Any]] | None:
+        if not isinstance(candles, list):
+            return None
+        valid: list[list[Any]] = []
+        seen: set[str] = set()
+        for row in candles:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                o, h, low, close = (float(row[i]) for i in range(1, 5))
+                if min(o, h, low, close) < 0 or close <= 0 or h < max(o, low, close) or low > min(o, h, close):
+                    continue
+                key = timestamp.isoformat()
+                if key in seen:
+                    continue
+                seen.add(key)
+                valid.append(list(row))
+            except (TypeError, ValueError, IndexError):
+                continue
+        valid.sort(key=lambda row: datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")))
+        return valid or None
+
     def get_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
+        """Return sufficient multi-day history for the scanner.
+
+        Upstox's intraday endpoint is a current-day endpoint and can return too
+        few candles for the scanner's indicator requirement. V3 historical
+        candles support minute intervals over multi-day ranges, so fallback uses
+        that endpoint and lets the scanner perform the final closed-candle and
+        freshness gate.
+        """
         if not self.available():
             return None
         instrument_key = self.instrument_keys.get(symbol.upper())
         if not instrument_key:
             print(f"[UPSTOX] No instrument mapping for {symbol}; skipping fallback.")
             return None
-        if not 1 <= int(interval_minutes) <= 300:
+        interval = int(interval_minutes)
+        if not 1 <= interval <= 300:
             raise ValueError("interval_minutes must be between 1 and 300")
         encoded_key = quote(instrument_key, safe="")
-        payload = self._get(f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/minutes/{int(interval_minutes)}")
+        today = datetime.now().date()
+        from_date = today - timedelta(days=UPSTOX_HISTORICAL_LOOKBACK_DAYS)
+        url = f"{UPSTOX_BASE_URL}/historical-candle/{encoded_key}/minutes/{interval}/{today.isoformat()}/{from_date.isoformat()}"
+        payload = self._get(url)
         candles = payload.get("data", {}).get("candles") if payload else None
-        return candles if isinstance(candles, list) else None
+        normalized = self._normalize_candles(candles)
+        if normalized is not None:
+            print(f"[UPSTOX] Historical fallback returned {len(normalized)} {interval}-minute candles for {symbol}.")
+        return normalized
 
     def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
-        """Return Upstox's exchange-backed put/call chain.
-
-        Upstox accepts relative expiry keywords such as current_week, so the
-        caller does not need to hard-code a calendar date.
-        """
         if not self.available():
             return None
         underlying_key = self.instrument_keys.get(symbol.upper())
         if not underlying_key:
             print(f"[UPSTOX] No underlying instrument mapping for {symbol}.")
             return None
-        payload = self._get(
-            f"{UPSTOX_V2_BASE_URL}/option/chain",
-            {"instrument_key": underlying_key, "expiry_date": expiry},
-        )
+        payload = self._get(f"{UPSTOX_V2_BASE_URL}/option/chain", {"instrument_key": underlying_key, "expiry_date": expiry})
         data = payload.get("data") if payload else None
         return data if isinstance(data, list) else None
 
     def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
-        """Get one full exchange quote using an Upstox instrument key."""
         if not self.available() or not instrument_key or "|" not in instrument_key:
             return None
-        payload = self._get(
-            f"{UPSTOX_V2_BASE_URL}/market-quote/quotes",
-            {"instrument_key": instrument_key},
-        )
+        payload = self._get(f"{UPSTOX_V2_BASE_URL}/market-quote/quotes", {"instrument_key": instrument_key})
         data = payload.get("data") if payload else None
         if not isinstance(data, dict) or not data:
             return None
-        # Upstox returns a dict keyed by its instrument representation.
         quote = next(iter(data.values()))
         return quote if isinstance(quote, dict) else None
 
@@ -203,24 +200,16 @@ class UpstoxMarketData:
         instrument_key = str(option.get("instrument_key", ""))
         exchange = "NFO" if instrument_key.startswith("NSE_FO|") else "BFO" if instrument_key.startswith("BSE_FO|") else ""
         return {
-            "status": "CONTRACT VALID",
-            "option_type": option_type,
+            "status": "CONTRACT VALID", "option_type": option_type,
             "contract": option.get("trading_symbol") or row.get("trading_symbol", ""),
-            "exchange": exchange,
-            "token": instrument_key,
-            "expiry": row.get("expiry", ""),
-            "strike": float(row.get("strike_price")),
-            "lotsize": int(option.get("lot_size") or row.get("lot_size") or 0),
-            "ltp": ltp,
-            "spread_pct": round(spread_pct, 3),
+            "exchange": exchange, "token": instrument_key, "expiry": row.get("expiry", ""),
+            "strike": float(row.get("strike_price")), "lotsize": int(option.get("lot_size") or row.get("lot_size") or 0),
+            "ltp": ltp, "spread_pct": round(spread_pct, 3),
             "volume": float((option.get("market_data") or {}).get("volume", 0) or 0),
             "oi": float((option.get("market_data") or {}).get("oi", 0) or 0),
-            "iv": float(greeks.get("iv", 0) or 0),
-            "delta": float(greeks.get("delta", 0) or 0),
-            "gamma": float(greeks.get("gamma", 0) or 0),
-            "theta": float(greeks.get("theta", 0) or 0),
-            "vega": float(greeks.get("vega", 0) or 0),
-            "data_source": "upstox_option_chain",
+            "iv": float(greeks.get("iv", 0) or 0), "delta": float(greeks.get("delta", 0) or 0),
+            "gamma": float(greeks.get("gamma", 0) or 0), "theta": float(greeks.get("theta", 0) or 0),
+            "vega": float(greeks.get("vega", 0) or 0), "data_source": "upstox_option_chain",
         }
 
 
