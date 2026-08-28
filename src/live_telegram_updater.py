@@ -82,7 +82,7 @@ def _read_heartbeat():
 def _provider_telemetry():
     """Expose configured provider state only; never performs a market-data request."""
     mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    upstox_enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    upstox_enabled = os.getenv("UPSTOX_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     upstox_configured = bool(os.getenv("UPSTOX_ACCESS_TOKEN", "").strip())
     return mode, upstox_enabled, upstox_configured
 

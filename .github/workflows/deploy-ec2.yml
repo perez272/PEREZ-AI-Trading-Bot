@@ -56,8 +56,6 @@ jobs:
           sudo systemctl restart perez-ai.service
           sleep 2
 
-          # Health is a hard deployment gate. It must succeed against the
-          # repository-installed watchdog and the currently running bot.
           sudo systemctl start perez-ai-health.service
 
           echo "DEPLOY_OK"
@@ -69,15 +67,18 @@ jobs:
         run: |
           set -euo pipefail
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
-          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
-            echo "ERROR: live-order API usage detected"
+          # Inspect executable Python source only. Backups, patches and workflow
+          # text can contain historical API names and must not fail a runtime
+          # safety check by themselves.
+          if grep -RniE --include='*.py' --exclude-dir=__pycache__ 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
+            echo "ERROR: live-order API usage detected in executable Python"
             exit 1
           fi
-          if grep -RniE 'LIVE ORDERS.*(TRUE|ENABLED)' main.py src 2>/dev/null; then
-            echo "ERROR: live trading flag appears enabled"
+          if grep -RniE --include='*.py' --exclude-dir=__pycache__ 'LIVE ORDERS.*(TRUE|ENABLED)' main.py src 2>/dev/null; then
+            echo "ERROR: live trading flag appears enabled in executable Python"
             exit 1
           fi
-          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src --exclude-dir=__pycache__ | head -20 || true
+          grep -RniE --include='*.py' --exclude-dir=__pycache__ 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src | head -20 || true
           echo "PAPER_SAFETY_CHECK_COMPLETE"
 
       - name: Check runtime services and duplicate processes
