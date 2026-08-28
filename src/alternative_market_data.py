@@ -16,7 +16,9 @@ UPSTOX_BASE_URL = "https://api.upstox.com/v3"
 UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
-UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(2, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
+# M15/H1 confirmation uses EMA50 on H1. A single session is insufficient;
+# 15 calendar days provides enough trading sessions for a stable H1 history.
+UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(15, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
 INSTRUMENT_FILE = Path("data/instruments.json")
 
 DEFAULT_INSTRUMENT_KEYS = {
@@ -121,11 +123,11 @@ class UpstoxMarketData:
     def get_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
         """Return sufficient multi-day history for the scanner.
 
-        Upstox's intraday endpoint is a current-day endpoint and can return too
-        few candles for the scanner's indicator requirement. V3 historical
-        candles support minute intervals over multi-day ranges, so fallback uses
-        that endpoint and lets the scanner perform the final closed-candle and
-        freshness gate.
+        The scanner's MTF confirmation derives M15/H1 bars locally and H1 uses
+        EMA50. Therefore a single-session intraday response is intentionally
+        insufficient. Use the V3 historical endpoint with a minimum 15-calendar
+        day lookback; this remains one request per symbol and is rate-paced by
+        ``_get``. The scanner performs the final closed-candle/freshness gate.
         """
         if not self.available():
             return None
@@ -144,7 +146,7 @@ class UpstoxMarketData:
         candles = payload.get("data", {}).get("candles") if payload else None
         normalized = self._normalize_candles(candles)
         if normalized is not None:
-            print(f"[UPSTOX] Historical fallback returned {len(normalized)} {interval}-minute candles for {symbol}.")
+            print(f"[UPSTOX] Historical fallback returned {len(normalized)} {interval}-minute candles for {symbol} (lookback={UPSTOX_HISTORICAL_LOOKBACK_DAYS}d).")
         return normalized
 
     def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
