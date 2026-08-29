@@ -6,8 +6,19 @@ logs/
 data/
 PEREZ-AI-Trading-Bot_backup_20260804_100023.tar.gz
 
-# Local backup files
+# Local backup / surgical-edit files — never runtime state
 main.py.backup_*
+*.backup
+*.backup.*
+*.bak
+*.bak.*
+*.pre-angel-*
+*.surgical-*
+
+# Local test/deployment scratch files
+*.swp
+*.swo
+.pytest_cache/
 
 .env.fyers
 .env.*
