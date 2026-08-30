@@ -22,6 +22,10 @@ TIER1_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "
 MOVE_THRESHOLDS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0)
 MEMORY_PATH = Path(os.getenv("TIER1_OPTION_MEMORY", "data/memory/tier1_option_moves.sqlite3"))
 BASELINE_TTL_SECONDS = int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS", "900"))
+# Observation stays on the 5-second engine cadence, while provider refreshes
+# are independently TTL-gated. This prevents six Tier-1 REST requests every
+# five seconds while still feeding the detector every observation cycle.
+CHAIN_REFRESH_TTL_SECONDS = int(os.getenv("TIER1_OPTION_CHAIN_REFRESH_TTL_SECONDS", "15"))
 MAX_MEMORY_ROWS = int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS", "50000"))
 HISTORY_POINTS = 6
 
@@ -31,6 +35,7 @@ class Tier1OptionObserver:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._history: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))
+        self._chain_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._init_db()
 
     def _connect(self):
@@ -159,11 +164,21 @@ class Tier1OptionObserver:
         if not client.available():
             return []
         events: list[dict[str, Any]] = []
+        now = time.monotonic()
         for symbol in TIER1_SYMBOLS:
             try:
-                chain = client.get_option_chain(symbol)
+                cached = self._chain_cache.get(symbol)
+                if cached and now - cached[0] < CHAIN_REFRESH_TTL_SECONDS:
+                    chain = cached[1]
+                    source = "cache"
+                else:
+                    chain = client.get_option_chain(symbol)
+                    if chain:
+                        self._chain_cache[symbol] = (time.monotonic(), chain)
+                    source = "upstox"
                 if chain:
                     events.extend(self.observe(symbol, chain))
+                    print(f"[TIER1 OBSERVER] {symbol}: observation source={source}")
             except Exception as exc:
                 print(f"[TIER1 OBSERVER] {symbol}: {exc}")
         return events
