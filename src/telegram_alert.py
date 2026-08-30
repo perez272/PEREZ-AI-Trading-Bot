@@ -27,6 +27,39 @@ def _compact_option_id(trade):
     return f"{expiry}{symbol}{option_type}" if symbol and option_type and expiry else contract
 
 
+def _display_expiry(expiry):
+    """Normalize expiry to Telegram-friendly DD MON YY text."""
+    value = str(expiry or "").strip().upper()
+    match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", value)
+    if match:
+        return f"{int(match.group(1)):02d} {match.group(2)} {match.group(3)}"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.strftime("%d %b %y").upper()
+    except (TypeError, ValueError):
+        return value
+
+
+def _display_option_name(trade):
+    """Build the exact human-readable contract headline: NIFTY 10 SEP 25800 CE."""
+    symbol = str(trade.get("symbol") or trade.get("underlying") or "").strip().upper()
+    expiry = _display_expiry(trade.get("expiry"))
+    strike = trade.get("strike")
+    option_type = str(trade.get("option_type") or "").strip().upper()
+    if option_type not in {"CE", "PE"}:
+        match = re.search(r"(CE|PE)", str(trade.get("contract", "")).upper())
+        option_type = match.group(1) if match else "UNKNOWN"
+    if strike is None or str(strike).strip() == "":
+        contract = str(trade.get("contract", "")).upper()
+        strike_match = re.search(r"(?:\d{1,2}[A-Z]{3}\d{2}|\d{1,2}[A-Z]{3}\d{2,4})(\d{4,6})(?:CE|PE)", contract)
+        strike = strike_match.group(1) if strike_match else "UNKNOWN"
+    try:
+        strike_text = f"{float(strike):g}"
+    except (TypeError, ValueError):
+        strike_text = str(strike).strip().upper()
+    return f"{symbol} {expiry} {strike_text} {option_type}".strip()
+
+
 def send_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured")
@@ -67,23 +100,20 @@ def send_entry_alert(trade):
     if option_type not in {"CE", "PE"}:
         match = re.search(r"(CE|PE)", str(trade.get("contract", "")).upper())
         option_type = match.group(1) if match else "UNKNOWN"
-    strike = trade.get("strike", "UNKNOWN")
     options_score = trade.get("options_score", "N/A")
     underlying_score = trade.get("underlying_score", "N/A")
+    option_name = _display_option_name(trade)
 
     return send_alert(
         "🎯 PAPER TRADE CANDIDATE VALIDATED\n\n"
-        f"ID: {_compact_option_id(trade)}\n"
-        f"Option: {option_type}\n"
-        f"Strike: {strike}\n"
-        f"Contract: {trade['contract']}\n"
-        f"Signal: {trade['signal']}\n"
-        f"Option score: {options_score}/100\n"
-        f"Underlying score: {underlying_score}/100\n"
+        f"{option_name}\n\n"
+        f"Score: {options_score}/100\n"
+        f"Underlying Score: {underlying_score}/100\n"
+        f"Signal: {trade.get('signal', 'N/A')}\n"
         f"Entry: Rs {trade['entry']:.2f}\n"
         f"Quantity: {trade['quantity']}\n"
-        f"Stop loss: Rs {trade['stop_loss']:.2f}\n"
-        f"Target: Rs {trade['target']:.2f}\n"
+        f"Stop Loss: Rs {trade['stop_loss']:.2f}\n"
+        f"Target: Rs {trade['target']:.2f}\n\n"
         f"Reason: {_entry_reason(trade)}\n\n"
         "🔒 PAPER ONLY — LIVE ORDERS DISABLED"
     )
@@ -98,7 +128,7 @@ def send_exit_alert(trade, result):
 
     return send_alert(
         f"{label}\n\n"
-        f"ID: {_compact_option_id(trade)}\n"
+        f"{_display_option_name(trade)}\n"
         f"Entry: Rs {result['entry']:.2f}\n"
         f"Exit: Rs {result['current']:.2f}\n"
         f"Quantity: {result['quantity']}\n"
