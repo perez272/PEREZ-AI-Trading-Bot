@@ -1,11 +1,12 @@
 """Low-latency Tier-1 option explosive-move detector.
 
 Observational/paper-only signal layer. It detects acceleration BEFORE a large
-5-100% option move is complete; it never places orders and never overrides risk gates.
+5-150% option move is complete; it never places orders and never overrides risk gates.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -38,11 +39,37 @@ def _value(row: dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
-def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any], history: list[dict[str, Any]]) -> ExplosiveMoveSignal | None:
-    """Detect early acceleration from recent option observations.
+def _timestamp(row: dict[str, Any]) -> float | None:
+    raw = row.get("observed_ts") or row.get("timestamp") or row.get("ts_utc")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
 
-    history is oldest -> newest and should contain observations no older than 5 minutes.
-    Thresholds are deliberately precursor thresholds, not trade triggers.
+
+def _price_at_or_before(history: list[dict[str, Any]], target_ts: float, fallback: float) -> float:
+    best = None
+    best_ts = float("-inf")
+    for row in history:
+        ts = _timestamp(row)
+        if ts is None or ts > target_ts or ts < best_ts:
+            continue
+        value = _value((row.get("market_data") or row), "ltp")
+        if value > 0:
+            best = value
+            best_ts = ts
+    return best if best is not None else fallback
+
+
+def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any], history: list[dict[str, Any]]) -> ExplosiveMoveSignal | None:
+    """Detect early acceleration using actual observation timestamps.
+
+    This is intentionally time-aware: with a 5-second feed, three history
+    points are only 15 seconds apart and must NOT be mislabeled as 1/3/5-minute
+    observations. A window is used only when an observation at/near that age
+    actually exists.
     """
     md = current.get("market_data") or current
     ltp = _value(md, "ltp")
@@ -50,24 +77,36 @@ def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any]
     if ltp <= 0 or not instrument_key or len(history) < 2:
         return None
 
-    prices = [_value((x.get("market_data") or x), "ltp") for x in history]
-    prices = [p for p in prices if p > 0]
-    if len(prices) < 2:
-        return None
+    now_ts = _timestamp(current)
+    if now_ts is None:
+        now_ts = datetime.now(timezone.utc).timestamp()
 
-    p1 = prices[-1]
-    p3 = prices[-3] if len(prices) >= 3 else prices[0]
-    p5 = prices[0]
-    move_1m = _pct(ltp, p1)
-    move_3m = _pct(ltp, p3)
-    move_5m = _pct(ltp, p5)
-    velocity = move_1m
-    previous_velocity = _pct(p1, prices[-2]) if len(prices) >= 2 and prices[-2] > 0 else 0.0
+    current_price = ltp
+    previous = history[-1]
+    previous_price = _value((previous.get("market_data") or previous), "ltp")
+    previous_ts = _timestamp(previous)
+    elapsed = max(0.0, now_ts - previous_ts) if previous_ts is not None else 5.0
+
+    p1 = _price_at_or_before(history, now_ts - 60.0, 0.0)
+    p3 = _price_at_or_before(history, now_ts - 180.0, 0.0)
+    p5 = _price_at_or_before(history, now_ts - 300.0, 0.0)
+
+    move_1m = _pct(current_price, p1) if p1 > 0 else 0.0
+    move_3m = _pct(current_price, p3) if p3 > 0 else 0.0
+    move_5m = _pct(current_price, p5) if p5 > 0 else 0.0
+
+    velocity = _pct(current_price, previous_price) * (60.0 / max(elapsed, 1.0)) if previous_price > 0 else 0.0
+    older = history[-2] if len(history) >= 2 else None
+    older_price = _value((older.get("market_data") or older), "ltp") if older else 0.0
+    older_ts = _timestamp(older) if older else None
+    older_elapsed = max(0.0, (previous_ts - older_ts)) if previous_ts is not None and older_ts is not None else elapsed
+    previous_velocity = _pct(previous_price, older_price) * (60.0 / max(older_elapsed, 1.0)) if older_price > 0 else 0.0
     acceleration = velocity - previous_velocity
 
     volumes = [_value((x.get("market_data") or x), "volume") for x in history]
     current_volume = _value(md, "volume")
-    avg_volume = sum(v for v in volumes[:-1] if v > 0) / max(1, sum(1 for v in volumes[:-1] if v > 0))
+    valid_volumes = [v for v in volumes if v > 0]
+    avg_volume = sum(valid_volumes) / len(valid_volumes) if valid_volumes else 0.0
     volume_ratio = current_volume / avg_volume if avg_volume > 0 and current_volume > 0 else 0.0
 
     bid = _value(md, "bid_price", _value(md, "bid"))
@@ -93,7 +132,9 @@ def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any]
     elif spread_pct > 5.0:
         score -= 20; reasons.append("wide_spread_penalty")
 
-    early = score >= 55 and acceleration >= 0.5 and move_5m < 20.0
+    # Early means the move is accelerating but has not already become a
+    # completed large move. This is a precursor signal, never a guarantee.
+    early = score >= 55 and acceleration >= 0.5 and (move_5m == 0.0 or move_5m < 20.0)
     return ExplosiveMoveSignal(
         symbol=symbol,
         option_type=option_type,
