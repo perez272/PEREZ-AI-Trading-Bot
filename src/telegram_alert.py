@@ -45,15 +45,47 @@ def send_alert(message):
         return False
 
 
+def _entry_reason(trade):
+    """Build a concise, evidence-based explanation from validated trade fields."""
+    reasons = []
+    signal = str(trade.get("signal", "")).upper()
+    if signal in {"BUY CE", "BUY PE"}:
+        reasons.append(f"Underlying signal {signal}")
+    if trade.get("underlying_score") is not None:
+        reasons.append(f"underlying score {trade['underlying_score']}/100")
+    if trade.get("options_score") is not None:
+        reasons.append(f"option gate score {trade['options_score']}/100")
+    if trade.get("mtf_direction") and str(trade.get("mtf_direction")).upper() != "MIXED":
+        reasons.append(f"MTF {trade['mtf_direction']}")
+    if trade.get("strategy"):
+        reasons.append(f"strategy {trade['strategy']}")
+    return "; ".join(reasons) or "All paper-trade validation gates passed"
+
+
 def send_entry_alert(trade):
+    option_type = str(trade.get("option_type", "")).upper()
+    if option_type not in {"CE", "PE"}:
+        match = re.search(r"(CE|PE)", str(trade.get("contract", "")).upper())
+        option_type = match.group(1) if match else "UNKNOWN"
+    strike = trade.get("strike", "UNKNOWN")
+    options_score = trade.get("options_score", "N/A")
+    underlying_score = trade.get("underlying_score", "N/A")
+
     return send_alert(
-        "PAPER TRADE OPENED\n\n"
+        "🎯 PAPER TRADE CANDIDATE VALIDATED\n\n"
         f"ID: {_compact_option_id(trade)}\n"
+        f"Option: {option_type}\n"
+        f"Strike: {strike}\n"
+        f"Contract: {trade['contract']}\n"
         f"Signal: {trade['signal']}\n"
+        f"Option score: {options_score}/100\n"
+        f"Underlying score: {underlying_score}/100\n"
         f"Entry: Rs {trade['entry']:.2f}\n"
         f"Quantity: {trade['quantity']}\n"
         f"Stop loss: Rs {trade['stop_loss']:.2f}\n"
-        f"Target: Rs {trade['target']:.2f}"
+        f"Target: Rs {trade['target']:.2f}\n"
+        f"Reason: {_entry_reason(trade)}\n\n"
+        "🔒 PAPER ONLY — LIVE ORDERS DISABLED"
     )
 
 
