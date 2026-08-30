@@ -8,7 +8,7 @@ def test_compact_option_id_from_trade_contract():
         "symbol": "NIFTY",
         "contract": "NIFTY31AUG26CE25000",
     }
-    assert _compact_option_id(trade) == "NIFTYCE31AUG26"
+    assert _compact_option_id(trade) == "31AUG26NIFTYCE"
 
 
 def test_compact_option_id_from_expiry_and_side():
@@ -20,7 +20,7 @@ def test_compact_option_id_from_expiry_and_side():
         "expiry": "2026-08-31",
         "contract": "BANKNIFTY",
     }
-    assert _compact_option_id(trade) == "BANKNIFTYPE31AUG26"
+    assert _compact_option_id(trade) == "31AUG26BANKNIFTYPE"
 
 
 def test_tier1_observer_uses_provider_refresh_ttl(tmp_path, monkeypatch):
