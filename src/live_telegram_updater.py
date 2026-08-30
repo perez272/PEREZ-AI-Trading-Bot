@@ -2,6 +2,7 @@ import os
 import time
 import socket
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -41,6 +42,31 @@ def _fmt_value(value):
     return str(value)
 
 
+def _compact_option_id(symbol=None, option_type=None, expiry=None, contract=None):
+    """Combine underlying + option side + expiry into one Telegram token."""
+    symbol = str(symbol or "").strip().upper()
+    option_type = str(option_type or "").strip().upper()
+    expiry_text = str(expiry or "").strip().upper()
+    if not (option_type in {"CE", "PE"}):
+        match = re.search(r"(CE|PE)", str(contract or "").upper())
+        option_type = match.group(1) if match else ""
+    date_match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_text)
+    if not date_match:
+        date_match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", str(contract or "").upper())
+    if date_match:
+        day = int(date_match.group(1))
+        expiry_text = f"{day:02d}{date_match.group(2)}{date_match.group(3)}"
+    else:
+        try:
+            parsed = datetime.fromisoformat(expiry_text.replace("Z", "+00:00"))
+            expiry_text = parsed.strftime("%d%b%y").upper()
+        except (TypeError, ValueError):
+            expiry_text = ""
+    if symbol and option_type and expiry_text:
+        return f"{symbol}{option_type}{expiry_text}"
+    return str(contract or symbol or "UNKNOWN")
+
+
 def _event_details(events):
     if not events:
         return "No persisted events yet."
@@ -51,14 +77,17 @@ def _event_details(events):
             continue
         event_type = event.get("type", "EVENT")
         lines.append(f"{idx}. {event_type}")
-        preferred = (
-            "symbol", "contract", "option_type", "signal", "direction", "price",
-            "ltp", "move_pct", "surge_pct", "score", "confidence", "reason",
-            "decision", "status", "source", "timestamp", "threshold", "volume",
-            "oi", "iv", "delta", "gamma", "theta", "vega", "volume_ratio",
-            "spread_pct", "move_1m_pct", "move_3m_pct", "move_5m_pct",
+        compact_id = _compact_option_id(
+            event.get("symbol"), event.get("option_type"), event.get("expiry"), event.get("contract")
         )
-        used = set()
+        if any(event.get(k) not in (None, "", []) for k in ("symbol", "option_type", "expiry", "contract")):
+            lines.append(f"   ID: {compact_id}")
+        preferred = (
+            "signal", "direction", "price", "ltp", "move_pct", "surge_pct", "score", "confidence", "reason",
+            "decision", "status", "source", "timestamp", "threshold", "volume", "oi", "iv", "delta", "gamma",
+            "theta", "vega", "volume_ratio", "spread_pct", "move_1m_pct", "move_3m_pct", "move_5m_pct",
+        )
+        used = {"symbol", "option_type", "expiry", "contract"}
         for key in preferred:
             if key in event and event[key] not in (None, "", []):
                 lines.append(f"   {key}: {_fmt_value(event[key])}")
@@ -144,7 +173,7 @@ def _scan_message(heartbeat):
     if heartbeat.get("symbol"):
         lines.append("")
         lines.append("🎯 CURRENT TRADE/DECISION CONTEXT")
-        lines.append(f"Symbol: {heartbeat['symbol']}")
+        lines.append(f"ID: {_compact_option_id(heartbeat.get('symbol'), heartbeat.get('option_type'), heartbeat.get('expiry'), heartbeat.get('contract'))}")
     if heartbeat.get("strategy"):
         lines.append(f"Strategy: {heartbeat['strategy']}")
     if heartbeat.get("reason"):
