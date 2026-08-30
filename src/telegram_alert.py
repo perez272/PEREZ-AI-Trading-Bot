@@ -5,7 +5,7 @@ from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 
 def _compact_option_id(trade):
-    """Return UNDERLYING + SIDE + EXPIRY as one stable Telegram token."""
+    """Return DATE + UNDERLYING + SIDE as one stable Telegram token."""
     symbol = str(trade.get("symbol", "")).strip().upper()
     option_type = str(trade.get("option_type", "")).strip().upper()
     contract = str(trade.get("contract", "")).strip().upper()
@@ -24,7 +24,7 @@ def _compact_option_id(trade):
             expiry = parsed.strftime("%d%b%y").upper()
         except (TypeError, ValueError):
             pass
-    return f"{symbol}{option_type}{expiry}" if symbol and option_type and expiry else contract
+    return f"{expiry}{symbol}{option_type}" if symbol and option_type and expiry else contract
 
 
 def send_alert(message):
