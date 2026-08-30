@@ -2,7 +2,11 @@
 
 from datetime import time
 
-RESCAN_DELAY_SECONDS = 60
+# Observation cadence is intentionally faster than provider refresh cadence.
+# market_scanner.py reuses the validated closed-candle cache and only requests
+# provider data when the 5-minute candle bucket changes. This gives the engine
+# a 5-second decision/observation clock without issuing REST requests every 5s.
+RESCAN_DELAY_SECONDS = 5
 PER_SYMBOL_DELAY_SECONDS = 0
 MAX_WORKERS = 4
 
