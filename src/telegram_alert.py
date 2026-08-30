@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 import requests
 from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
@@ -17,6 +18,12 @@ def _compact_option_id(trade):
         match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", contract)
     if match:
         expiry = f"{int(match.group(1)):02d}{match.group(2)}{match.group(3)}"
+    else:
+        try:
+            parsed = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+            expiry = parsed.strftime("%d%b%y").upper()
+        except (TypeError, ValueError):
+            pass
     return f"{symbol}{option_type}{expiry}" if symbol and option_type and expiry else contract
 
 
