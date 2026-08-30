@@ -1,5 +1,23 @@
+import re
 import requests
 from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+
+def _compact_option_id(trade):
+    """Return UNDERLYING + SIDE + EXPIRY as one stable Telegram token."""
+    symbol = str(trade.get("symbol", "")).strip().upper()
+    option_type = str(trade.get("option_type", "")).strip().upper()
+    contract = str(trade.get("contract", "")).strip().upper()
+    expiry = str(trade.get("expiry", "")).strip().upper()
+    if option_type not in {"CE", "PE"}:
+        match = re.search(r"(CE|PE)", contract)
+        option_type = match.group(1) if match else ""
+    match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry)
+    if not match:
+        match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", contract)
+    if match:
+        expiry = f"{int(match.group(1)):02d}{match.group(2)}{match.group(3)}"
+    return f"{symbol}{option_type}{expiry}" if symbol and option_type and expiry else contract
 
 
 def send_alert(message):
@@ -23,9 +41,8 @@ def send_alert(message):
 def send_entry_alert(trade):
     return send_alert(
         "PAPER TRADE OPENED\n\n"
-        f"Underlying: {trade['symbol']}\n"
+        f"ID: {_compact_option_id(trade)}\n"
         f"Signal: {trade['signal']}\n"
-        f"Contract: {trade['contract']}\n"
         f"Entry: Rs {trade['entry']:.2f}\n"
         f"Quantity: {trade['quantity']}\n"
         f"Stop loss: Rs {trade['stop_loss']:.2f}\n"
@@ -42,8 +59,7 @@ def send_exit_alert(trade, result):
 
     return send_alert(
         f"{label}\n\n"
-        f"Underlying: {trade['symbol']}\n"
-        f"Contract: {trade['contract']}\n"
+        f"ID: {_compact_option_id(trade)}\n"
         f"Entry: Rs {result['entry']:.2f}\n"
         f"Exit: Rs {result['current']:.2f}\n"
         f"Quantity: {result['quantity']}\n"
