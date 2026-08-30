@@ -10,14 +10,16 @@ class FrozenDateTime(datetime):
 def test_upstox_descending_candles_are_sorted_and_current_open_bucket_is_excluded(monkeypatch):
     from zoneinfo import ZoneInfo
     ist = ZoneInfo("Asia/Kolkata")
-    now = datetime(2026, 8, 28, 10, 22, tzinfo=ist)
+    # 10:15 is open at 10:17 for a five-minute candle; 10:10 is the
+    # most-recent closed candle and should be the newest accepted bucket.
+    now = datetime(2026, 8, 28, 10, 17, tzinfo=ist)
     monkeypatch.setattr("src.market_scanner.datetime", type("Clock", (), {
         "now": staticmethod(lambda tz=None: now),
         "fromisoformat": staticmethod(datetime.fromisoformat),
     }))
 
     candles = [
-        ["2026-08-28T10:15:00+05:30", 100, 101, 99, 100, 0, 0],  # still open at 10:22
+        ["2026-08-28T10:15:00+05:30", 100, 101, 99, 100, 0, 0],  # still open at 10:17
         ["2026-08-28T10:10:00+05:30", 99, 100, 98, 99.5, 0, 0],
         ["2026-08-28T10:05:00+05:30", 98, 99, 97, 98.5, 0, 0],
     ]

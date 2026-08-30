@@ -206,12 +206,19 @@ class AngelClient:
     def get_candles(self, params):
         if not self._reserve_market_data_request("_last_candle_request", self.CANDLE_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.getCandleData, params)
+        response = self._retry(self.api.getCandleData, params)
+        # Pace subsequent calls from completion time, not invocation time. This
+        # keeps the local interval deterministic even when the provider call
+        # itself takes part of the interval.
+        setattr(self, "_last_candle_request", time.monotonic())
+        return response
 
     def get_ltp(self, exchange, symbol, token):
         if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.ltpData, exchange, symbol, token)
+        response = self._retry(self.api.ltpData, exchange, symbol, token)
+        setattr(self, "_last_market_data_request", time.monotonic())
+        return response
 
     def get_rms_limit(self):
         return self._retry(self.api.rmsLimit)
@@ -219,4 +226,6 @@ class AngelClient:
     def get_market_data(self, mode, exchange_tokens):
         if not self._reserve_market_data_request("_last_market_data_request", self.MARKET_DATA_REQUEST_INTERVAL):
             return None
-        return self._retry(self.api.getMarketData, mode, exchange_tokens)
+        response = self._retry(self.api.getMarketData, mode, exchange_tokens)
+        setattr(self, "_last_market_data_request", time.monotonic())
+        return response
