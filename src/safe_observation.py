@@ -1,10 +1,4 @@
-"""Five-second observation cadence without five-second REST hammering.
-
-The observation clock is deliberately independent from provider refresh cadence.
-A caller may observe every 5 seconds, while each symbol is refreshed only when
-its provider-safe refresh interval expires. The last validated snapshot remains
-available between refreshes; provider failures never turn into fabricated data.
-"""
+"""Five-second observation cadence without five-second REST hammering."""
 
 from __future__ import annotations
 
@@ -26,31 +20,20 @@ class SafeObservationEngine:
     """Coordinate a fast observation loop with slow, budgeted provider reads."""
 
     cadence_seconds: float = 5.0
-    refresh_interval_seconds: float = 60.0
+    refresh_interval_seconds: float = 300.0
     max_snapshot_age_seconds: float = 390.0
     _snapshots: dict[str, ObservationSnapshot] = field(default_factory=dict)
     _next_refresh: dict[str, float] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=lambda: {
-        "observations": 0,
-        "cache_hits": 0,
-        "refresh_due": 0,
-        "refresh_successes": 0,
-        "refresh_failures": 0,
-        "expired_snapshots": 0,
+        "observations": 0, "cache_hits": 0, "refresh_due": 0,
+        "refresh_successes": 0, "refresh_failures": 0,
+        "expired_snapshots": 0, "refresh_deferred": 0,
     })
 
-    def observe(
-        self,
-        key: str,
-        loader: Callable[[], tuple[Any, str]],
-        validator: Callable[[Any], bool],
-        now: float | None = None,
-    ) -> ObservationSnapshot | None:
-        """Return a validated snapshot without blocking the 5-second loop.
-
-        ``loader`` is called only when this key is due for refresh. A failed
-        refresh keeps the previous valid snapshot until its hard age limit.
-        """
+    def observe(self, key: str, loader: Callable[[], tuple[Any, str]],
+                validator: Callable[[Any], bool], now: float | None = None,
+                allow_refresh: bool = True) -> ObservationSnapshot | None:
+        """Return the latest validated snapshot without blocking the cadence."""
         now = time.monotonic() if now is None else float(now)
         self.stats["observations"] += 1
         snapshot = self._snapshots.get(key)
@@ -59,28 +42,22 @@ class SafeObservationEngine:
         if snapshot is not None and now < due_at:
             if now - snapshot.refreshed_at <= self.max_snapshot_age_seconds:
                 self.stats["cache_hits"] += 1
-                return ObservationSnapshot(
-                    data=snapshot.data,
-                    observed_at=now,
-                    refreshed_at=snapshot.refreshed_at,
-                    source=snapshot.source,
-                )
+                return ObservationSnapshot(snapshot.data, now, snapshot.refreshed_at, snapshot.source)
+
+        if not allow_refresh:
+            self.stats["refresh_deferred"] += 1
+            return self._fallback(key, now)
 
         self.stats["refresh_due"] += 1
         try:
             data, source = loader()
-        except Exception as exc:  # provider exceptions must not kill the loop
+        except Exception as exc:
             self.stats["refresh_failures"] += 1
             print(f"[OBSERVATION] refresh failed for {key}: {exc}")
             return self._fallback(key, now)
 
         if validator(data):
-            refreshed = ObservationSnapshot(
-                data=data,
-                observed_at=now,
-                refreshed_at=now,
-                source=str(source or "unknown"),
-            )
+            refreshed = ObservationSnapshot(data, now, now, str(source or "unknown"))
             self._snapshots[key] = refreshed
             self._next_refresh[key] = now + self.refresh_interval_seconds
             self.stats["refresh_successes"] += 1
@@ -100,19 +77,13 @@ class SafeObservationEngine:
             self._snapshots.pop(key, None)
             return None
         self.stats["cache_hits"] += 1
-        return ObservationSnapshot(
-            data=snapshot.data,
-            observed_at=now,
-            refreshed_at=snapshot.refreshed_at,
-            source=snapshot.source,
-        )
+        return ObservationSnapshot(snapshot.data, now, snapshot.refreshed_at, snapshot.source)
 
     def seconds_until_refresh(self, key: str, now: float | None = None) -> float:
         now = time.monotonic() if now is None else float(now)
         return max(0.0, self._next_refresh.get(key, 0.0) - now)
 
     def sleep_to_next_observation(self, started_at: float) -> None:
-        """Sleep only for cadence timing; never sleep for provider pacing here."""
         remaining = self.cadence_seconds - (time.monotonic() - started_at)
         if remaining > 0:
             time.sleep(remaining)
