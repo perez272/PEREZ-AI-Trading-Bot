@@ -2,7 +2,8 @@ import os
 import time
 import socket
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 INTERVAL = int(os.getenv("TELEGRAM_UPDATE_INTERVAL", "300"))
 IST = ZoneInfo("Asia/Kolkata")
 HEARTBEAT_PATH = ROOT / "data" / "runtime" / "heartbeat.json"
+MARKET_OPEN_HOUR = 9
+MARKET_OPEN_MINUTE = 15
+MARKET_CLOSE_HOUR = 15
+MARKET_CLOSE_MINUTE = 30
 
 
 def telegram(method, payload):
@@ -41,6 +46,32 @@ def _fmt_value(value):
     return str(value)
 
 
+def _compact_option_id(symbol=None, option_type=None, expiry=None, contract=None):
+    """Combine underlying + option side + expiry into one Telegram token."""
+    symbol = str(symbol or "").strip().upper()
+    option_type = str(option_type or "").strip().upper()
+    expiry_text = str(expiry or "").strip().upper()
+    contract_text = str(contract or "").strip().upper()
+    if option_type not in {"CE", "PE"}:
+        match = re.search(r"(CE|PE)", contract_text)
+        option_type = match.group(1) if match else ""
+    date_match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", expiry_text)
+    if not date_match:
+        date_match = re.search(r"(\d{1,2})([A-Z]{3})(\d{2})", contract_text)
+    if date_match:
+        day = int(date_match.group(1))
+        expiry_text = f"{day:02d}{date_match.group(2)}{date_match.group(3)}"
+    else:
+        try:
+            parsed = datetime.fromisoformat(expiry_text.replace("Z", "+00:00"))
+            expiry_text = parsed.strftime("%d%b%y").upper()
+        except (TypeError, ValueError):
+            expiry_text = ""
+    if symbol and option_type and expiry_text:
+        return f"{symbol}{option_type}{expiry_text}"
+    return contract_text or symbol or "UNKNOWN"
+
+
 def _event_details(events):
     if not events:
         return "No persisted events yet."
@@ -51,14 +82,17 @@ def _event_details(events):
             continue
         event_type = event.get("type", "EVENT")
         lines.append(f"{idx}. {event_type}")
-        preferred = (
-            "symbol", "contract", "option_type", "signal", "direction", "price",
-            "ltp", "move_pct", "surge_pct", "score", "confidence", "reason",
-            "decision", "status", "source", "timestamp", "threshold", "volume",
-            "oi", "iv", "delta", "gamma", "theta", "vega", "volume_ratio",
-            "spread_pct", "move_1m_pct", "move_3m_pct", "move_5m_pct",
+        compact_id = _compact_option_id(
+            event.get("symbol"), event.get("option_type"), event.get("expiry"), event.get("contract")
         )
-        used = set()
+        if any(event.get(k) not in (None, "", []) for k in ("symbol", "option_type", "expiry", "contract")):
+            lines.append(f"   ID: {compact_id}")
+        preferred = (
+            "signal", "direction", "price", "ltp", "move_pct", "surge_pct", "score", "confidence", "reason",
+            "decision", "status", "source", "timestamp", "threshold", "volume", "oi", "iv", "delta", "gamma",
+            "theta", "vega", "volume_ratio", "spread_pct", "move_1m_pct", "move_3m_pct", "move_5m_pct",
+        )
+        used = {"symbol", "option_type", "expiry", "contract"}
         for key in preferred:
             if key in event and event[key] not in (None, "", []):
                 lines.append(f"   {key}: {_fmt_value(event[key])}")
@@ -79,6 +113,25 @@ def _read_heartbeat():
     return {}
 
 
+def _next_weekday_0915(now):
+    candidate = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now.weekday() >= 5 or now.time() >= datetime.strptime("15:30", "%H:%M").time():
+        candidate += timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+    return candidate
+
+
+def _runtime_display(heartbeat):
+    status = str(heartbeat.get("status", "unknown"))
+    now = datetime.now(IST)
+    market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+    if status == "starting" and (now.weekday() >= 5 or now < market_open or now >= market_close):
+        return "waiting_for_market_session", _next_weekday_0915(now)
+    return status, None
+
+
 def _provider_telemetry():
     """Expose configured provider state only; never performs a market-data request."""
     mode = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
@@ -92,7 +145,7 @@ def _scan_message(heartbeat):
     if not heartbeat:
         return "🔎 SCAN TELEMETRY\nNo heartbeat scan telemetry persisted yet." + safety
 
-    status = heartbeat.get("status", "unknown")
+    status, inferred_next = _runtime_display(heartbeat)
     lines = [
         "🔎 PEREZ AI — DEEP SCAN TELEMETRY",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -100,8 +153,11 @@ def _scan_message(heartbeat):
     ]
     if heartbeat.get("timestamp_utc"):
         lines.append(f"UTC: {heartbeat['timestamp_utc']}")
-    if heartbeat.get("next_entry"):
-        lines.append(f"Next entry window: {heartbeat['next_entry']}")
+    next_entry = heartbeat.get("next_entry")
+    if inferred_next is not None:
+        next_entry = inferred_next.isoformat()
+    if next_entry:
+        lines.append(f"Next entry window: {next_entry}")
     if heartbeat.get("capital") is not None:
         lines.append(f"Capital: Rs {_fmt_value(heartbeat['capital'])}")
     if heartbeat.get("candidates") is not None:
@@ -144,7 +200,7 @@ def _scan_message(heartbeat):
     if heartbeat.get("symbol"):
         lines.append("")
         lines.append("🎯 CURRENT TRADE/DECISION CONTEXT")
-        lines.append(f"Symbol: {heartbeat['symbol']}")
+        lines.append(f"ID: {_compact_option_id(heartbeat.get('symbol'), heartbeat.get('option_type'), heartbeat.get('expiry'), heartbeat.get('contract'))}")
     if heartbeat.get("strategy"):
         lines.append(f"Strategy: {heartbeat['strategy']}")
     if heartbeat.get("reason"):
