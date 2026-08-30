@@ -1,8 +1,8 @@
-"""Continuous Tier-1 option observer using Angel One market data only.
+"""Continuous Tier-1 option observer using the existing market-data path.
 
-The observer builds a small, rate-limit-safe option universe from the local
-Angel instrument master and fetches fresh FULL quotes in one bulk request.
-No synthetic prices and no alternate provider are used in the learning path.
+The observer learns fast CE/PE moves, including expiry-day/pre-expiry behavior.
+Profit milestones are learning milestones, never automatic exits. The observer
+never places orders and the data sensor never makes an API request.
 """
 from __future__ import annotations
 
@@ -22,14 +22,17 @@ from src.explosive_move_detector import detect_explosive_move
 from src.options_surge_engine import OptionsSurgeEngine
 from src.expiry_learning_engine import record_surge_events
 from src.move_memory import record_move
+from src.data_failure_sensors import PipelineSensor
 
 TIER1_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "NIFTYFPI")
-MOVE_THRESHOLDS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0)
+# Milestones are observations, not exit targets. A 100% move must not force an
+# exit when the learned setup remains valid; 150% is also explicitly learned.
+MOVE_THRESHOLDS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 150.0)
 MEMORY_PATH = Path(os.getenv("TIER1_OPTION_MEMORY", "data/memory/tier1_option_moves.sqlite3"))
 BASELINE_TTL_SECONDS = int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS", "900"))
 MAX_MEMORY_ROWS = int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS", "50000"))
 HISTORY_POINTS = 16
-MAX_OPTION_TOKENS = 48  # Angel FULL market-data API supports up to 50 tokens/request.
+MAX_OPTION_TOKENS = 48
 STRIKES_PER_SYMBOL = 4
 
 
@@ -40,6 +43,7 @@ class Tier1OptionObserver:
         self._history = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))
         self.surge_engine = OptionsSurgeEngine()
         self.angel_client = angel_client
+        self.data_sensor = PipelineSensor(max_age_seconds=390.0, expected_interval_seconds=60.0)
         self._init_db()
 
     def _connect(self):
@@ -55,7 +59,6 @@ class Tier1OptionObserver:
 
     @staticmethod
     def _expiry_date(value: Any):
-        from datetime import datetime
         try:
             return datetime.strptime(str(value).strip().upper(), "%d%b%Y").date()
         except (TypeError, ValueError):
@@ -67,7 +70,6 @@ class Tier1OptionObserver:
         return self.angel_client
 
     def _select_contracts(self):
-        """Select four nearest ATM-ish strikes per Tier-1 symbol for one bulk call."""
         from datetime import date
         grouped = defaultdict(list)
         for item in load_instruments():
@@ -87,10 +89,8 @@ class Tier1OptionObserver:
                 strike = float(item.get("strike", 0)) / 100.0
             except (TypeError, ValueError):
                 continue
-            if strike <= 0:
-                continue
-            grouped[(symbol, expiry)].append({**item, "strike_value": strike})
-
+            if strike > 0:
+                grouped[(symbol, expiry)].append({**item, "strike_value": strike})
         selected = []
         for symbol in TIER1_SYMBOLS:
             expiries = sorted({key[1] for key in grouped if key[0] == symbol})
@@ -101,13 +101,8 @@ class Tier1OptionObserver:
             if not strikes:
                 continue
             centre = strikes[len(strikes) // 2]
-            chosen = sorted(strikes, key=lambda x: abs(x - centre))[:STRIKES_PER_SYMBOL]
-            chosen_set = set(chosen)
-            for row in rows:
-                if row["strike_value"] in chosen_set:
-                    selected.append(row)
-
-        # Keep the bulk request within Angel's documented 50-token limit.
+            chosen = set(sorted(strikes, key=lambda x: abs(x - centre))[:STRIKES_PER_SYMBOL])
+            selected.extend(r for r in rows if r["strike_value"] in chosen)
         return selected[:MAX_OPTION_TOKENS]
 
     @staticmethod
@@ -133,13 +128,7 @@ class Tier1OptionObserver:
             return None
         if ltp <= 0:
             return None
-        return {
-            "ltp": ltp,
-            "volume": float(quote.get("tradeVolume", quote.get("volume", 0)) or 0),
-            "oi": float(quote.get("opnInterest", quote.get("oi", 0)) or 0),
-            "percentChange": float(quote.get("percentChange", 0) or 0),
-            "tradeTime": quote.get("exchTradeTime") or quote.get("exchangeFeedTime") or observed_ts,
-        }
+        return {"ltp": ltp, "volume": float(quote.get("tradeVolume", quote.get("volume", 0)) or 0), "oi": float(quote.get("opnInterest", quote.get("oi", 0)) or 0), "percentChange": float(quote.get("percentChange", 0) or 0), "tradeTime": quote.get("exchTradeTime") or quote.get("exchangeFeedTime") or observed_ts}
 
     def _fetch_angel_chain(self, contracts):
         if not contracts:
@@ -152,22 +141,14 @@ class Tier1OptionObserver:
         chain_by_symbol = {}
         observed_ts = datetime.now(timezone.utc).isoformat()
         for row in contracts:
-            token = str(row.get("token", "")).strip()
-            quote = self._fresh_quote(quotes.get(token, {}), observed_ts)
+            quote = self._fresh_quote(quotes.get(str(row.get("token", "")).strip(), {}), observed_ts)
             if quote is None:
                 continue
             symbol = str(row.get("name", "")).upper().strip()
-            strike = float(row["strike_value"])
-            expiry = str(row.get("expiry", "")).strip().upper()
-            key = (symbol, expiry, strike)
-            item = chain_by_symbol.setdefault(key, {"symbol": symbol, "expiry": expiry, "strike_price": strike})
+            key = (symbol, str(row.get("expiry", "")).strip().upper(), float(row["strike_value"]))
+            item = chain_by_symbol.setdefault(key, {"symbol": symbol, "expiry": key[1], "strike_price": key[2]})
             typ = "CE" if str(row.get("symbol", "")).upper().endswith("CE") else "PE"
-            item["call_options" if typ == "CE" else "put_options"] = {
-                "instrument_key": token,
-                "trading_symbol": row.get("symbol", ""),
-                "market_data": quote,
-                "option_greeks": {},
-            }
+            item["call_options" if typ == "CE" else "put_options"] = {"instrument_key": str(row.get("token")), "trading_symbol": row.get("symbol", ""), "market_data": quote, "option_greeks": {}}
         return list(chain_by_symbol.values())
 
     def observe(self, symbol: str, chain: list[dict[str, Any]], observed_ts: str | None = None):
@@ -177,31 +158,30 @@ class Tier1OptionObserver:
         events = []
         valid = 0
         now = datetime.now(timezone.utc).timestamp()
-        with self._connect() as db:
-            for row in chain or []:
-                for typ in ("CE", "PE"):
-                    market = row.get("call_options" if typ == "CE" else "put_options") or {}
-                    md = market.get("market_data") or {}
-                    try:
-                        ltp = float(md.get("ltp", 0) or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    key = str(market.get("instrument_key") or "").strip()
-                    if ltp <= 0 or not key:
-                        continue
-                    valid += 1
-                    snap = {"symbol": symbol, "option_type": typ, "instrument_key": key, "market_data": md, "option_greeks": market.get("option_greeks") or {}, "observed_ts": observed_ts}
-                    fast = detect_explosive_move(symbol, typ, snap, list(self._history[key]))
-                    self._history[key].append(snap)
-                    if fast and fast.early:
-                        events.append({"type": "EARLY_EXPLOSIVE", "symbol": symbol, "option_type": typ, "instrument_key": key, "current_ltp": fast.ltp, "move_1m_pct": fast.move_1m_pct, "move_3m_pct": fast.move_3m_pct, "move_5m_pct": fast.move_5m_pct, "score": fast.score, "observed_ts": observed_ts, "expiry": row.get("expiry")})
-                    for e in self.surge_engine.observe(snap):
-                        e["expiry"] = row.get("expiry")
-                        e["data_source"] = "angel_one"
-                        events.append({"type": "SURGE", **e})
-
-                    raw = "|".join(str(x or "") for x in (symbol, typ, key, row.get("expiry"), row.get("strike_price")))
-                    ck = hashlib.sha256(raw.encode()).hexdigest()
+        for row in chain or []:
+            for typ in ("CE", "PE"):
+                market = row.get("call_options" if typ == "CE" else "put_options") or {}
+                md = market.get("market_data") or {}
+                try:
+                    ltp = float(md.get("ltp", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                key = str(market.get("instrument_key") or "").strip()
+                if ltp <= 0 or not key:
+                    continue
+                valid += 1
+                snap = {"symbol": symbol, "option_type": typ, "instrument_key": key, "market_data": md, "option_greeks": market.get("option_greeks") or {}, "observed_ts": observed_ts}
+                fast = detect_explosive_move(symbol, typ, snap, list(self._history[key]))
+                self._history[key].append(snap)
+                if fast and fast.early:
+                    events.append({"type": "EARLY_EXPLOSIVE", "symbol": symbol, "option_type": typ, "instrument_key": key, "current_ltp": fast.ltp, "move_1m_pct": fast.move_1m_pct, "move_3m_pct": fast.move_3m_pct, "move_5m_pct": fast.move_5m_pct, "score": fast.score, "observed_ts": observed_ts, "expiry": row.get("expiry")})
+                for e in self.surge_engine.observe(snap):
+                    e["expiry"] = row.get("expiry")
+                    e["data_source"] = "angel_one"
+                    events.append({"type": "SURGE", **e})
+                raw = "|".join(str(x or "") for x in (symbol, typ, key, row.get("expiry"), row.get("strike_price")))
+                ck = hashlib.sha256(raw.encode()).hexdigest()
+                with self._connect() as db:
                     old = db.execute("SELECT baseline_ltp,baseline_ts FROM baselines WHERE contract_key=?", (ck,)).fetchone()
                     if not old:
                         db.execute("INSERT INTO baselines VALUES (?,?,?,?,?,?,?,?,?)", (ck, symbol, typ, row.get("expiry"), row.get("strike_price"), ltp, observed_ts, ltp, observed_ts))
@@ -216,18 +196,17 @@ class Tier1OptionObserver:
                         continue
                     move = (ltp - base) / base * 100 if base > 0 else 0
                     for threshold in MOVE_THRESHOLDS:
-                        if move >= threshold:
-                            features = {"symbol": symbol, "option_type": typ, "instrument_key": key, "contract": market.get("trading_symbol"), "expiry": row.get("expiry"), "strike": row.get("strike_price"), "move_pct": round(move, 4), "baseline_ltp": base, "ltp": ltp, "volume": md.get("volume"), "oi": md.get("oi"), "iv": (market.get("option_greeks") or {}).get("iv"), "data_source": "angel_one"}
-                            ek = f"{ck}|{threshold}|{observed_ts[:16]}"
-                            try:
-                                db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (ek, symbol, typ, features["contract"], features["expiry"], features["strike"], threshold, base, ltp, move, observed_ts, json.dumps(features, separators=(",", ":"))))
-                                events.append({"type": "THRESHOLD", "threshold": threshold, **features})
-                            except sqlite3.IntegrityError:
-                                pass
+                        if move < threshold:
+                            continue
+                        features = {"symbol": symbol, "option_type": typ, "instrument_key": key, "contract": market.get("trading_symbol"), "expiry": row.get("expiry"), "strike": row.get("strike_price"), "move_pct": round(move, 4), "baseline_ltp": base, "ltp": ltp, "volume": md.get("volume"), "oi": md.get("oi"), "iv": (market.get("option_greeks") or {}).get("iv"), "data_source": "angel_one", "exit_policy": "milestone_only"}
+                        ek = f"{ck}|{threshold}|{observed_ts[:16]}"
+                        try:
+                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (ek, symbol, typ, features["contract"], features["expiry"], features["strike"], threshold, base, ltp, move, observed_ts, json.dumps(features, separators=(",", ":"))))
+                            events.append({"type": "THRESHOLD", "threshold": threshold, **features})
+                        except sqlite3.IntegrityError:
+                            pass
                     db.execute("UPDATE baselines SET last_ltp=?,last_ts=? WHERE contract_key=?", (ltp, observed_ts, ck))
-            if valid:
-                db.execute("INSERT INTO observations(symbol,observed_ts,contracts_seen,events_count) VALUES(?,?,?,?)", (symbol, observed_ts, valid, len(events)))
-            db.execute("DELETE FROM move_events WHERE id NOT IN (SELECT id FROM move_events ORDER BY id DESC LIMIT ?)", (MAX_MEMORY_ROWS,))
+        self.data_sensor.record("tier1_observe", timestamp=datetime.fromisoformat(observed_ts.replace("Z", "+00:00")), rows=valid, source="existing_market_data", valid=valid > 0)
         canonical = [e for e in events if e.get("type") in {"SURGE", "THRESHOLD"}]
         if canonical:
             record_surge_events(canonical)
@@ -238,7 +217,15 @@ class Tier1OptionObserver:
 
     def observe_all(self):
         contracts = self._select_contracts()
+        self.data_sensor.record("contract_selection", rows=len(contracts), source="local_instrument_master", valid=bool(contracts))
+        if not contracts:
+            print("[DATA SENSOR] Tier-1 contract selection returned no valid contracts")
+            return []
         chain = self._fetch_angel_chain(contracts)
+        self.data_sensor.record("market_snapshot", rows=len(chain), source="angel_one_bulk", valid=bool(chain))
+        if not chain:
+            print("[DATA SENSOR] MARKET_DATA_FAILURE: Angel snapshot empty or invalid")
+            return []
         grouped = defaultdict(list)
         for row in chain:
             grouped[str(row.get("symbol", "")).upper()].append(row)
@@ -247,12 +234,15 @@ class Tier1OptionObserver:
             try:
                 events.extend(self.observe(symbol, rows))
             except Exception as exc:
+                self.data_sensor.record(f"observe:{symbol}", rows=0, source="existing_market_data", valid=False, error=str(exc))
                 print(f"[TIER1 OBSERVER] {symbol}: {exc}")
         return events
 
     def stats(self):
         with self._connect() as db:
-            return {"observations": db.execute("SELECT COUNT(*) FROM observations").fetchone()[0], "surge_events": db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0]}
+            result = {"observations": db.execute("SELECT COUNT(*) FROM observations").fetchone()[0], "surge_events": db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0]}
+        result["data_sensor"] = self.data_sensor.snapshot()
+        return result
 
 
 _observer = Tier1OptionObserver()
