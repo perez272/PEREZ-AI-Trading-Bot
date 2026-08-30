@@ -17,6 +17,7 @@ from src.upgrade_config import FRESHNESS_MAX_AGE_MINUTES, PER_SYMBOL_DELAY_SECON
 from src.scanner_universe import build_scan_symbols
 from src.multi_timeframe import confirm as confirm_multi_timeframe
 from src.market_integrity import validate_candidate
+from src.data_failure_sensors import PipelineSensor
 
 MARKET_OPEN = dt_time(9, 15)
 MARKET_CLOSE = dt_time(15, 30)
@@ -27,18 +28,15 @@ HISTORICAL_LOOKBACK_DAYS = int(os.getenv("HISTORICAL_LOOKBACK_DAYS", "3"))
 CANDLE_CACHE_FILE = Path(os.getenv("PEREZ_CANDLE_CACHE_FILE", "/tmp/perez_ai_candle_cache.json"))
 _CANDLE_CACHE = {}
 _SCAN_STATS = {}
+_LEARNING_EVENTS = []
+_PIPELINE_SENSOR = PipelineSensor(max_age_seconds=MAX_CANDLE_AGE_SECONDS, expected_interval_seconds=60.0)
 _session = None
 _client = None
 _router = None
 
 
 def _load_candle_cache():
-    """Load the last validated candle set so service restarts do not burst the API.
-
-    Cache entries are still subjected to the normal closed-candle and freshness
-    gates before they can reach indicators or the decision engine. A corrupt or
-    incompatible cache is discarded rather than trusted.
-    """
+    """Load the last validated candle set so service restarts do not burst the API."""
     try:
         raw = json.loads(CANDLE_CACHE_FILE.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
@@ -47,23 +45,17 @@ def _load_candle_cache():
         for symbol, entry in raw.items():
             if not isinstance(entry, dict) or not isinstance(entry.get("candles"), list):
                 continue
-            bucket_raw = entry.get("bucket")
             try:
-                bucket = datetime.fromisoformat(str(bucket_raw))
+                bucket = datetime.fromisoformat(str(entry.get("bucket")))
             except (TypeError, ValueError):
                 continue
-            result[str(symbol)] = {
-                "candles": entry["candles"],
-                "bucket": bucket,
-                "source": str(entry.get("source") or "cache"),
-            }
+            result[str(symbol)] = {"candles": entry["candles"], "bucket": bucket, "source": str(entry.get("source") or "cache")}
         return result
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return {}
 
 
 def _persist_candle_cache():
-    """Atomically persist only validated scanner candles; never block on cache failure."""
     payload = {}
     for symbol, entry in _CANDLE_CACHE.items():
         if not isinstance(entry, dict) or not isinstance(entry.get("candles"), list):
@@ -71,42 +63,39 @@ def _persist_candle_cache():
         bucket = entry.get("bucket")
         if not isinstance(bucket, datetime):
             continue
-        payload[symbol] = {
-            "candles": entry["candles"],
-            "bucket": bucket.isoformat(),
-            "source": entry.get("source", "cache"),
-        }
+        payload[symbol] = {"candles": entry["candles"], "bucket": bucket.isoformat(), "source": entry.get("source", "cache")}
     try:
         CANDLE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix="perez-candle-cache-", dir=str(CANDLE_CACHE_FILE.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, separators=(",", ":"))
-                handle.flush()
-                os.fsync(handle.fileno())
+                handle.flush(); os.fsync(handle.fileno())
             os.replace(temp_name, CANDLE_CACHE_FILE)
         finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+            if os.path.exists(temp_name): os.unlink(temp_name)
     except (OSError, TypeError, ValueError) as exc:
         print(f"[MARKET DATA] Persistent candle cache write skipped: {exc}")
-
 
 _CANDLE_CACHE.update(_load_candle_cache())
 
 
 def _reset_scan_stats(symbol_count):
-    global _SCAN_STATS
-    _SCAN_STATS = {
-        "symbols": symbol_count, "api_attempts": 0, "live_refreshes": 0,
-        "cache_hits": 0, "fresh_candles": 0, "fresh_to_decision_engine": 0,
-        "stale_or_invalid": 0, "api_blocked_or_failed": 0, "decision_evaluations": 0,
-        "results": 0, "upstox_fallback_attempts": 0, "upstox_fallback_successes": 0,
-    }
+    global _SCAN_STATS, _LEARNING_EVENTS, _PIPELINE_SENSOR
+    _LEARNING_EVENTS = []
+    _PIPELINE_SENSOR = PipelineSensor(max_age_seconds=MAX_CANDLE_AGE_SECONDS, expected_interval_seconds=60.0)
+    _SCAN_STATS = {"symbols": symbol_count, "api_attempts": 0, "live_refreshes": 0, "cache_hits": 0, "fresh_candles": 0, "fresh_to_decision_engine": 0, "stale_or_invalid": 0, "api_blocked_or_failed": 0, "decision_evaluations": 0, "results": 0, "upstox_fallback_attempts": 0, "upstox_fallback_successes": 0, "learning_events": 0, "pipeline_sensor_failures": 0}
 
 
 def get_scan_stats():
-    return dict(_SCAN_STATS)
+    stats = dict(_SCAN_STATS)
+    stats["pipeline_sensor"] = _PIPELINE_SENSOR.snapshot()
+    stats["pipeline_sensor_failures"] = stats["pipeline_sensor"]["failure_count"]
+    return stats
+
+
+def get_learning_events():
+    return list(_LEARNING_EVENTS)
 
 
 def get_client():
@@ -125,8 +114,7 @@ def _get_router():
 
 def _parse_candle_timestamp(raw):
     timestamp = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=IST)
+    if timestamp.tzinfo is None: timestamp = timestamp.replace(tzinfo=IST)
     return timestamp.astimezone(IST)
 
 
@@ -141,241 +129,153 @@ def _closed_candle_bucket(now=None):
 
 
 def _normalize_closed_candles(candles, symbol):
-    if not isinstance(candles, list) or not candles:
-        return None
+    if not isinstance(candles, list) or not candles: return None
     valid = []
     for row in candles:
-        if not isinstance(row, (list, tuple)) or len(row) < 6:
-            continue
+        if not isinstance(row, (list, tuple)) or len(row) < 6: continue
         try:
-            ts = _parse_candle_timestamp(row[0])
-            values = [float(x) for x in row[1:6]]
-            if any(x < 0 for x in values) or values[3] <= 0:
-                continue
+            ts = _parse_candle_timestamp(row[0]); values = [float(x) for x in row[1:6]]
+            if any(x < 0 for x in values) or values[3] <= 0: continue
             valid.append((ts, list(row)))
-        except (TypeError, ValueError, IndexError):
-            continue
-    if not valid:
-        return None
+        except (TypeError, ValueError, IndexError): continue
+    if not valid: return None
     valid.sort(key=lambda item: item[0])
-    now = datetime.now(IST)
-    required_bucket = _closed_candle_bucket(now)
+    now = datetime.now(IST); required_bucket = _closed_candle_bucket(now)
     closed = [row for ts, row in valid if _bucket_start(ts) <= required_bucket]
-    if not closed:
-        return None
+    if not closed: return None
     actual_bucket = _bucket_start(_parse_candle_timestamp(closed[-1][0]))
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and actual_bucket != required_bucket:
-        return None
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and actual_bucket != required_bucket: return None
     return closed
 
 
 def _validate_candle_freshness(candles, symbol):
     normalized = _normalize_closed_candles(candles, symbol)
-    if normalized is None:
-        return None
-    timestamp = _parse_candle_timestamp(normalized[-1][0])
-    now = datetime.now(IST)
+    if normalized is None: return None
+    timestamp = _parse_candle_timestamp(normalized[-1][0]); now = datetime.now(IST)
     age_seconds = (now - timestamp).total_seconds()
-    if age_seconds < -60 or age_seconds > MAX_CANDLE_AGE_SECONDS:
-        return None
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now):
-        return None
+    if age_seconds < -60 or age_seconds > MAX_CANDLE_AGE_SECONDS: return None
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now): return None
     return age_seconds
 
 
 def _candle_bucket(candles):
-    try:
-        return _bucket_start(_parse_candle_timestamp(candles[-1][0]))
-    except (TypeError, ValueError, IndexError):
-        return None
+    try: return _bucket_start(_parse_candle_timestamp(candles[-1][0]))
+    except (TypeError, ValueError, IndexError): return None
 
 
 def _historical_params(exchange, token):
     to_date = datetime.now(IST)
-    return {
-        "exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE",
-        "fromdate": (to_date - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M"),
-        "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-    }
+    return {"exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE", "fromdate": (to_date - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M"), "todate": to_date.strftime("%Y-%m-%d %H:%M")}
 
 
 def _safe_pct(numerator, denominator):
     try:
-        denominator = float(denominator)
-        return float(numerator) / denominator * 100.0 if denominator else 0.0
-    except (TypeError, ValueError):
-        return 0.0
+        denominator = float(denominator); return float(numerator) / denominator * 100.0 if denominator else 0.0
+    except (TypeError, ValueError): return 0.0
 
 
 def _derive_momentum_fields(df):
-    """Derive early-move features so the momentum layer is not blind to breakouts."""
-    last = df.iloc[-1]
-    previous = df.iloc[-2] if len(df) >= 2 else last
+    last = df.iloc[-1]; previous = df.iloc[-2] if len(df) >= 2 else last
     lookback = df.iloc[-13:-1] if len(df) >= 13 else df.iloc[:-1]
     prior_high = float(lookback["high"].max()) if not lookback.empty else float(last["high"])
     prior_low = float(lookback["low"].min()) if not lookback.empty else float(last["low"])
-    close = float(last["close"])
-    candle_range = max(float(last["high"]) - float(last["low"]), 1e-9)
-    body = abs(float(last["close"]) - float(last["open"]))
-    direction_breakout = max(
-        _safe_pct(close - prior_high, prior_high),
-        _safe_pct(prior_low - close, prior_low),
-        0.0,
-    )
+    close = float(last["close"]); candle_range = max(float(last["high"]) - float(last["low"]), 1e-9); body = abs(float(last["close"]) - float(last["open"]))
+    direction_breakout = max(_safe_pct(close - prior_high, prior_high), _safe_pct(prior_low - close, prior_low), 0.0)
     volume_ratio = 0.0
     if len(df) >= 21:
-        avg_volume = float(df["volume"].iloc[-21:-1].mean())
-        volume_ratio = float(last.get("volume", 0) or 0) / avg_volume if avg_volume > 0 else 0.0
-    rsi_slope = float(last.get("RSI", 0) or 0) - float(previous.get("RSI", 0) or 0)
-    atr = float(last.get("ATR", 0) or 0)
-    atr_pct = _safe_pct(atr, close)
-    ema_gap_pct = abs(_safe_pct(float(last.get("EMA20", close)) - float(last.get("EMA50", close)), close))
-    return {
-        "breakout_strength": round(direction_breakout, 4),
-        "body_strength": round(body / candle_range, 4),
-        "ema_gap_pct": round(ema_gap_pct, 4),
-        "rsi_slope": round(rsi_slope, 4),
-        "atr_pct": round(atr_pct, 4),
-        "percent_change": round(_safe_pct(close - float(previous.get("close", close)), float(previous.get("close", close))), 4),
-        "volume_ratio": round(volume_ratio, 4),
-    }
+        avg_volume = float(df["volume"].iloc[-21:-1].mean()); volume_ratio = float(last.get("volume", 0) or 0) / avg_volume if avg_volume > 0 else 0.0
+    rsi_slope = float(last.get("RSI", 0) or 0) - float(previous.get("RSI", 0) or 0); atr = float(last.get("ATR", 0) or 0); atr_pct = _safe_pct(atr, close); ema_gap_pct = abs(_safe_pct(float(last.get("EMA20", close)) - float(last.get("EMA50", close)), close))
+    return {"breakout_strength": round(direction_breakout, 4), "body_strength": round(body / candle_range, 4), "ema_gap_pct": round(ema_gap_pct, 4), "rsi_slope": round(rsi_slope, 4), "atr_pct": round(atr_pct, 4), "percent_change": round(_safe_pct(close - float(previous.get("close", close)), float(previous.get("close", close))), 4), "volume_ratio": round(volume_ratio, 4)}
 
 
 def _scan_one(symbol, exchange, token):
-    candles = None
-    source = "cache"
-    entry = _CANDLE_CACHE.get(symbol)
-    if entry and entry.get("bucket") == _closed_candle_bucket(datetime.now(IST)):
-        candles = _normalize_closed_candles(entry.get("candles"), symbol)
+    candles = None; source = "cache"; entry = _CANDLE_CACHE.get(symbol)
+    if entry and entry.get("bucket") == _closed_candle_bucket(datetime.now(IST)): candles = _normalize_closed_candles(entry.get("candles"), symbol)
     cache_hit = candles is not None
     if candles is None:
         _SCAN_STATS["api_attempts"] += 1
-        try:
-            candles, source = _get_router().get_candles(symbol, _historical_params(exchange, token), CANDLE_INTERVAL_MINUTES)
+        try: candles, source = _get_router().get_candles(symbol, _historical_params(exchange, token), CANDLE_INTERVAL_MINUTES)
         except Exception as exc:
-            _SCAN_STATS["api_blocked_or_failed"] += 1
-            print(f"[MARKET DATA] Provider routing failed for {symbol}: {exc}")
-            return None, False
+            _PIPELINE_SENSOR.record("market_snapshot", rows=0, source="none", valid=False, error=str(exc)); _SCAN_STATS["api_blocked_or_failed"] += 1
+            print(f"[MARKET DATA] Provider routing failed for {symbol}: {exc}"); return None, False
+        _PIPELINE_SENSOR.record("market_snapshot", rows=len(candles or []), source=source, valid=bool(candles))
         if source == "upstox":
-            _SCAN_STATS["upstox_fallback_attempts"] += 1
-            _SCAN_STATS["upstox_fallback_successes"] += int(bool(candles))
+            _SCAN_STATS["upstox_fallback_attempts"] += 1; _SCAN_STATS["upstox_fallback_successes"] += int(bool(candles))
         if not candles:
-            _SCAN_STATS["api_blocked_or_failed"] += 1
-            return None, False
+            _SCAN_STATS["api_blocked_or_failed"] += 1; return None, False
         candles = _normalize_closed_candles(candles, symbol)
         if candles is None or _validate_candle_freshness(candles, symbol) is None:
-            _SCAN_STATS["stale_or_invalid"] += 1
-            return None, False
+            _PIPELINE_SENSOR.record("validated_candles", rows=0, source=source, valid=False, error="stale_or_invalid"); _SCAN_STATS["stale_or_invalid"] += 1; return None, False
         bucket = _candle_bucket(candles)
         if bucket is None:
-            _SCAN_STATS["stale_or_invalid"] += 1
-            return None, False
-        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket, "source": source}
-        _persist_candle_cache()
-        _SCAN_STATS["live_refreshes"] += 1
+            _PIPELINE_SENSOR.record("validated_candles", rows=0, source=source, valid=False, error="missing_bucket"); _SCAN_STATS["stale_or_invalid"] += 1; return None, False
+        _PIPELINE_SENSOR.record("validated_candles", rows=len(candles), source=source, valid=True)
+        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket, "source": source}; _persist_candle_cache(); _SCAN_STATS["live_refreshes"] += 1
     else:
         source = entry.get("source", "cache") if entry else "cache"
+        _PIPELINE_SENSOR.record("market_snapshot_cache", rows=len(candles), source=source, valid=bool(candles))
     freshness_age = _validate_candle_freshness(candles, symbol)
     if freshness_age is None or len(candles) < 30:
-        _SCAN_STATS["stale_or_invalid"] += 1
-        return None, cache_hit
+        _PIPELINE_SENSOR.record("decision_input", rows=0, source=source, valid=False, error="freshness_or_history_gate"); _SCAN_STATS["stale_or_invalid"] += 1; return None, cache_hit
     _SCAN_STATS["fresh_candles"] += 1
     try:
         df = calculate_indicators(candles)
-        if df is None or df.empty or len(df) < 30:
-            return None, cache_hit
-        last = df.iloc[-1]
-        required = ("RSI", "EMA20", "EMA50", "close")
-        if any(key not in df.columns for key in required) or any(last[key] != last[key] for key in required):
-            return None, cache_hit
+        if df is None or df.empty or len(df) < 30: return None, cache_hit
+        last = df.iloc[-1]; required = ("RSI", "EMA20", "EMA50", "close")
+        if any(key not in df.columns for key in required) or any(last[key] != last[key] for key in required): return None, cache_hit
         _SCAN_STATS["fresh_to_decision_engine"] += 1
-        base_score = calculate_score(df)
-        signal, trend = get_trade_decision(base_score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"]))
-        _SCAN_STATS["decision_evaluations"] += 1
-        mtf = confirm_multi_timeframe(candles)
-        score = max(0, min(100, int(base_score) + int(mtf["quality"])))
-        fields = _derive_momentum_fields(df)
-        if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
-            signal = "NO TRADE"
-        candidate = {
-            "symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]),
-            "rsi": float(last["RSI"]), "signal": signal, "trend": trend,
-            **fields,
-            "candle_age_seconds": round(freshness_age, 1),
-            "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
-            "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
-            "data_source": source,
-        }
-        ok, reasons = validate_candidate(candidate)
-        candidate["market_integrity_ok"] = ok
-        candidate["market_integrity_reasons"] = reasons
-        if not ok or not candidate["market_data_fresh"]:
-            candidate["signal"] = "NO TRADE"
-        if PER_SYMBOL_DELAY_SECONDS:
-            time.sleep(PER_SYMBOL_DELAY_SECONDS)
+        base_score = calculate_score(df); signal, trend = get_trade_decision(base_score, float(last["RSI"]), float(last["EMA20"]), float(last["EMA50"]), float(last["close"])); _SCAN_STATS["decision_evaluations"] += 1
+        mtf = confirm_multi_timeframe(candles); score = max(0, min(100, int(base_score) + int(mtf["quality"]))); fields = _derive_momentum_fields(df)
+        if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]: signal = "NO TRADE"
+        candidate = {"symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]), "rsi": float(last["RSI"]), "signal": signal, "trend": trend, **fields, "candle_age_seconds": round(freshness_age, 1), "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS, "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"], "data_source": source}
+        ok, reasons = validate_candidate(candidate); candidate["market_integrity_ok"] = ok; candidate["market_integrity_reasons"] = reasons
+        _PIPELINE_SENSOR.record("decision_input", rows=1, source=source, valid=bool(ok and candidate["market_data_fresh"]))
+        if not ok or not candidate["market_data_fresh"]: candidate["signal"] = "NO TRADE"
+        if PER_SYMBOL_DELAY_SECONDS: time.sleep(PER_SYMBOL_DELAY_SECONDS)
         return candidate, cache_hit
     except Exception as exc:
-        print(f"[MARKET DATA] Decision pipeline failed for {symbol}: {exc}")
-        return None, cache_hit
+        _PIPELINE_SENSOR.record("decision_input", rows=0, source=source, valid=False, error=str(exc)); print(f"[MARKET DATA] Decision pipeline failed for {symbol}: {exc}"); return None, cache_hit
 
 
 def scan_market():
-    symbols = build_scan_symbols()
-    _reset_scan_stats(len(symbols))
-    results, refreshed, cached = [], 0, 0
+    global _LEARNING_EVENTS
+    symbols = build_scan_symbols(); _reset_scan_stats(len(symbols)); results, refreshed, cached = [], 0, 0
     for symbol, (exchange, token) in symbols.items():
         item, cache_hit = _scan_one(symbol, exchange, token)
         if item:
-            results.append(item)
-            cached += int(cache_hit)
-            refreshed += int(not cache_hit)
-    _SCAN_STATS["cache_hits"] = cached
-    _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed)
-    _SCAN_STATS["results"] = len(results)
+            results.append(item); cached += int(cache_hit); refreshed += int(not cache_hit)
+    _SCAN_STATS["cache_hits"] = cached; _SCAN_STATS["live_refreshes"] = max(_SCAN_STATS["live_refreshes"], refreshed); _SCAN_STATS["results"] = len(results)
+    # Tier-1 learning is invoked from the production scan cycle. The dedicated
+    # observer service remains alive only as a compatibility supervisor and does
+    # not poll the market. This guarantees one learning poller and one gateway.
+    try:
+        from src.tier1_option_observer import observe_tier1_option_chains
+        _LEARNING_EVENTS = observe_tier1_option_chains()
+        _SCAN_STATS["learning_events"] = len(_LEARNING_EVENTS)
+        _PIPELINE_SENSOR.record("learning_engine", rows=len(_LEARNING_EVENTS), source="shared_production_scan", valid=True)
+    except Exception as exc:
+        _LEARNING_EVENTS = []
+        _PIPELINE_SENSOR.record("learning_engine", rows=0, source="shared_production_scan", valid=False, error=str(exc))
+        print(f"[LEARNING] shared production learning failed safely: {exc}")
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
 def _candidate_is_fresh(candidate):
-    if candidate.get("market_data_fresh") is not True or candidate.get("market_integrity_ok") is not True:
-        return False
+    if candidate.get("market_data_fresh") is not True or candidate.get("market_integrity_ok") is not True: return False
     try:
-        bucket = datetime.fromisoformat(candidate["candle_bucket"])
-        age = float(candidate["candle_age_seconds"])
-    except (TypeError, ValueError, KeyError):
-        return False
+        bucket = datetime.fromisoformat(candidate["candle_bucket"]); age = float(candidate["candle_age_seconds"])
+    except (TypeError, ValueError, KeyError): return False
     return bucket == _closed_candle_bucket(datetime.now(IST)) and 0 <= age <= MAX_CANDLE_AGE_SECONDS
 
 
 def select_best_candidate(results, minimum_score=65):
-    eligible = [
-        x for x in results
-        if x["score"] >= minimum_score
-        and x["signal"] in ("BUY CE", "BUY PE")
-        and x.get("mtf_aligned") is True
-        and _candidate_is_fresh(x)
-    ]
-    return eligible[0] if eligible else None
+    return [x for x in results if x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True and _candidate_is_fresh(x)][0] if any(x["score"] >= minimum_score and x["signal"] in ("BUY CE", "BUY PE") and x.get("mtf_aligned") is True and _candidate_is_fresh(x) for x in results) else None
 
 
 def print_results(results):
     print("\nAI Ranking")
     for item in results:
-        print(
-            f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} "
-            f"Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} "
-            f"Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} "
-            f"Breakout={item.get('breakout_strength', 0):.2f}% Vol={item.get('volume_ratio', 0):.2f}x "
-            f"Integrity={item.get('market_integrity_ok')} Source={item.get('data_source')}"
-        )
-    stats = get_scan_stats()
-    print(
-        "MARKET DATA QUALITY: "
-        + f"Universe={stats['symbols']} API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} "
-        + f"Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} FreshToDecision={stats['fresh_to_decision_engine']} "
-        + f"Decisions={stats['decision_evaluations']} BlockedOrFailed={stats['api_blocked_or_failed']} "
-        + f"InvalidOrStale={stats['stale_or_invalid']} UpstoxFallback={stats['upstox_fallback_successes']}/{stats['upstox_fallback_attempts']}"
-    )
+        print(f"{item['symbol']:<12} Score={item['score']}/100 Close={item['close']:.2f} Signal={item['signal']} MTF={item.get('m15_trend')}/{item.get('h1_trend')} Age={item.get('candle_age_seconds')}s Fresh={item.get('market_data_fresh')} Breakout={item.get('breakout_strength', 0):.2f}% Vol={item.get('volume_ratio', 0):.2f}x Integrity={item.get('market_integrity_ok')} Source={item.get('data_source')}")
+    stats = get_scan_stats(); print("MARKET DATA QUALITY: " + f"Universe={stats['symbols']} API={stats['api_attempts']} LiveRefresh={stats['live_refreshes']} Cache={stats['cache_hits']} Fresh={stats['fresh_candles']} FreshToDecision={stats['fresh_to_decision_engine']} Decisions={stats['decision_evaluations']} BlockedOrFailed={stats['api_blocked_or_failed']} InvalidOrStale={stats['stale_or_invalid']} UpstoxFallback={stats['upstox_fallback_successes']}/{stats['upstox_fallback_attempts']} LearningEvents={stats['learning_events']} SensorFailures={stats['pipeline_sensor_failures']}")
 
-
-if __name__ == "__main__":
-    print_results(scan_market())
+if __name__ == "__main__": print_results(scan_market())
