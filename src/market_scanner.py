@@ -109,6 +109,16 @@ def get_scan_stats():
     return dict(_SCAN_STATS)
 
 
+def get_scan_telemetry():
+    """Compatibility API for diagnostics and runtime telemetry consumers.
+
+    The scanner's canonical telemetry store is _SCAN_STATS and is exposed
+    through get_scan_stats(). Keep this alias read-only so telemetry consumers
+    cannot mutate scanner state or affect trading decisions.
+    """
+    return get_scan_stats()
+
+
 def get_client():
     global _session, _client, _router
     if _client is None:
@@ -175,12 +185,42 @@ def _validate_candle_freshness(candles, symbol):
         return None
     timestamp = _parse_candle_timestamp(normalized[-1][0])
     now = datetime.now(IST)
-    age_seconds = (now - timestamp).total_seconds()
-    if age_seconds < -60 or age_seconds > MAX_CANDLE_AGE_SECONDS:
-        return None
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE and _bucket_start(timestamp) != _closed_candle_bucket(now):
-        return None
-    return age_seconds
+
+    # During the live session, require the latest closed 5-minute candle.
+    # After market close, do NOT compare the final market candle against the
+    # wall clock. The exchange is closed, so no newer candle can legitimately
+    # exist. Validate freshness against the market close boundary instead.
+    if MARKET_OPEN <= now.time() <= MARKET_CLOSE:
+        required_bucket = _closed_candle_bucket(now)
+        if _bucket_start(timestamp) != required_bucket:
+            return None
+        candle_close = _bucket_start(timestamp) + timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+        age_seconds = max(0.0, (now - candle_close).total_seconds())
+        if age_seconds > MAX_CANDLE_AGE_SECONDS:
+            return None
+        return age_seconds
+
+    if now.time() > MARKET_CLOSE:
+        market_close_dt = now.replace(
+            hour=MARKET_CLOSE.hour,
+            minute=MARKET_CLOSE.minute,
+            second=0,
+            microsecond=0,
+        )
+        candle_close = _bucket_start(timestamp) + timedelta(minutes=CANDLE_INTERVAL_MINUTES)
+
+        # Only the final valid market-session candle is accepted after close.
+        if candle_close.time() > MARKET_CLOSE:
+            return None
+
+        age_seconds = max(0.0, (market_close_dt - candle_close).total_seconds())
+        if age_seconds > MAX_CANDLE_AGE_SECONDS:
+            # The data itself is valid, but the market session is too far past
+            # the final candle for a trading decision.
+            return None
+        return age_seconds
+
+    return None
 
 
 def _candle_bucket(candles):

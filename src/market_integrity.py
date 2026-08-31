@@ -42,16 +42,37 @@ def validate_candidate(candidate: Dict[str, Any], now: datetime | None = None) -
         except (TypeError, ValueError):
             reasons.append("INVALID_VOLUME_RATIO")
 
-    # Optional independent Upstox validation. When explicitly enabled, a
-    # missing token, missing instrument mapping, stale response, or material
-    # disagreement is a hard no-trade condition. This prevents a single broker
-    # feed from becoming the sole source of truth.
-    if candidate and candidate.get("symbol") and candidate.get("close") is not None:
-        upstox_ok, details = validate_against_upstox(candidate["symbol"], float(candidate["close"]))
+    # Independent Upstox validation is only required when Upstox is
+    # validating a different primary market-data source.
+    #
+    # If Upstox itself supplied the candidate, validating it against the same
+    # provider would be circular and can incorrectly produce
+    # MISSING_INSTRUMENT_KEY / validation failures. The provider response has
+    # already crossed the MarketDataRouter validation boundary.
+    if (
+        candidate
+        and candidate.get("symbol")
+        and candidate.get("close") is not None
+        and str(candidate.get("data_source", "")).lower() != "upstox"
+    ):
+        upstox_ok, details = validate_against_upstox(
+            candidate["symbol"],
+            float(candidate["close"]),
+        )
         candidate["upstox_validation"] = details
         candidate["upstox_data_valid"] = upstox_ok
+
         if not upstox_ok:
-            reasons.append(f"UPSTOX_VALIDATION_{details.get('status', 'FAILED')}")
+            reasons.append(
+                f"UPSTOX_VALIDATION_{details.get('status', 'FAILED')}"
+            )
+    elif candidate and str(candidate.get("data_source", "")).lower() == "upstox":
+        candidate["upstox_validation"] = {
+            "enabled": True,
+            "status": "PRIMARY_SOURCE",
+            "reason": "Upstox supplied the candidate; circular self-validation skipped.",
+        }
+        candidate["upstox_data_valid"] = True
 
     return not reasons, reasons
 
