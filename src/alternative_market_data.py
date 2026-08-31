@@ -16,8 +16,6 @@ UPSTOX_BASE_URL = "https://api.upstox.com/v3"
 UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
-# M15/H1 confirmation uses EMA50 on H1. A single session is insufficient;
-# 15 calendar days provides enough trading sessions for a stable H1 history.
 UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(15, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
 INSTRUMENT_FILE = Path("data/instruments.json")
 
@@ -37,6 +35,8 @@ def _env_instrument_keys() -> dict[str, str]:
         return {}
     try:
         value = json.loads(raw)
+        if not isinstance(value, dict):
+            return {}
         return {str(k).upper(): str(v) for k, v in value.items()}
     except (TypeError, ValueError, json.JSONDecodeError):
         print("[UPSTOX] Invalid UPSTOX_INSTRUMENT_KEYS_JSON; using built-in mappings.")
@@ -108,27 +108,25 @@ class UpstoxMarketData:
             try:
                 timestamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
                 o, h, low, close = (float(row[i]) for i in range(1, 5))
-                if min(o, h, low, close) < 0 or close <= 0 or h < max(o, low, close) or low > min(o, h, close):
+                volume = float(row[5])
+                if min(o, h, low, close, volume) < 0 or close <= 0:
+                    continue
+                if h < max(o, low, close) or low > min(o, h, close):
                     continue
                 key = timestamp.isoformat()
                 if key in seen:
                     continue
                 seen.add(key)
-                valid.append(list(row))
+                # Canonical scanner schema: timestamp, open, high, low, close, volume.
+                # Upstox may return additional fields; do not pass them downstream.
+                valid.append([row[0], row[1], row[2], row[3], row[4], row[5]])
             except (TypeError, ValueError, IndexError):
                 continue
         valid.sort(key=lambda row: datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")))
         return valid or None
 
     def get_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
-        """Return sufficient multi-day history for the scanner.
-
-        The scanner's MTF confirmation derives M15/H1 bars locally and H1 uses
-        EMA50. Therefore a single-session intraday response is intentionally
-        insufficient. Use the V3 historical endpoint with a minimum 15-calendar
-        day lookback; this remains one request per symbol and is rate-paced by
-        ``_get``. The scanner performs the final closed-candle/freshness gate.
-        """
+        """Return multi-day history plus today's intraday candles, merged by timestamp."""
         if not self.available():
             return None
         instrument_key = self.instrument_keys.get(symbol.upper())
@@ -141,13 +139,34 @@ class UpstoxMarketData:
         encoded_key = quote(instrument_key, safe="")
         today = datetime.now().date()
         from_date = today - timedelta(days=UPSTOX_HISTORICAL_LOOKBACK_DAYS)
-        url = f"{UPSTOX_BASE_URL}/historical-candle/{encoded_key}/minutes/{interval}/{today.isoformat()}/{from_date.isoformat()}"
-        payload = self._get(url)
-        candles = payload.get("data", {}).get("candles") if payload else None
-        normalized = self._normalize_candles(candles)
-        if normalized is not None:
+
+        historical_url = f"{UPSTOX_BASE_URL}/historical-candle/{encoded_key}/minutes/{interval}/{today.isoformat()}/{from_date.isoformat()}"
+        historical_payload = self._get(historical_url)
+        historical = historical_payload.get("data", {}).get("candles") if historical_payload else None
+        merged_rows = self._normalize_candles(historical) or []
+
+        # Today's intraday endpoint supplies the freshest current-session candles.
+        intraday_url = f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/minutes/{interval}"
+        intraday_payload = self._get(intraday_url)
+        intraday = intraday_payload.get("data", {}).get("candles") if intraday_payload else None
+        merged_rows.extend(self._normalize_candles(intraday) or [])
+
+        deduped: dict[str, list[Any]] = {}
+        for row in merged_rows:
+            try:
+                ts = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            except (TypeError, ValueError, IndexError):
+                continue
+            deduped[ts.isoformat()] = row
+        normalized = sorted(deduped.values(), key=lambda row: datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")))
+        if normalized:
             print(f"[UPSTOX] Historical fallback returned {len(normalized)} {interval}-minute candles for {symbol} (lookback={UPSTOX_HISTORICAL_LOOKBACK_DAYS}d).")
-        return normalized
+        return normalized or None
+
+    # Compatibility API used by diagnostics/legacy callers.
+    def get_historical_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
+        """Backward-compatible alias for :meth:`get_candles`."""
+        return self.get_candles(symbol, interval_minutes=interval_minutes)
 
     def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
         if not self.available():
