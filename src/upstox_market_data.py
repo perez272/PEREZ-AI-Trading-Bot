@@ -46,6 +46,11 @@ def access_token() -> str:
 
 
 def instrument_keys() -> dict[str, str]:
+    """Return only explicitly configured Upstox instrument mappings.
+
+    No built-in fallback mappings are used. Missing mappings therefore
+    fail closed instead of silently selecting an assumed instrument.
+    """
     raw = os.getenv("UPSTOX_INSTRUMENT_KEYS_JSON", "").strip()
     if not raw:
         return {}
@@ -55,7 +60,11 @@ def instrument_keys() -> dict[str, str]:
         return {}
     if not isinstance(value, dict):
         return {}
-    return {str(k).upper().strip(): str(v).strip() for k, v in value.items() if str(v).strip()}
+    return {
+        str(k).upper().strip(): str(v).strip()
+        for k, v in value.items()
+        if str(v).strip()
+    }
 
 
 def _headers() -> dict[str, str]:

@@ -55,10 +55,19 @@ def validate_candidate(candidate: Dict[str, Any], now: datetime | None = None) -
         and candidate.get("close") is not None
         and str(candidate.get("data_source", "")).lower() != "upstox"
     ):
-        upstox_ok, details = validate_against_upstox(
-            candidate["symbol"],
-            float(candidate["close"]),
-        )
+        upstox_snapshot = candidate.get("upstox_snapshot")
+
+        if isinstance(upstox_snapshot, dict):
+            upstox_ok, details = validate_against_upstox(
+                candidate["symbol"],
+                float(candidate["close"]),
+                snapshot=upstox_snapshot,
+            )
+        else:
+            upstox_ok, details = False, {
+                "enabled": True,
+                "status": "MISSING_SNAPSHOT",
+            }
         candidate["upstox_validation"] = details
         candidate["upstox_data_valid"] = upstox_ok
 

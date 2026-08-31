@@ -25,7 +25,11 @@ def _max_price_deviation_pct() -> float:
     return max(0.05, min(value, 5.0))
 
 
-def validate_against_upstox(symbol: str, primary_close: float) -> tuple[bool, dict[str, Any]]:
+def validate_against_upstox(
+    symbol: str,
+    primary_close: float,
+    snapshot: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
     """Validate an Angel/primary closed candle against Upstox.
 
     If Upstox validation is enabled, any missing/invalid/stale secondary data
@@ -41,8 +45,17 @@ def validate_against_upstox(symbol: str, primary_close: float) -> tuple[bool, di
     if not upstox.instrument_keys().get(str(symbol).upper().strip()):
         return False, {"enabled": True, "status": "MISSING_INSTRUMENT_KEY"}
 
+    if not isinstance(snapshot, dict):
+        return False, {"enabled": True, "status": "MISSING_SNAPSHOT"}
+
+    if snapshot.get("error"):
+        return False, {
+            "enabled": True,
+            "status": "ERROR",
+            "error": str(snapshot.get("error")),
+        }
+
     try:
-        snapshot = upstox.get_snapshot(symbol)
         secondary_close = float(snapshot["closed_5m_close"])
         secondary_ltp = float(snapshot["ltp"])
         if primary_close <= 0 or secondary_close <= 0 or secondary_ltp <= 0:

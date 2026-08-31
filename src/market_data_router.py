@@ -26,11 +26,40 @@ class MarketDataRouter:
             "upstox_attempts": 0, "upstox_successes": 0, "provider_failures": 0,
             "option_angel_attempts": 0, "option_angel_successes": 0,
             "option_upstox_attempts": 0, "option_upstox_successes": 0,
+            "upstox_validation_snapshots": 0,
+            "upstox_validation_failures": 0,
         }
+        self._validation_snapshots: dict[str, dict[str, Any]] = {}
 
     def _validate_mode(self) -> None:
         if self.mode not in {"auto", "angel", "upstox"}:
             raise ValueError("MARKET_DATA_PROVIDER must be auto, angel, or upstox")
+
+    def get_validation_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        """Return the Upstox snapshot captured during the latest router request."""
+        return self._validation_snapshots.get(str(symbol).upper().strip())
+
+    def _capture_upstox_validation_snapshot(self, symbol: str) -> None:
+        """Capture exactly one secondary snapshot for primary Angel data."""
+        symbol = str(symbol).upper().strip()
+
+        if str(os.getenv("UPSTOX_ENABLED", "false")).strip().lower() not in {
+            "1", "true", "yes", "on"
+        }:
+            return
+
+        try:
+            snapshot = self.upstox.get_snapshot(symbol)
+            if isinstance(snapshot, dict):
+                self._validation_snapshots[symbol] = snapshot
+                self.stats["upstox_validation_snapshots"] += 1
+        except Exception as exc:
+            self.stats["upstox_validation_failures"] += 1
+            self._validation_snapshots[symbol] = {
+                "provider": "upstox",
+                "symbol": symbol,
+                "error": str(exc),
+            }
 
     def _angel_allowed(self) -> bool:
         if self.mode == "upstox":
@@ -94,6 +123,7 @@ class MarketDataRouter:
                 response = None
             if self._valid_payload(response):
                 self.stats["angel_successes"] += 1
+                self._capture_upstox_validation_snapshot(symbol)
                 return response["data"], "angel_one"
             if response is not None:
                 self.stats["provider_failures"] += 1

@@ -291,7 +291,13 @@ def _scan_one(symbol, exchange, token):
     if candles is None:
         _SCAN_STATS["api_attempts"] += 1
         try:
-            candles, source = _get_router().get_candles(symbol, _historical_params(exchange, token), CANDLE_INTERVAL_MINUTES)
+            router = _get_router()
+            candles, source = router.get_candles(
+                symbol,
+                _historical_params(exchange, token),
+                CANDLE_INTERVAL_MINUTES,
+            )
+            upstox_snapshot = router.get_validation_snapshot(symbol)
         except Exception as exc:
             _SCAN_STATS["api_blocked_or_failed"] += 1
             print(f"[MARKET DATA] Provider routing failed for {symbol}: {exc}")
@@ -345,6 +351,7 @@ def _scan_one(symbol, exchange, token):
             "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
             "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
             "data_source": source,
+            "upstox_snapshot": upstox_snapshot,
         }
         ok, reasons = validate_candidate(candidate)
         candidate["market_integrity_ok"] = ok
