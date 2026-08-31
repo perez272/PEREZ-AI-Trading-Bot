@@ -38,62 +38,165 @@ def _value(row: dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
-def detect_explosive_move(symbol: str, option_type: str, current: dict[str, Any], history: list[dict[str, Any]]) -> ExplosiveMoveSignal | None:
-    """Detect early acceleration from recent option observations.
+def detect_explosive_move(
+    symbol: str,
+    option_type: str,
+    current: dict[str, Any],
+    history: list[dict[str, Any]],
+) -> ExplosiveMoveSignal | None:
+    """Detect early acceleration using real timestamp-based windows."""
+    from datetime import datetime, timezone
 
-    history is oldest -> newest and should contain observations no older than 5 minutes.
-    Thresholds are deliberately precursor thresholds, not trade triggers.
-    """
     md = current.get("market_data") or current
     ltp = _value(md, "ltp")
-    instrument_key = str(current.get("instrument_key") or md.get("instrument_key") or "")
-    if ltp <= 0 or not instrument_key or len(history) < 2:
+    instrument_key = str(
+        current.get("instrument_key")
+        or md.get("instrument_key")
+        or ""
+    )
+
+    if ltp <= 0 or not instrument_key:
         return None
 
-    prices = [_value((x.get("market_data") or x), "ltp") for x in history]
-    prices = [p for p in prices if p > 0]
-    if len(prices) < 2:
+    def _ts(row):
+        raw = row.get("observed_ts")
+        if not raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(raw))
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    current_ts = _ts(current)
+    if current_ts is None:
         return None
 
-    p1 = prices[-1]
-    p3 = prices[-3] if len(prices) >= 3 else prices[0]
-    p5 = prices[0]
+    points = []
+    for row in history:
+        ts = _ts(row)
+        price = _value((row.get("market_data") or row), "ltp")
+        if ts and price > 0 and ts < current_ts:
+            points.append((ts, price))
+
+    if not points:
+        return None
+
+    points.sort(key=lambda x: x[0])
+
+    def _price_at_or_before(minutes):
+        target = minutes * 60.0
+        candidates = []
+
+        for ts, price in points:
+            age = (current_ts - ts).total_seconds()
+            if age >= target:
+                candidates.append((abs(age - target), ts, price))
+
+        if not candidates:
+            return None
+
+        _, ts, price = min(candidates, key=lambda x: x[0])
+        elapsed = (current_ts - ts).total_seconds() / 60.0
+        return ts, price, elapsed
+
+    w1 = _price_at_or_before(1)
+    w3 = _price_at_or_before(3)
+    w5 = _price_at_or_before(5)
+
+    # Never fabricate a 3m/5m measurement from a shorter history.
+    if not w1 or not w3 or not w5:
+        return None
+
+    ts1, p1, elapsed1 = w1
+    _, p3, _ = w3
+    _, p5, _ = w5
+
     move_1m = _pct(ltp, p1)
     move_3m = _pct(ltp, p3)
     move_5m = _pct(ltp, p5)
-    velocity = move_1m
-    previous_velocity = _pct(p1, prices[-2]) if len(prices) >= 2 and prices[-2] > 0 else 0.0
+
+    velocity = move_1m / elapsed1 if elapsed1 > 0 else 0.0
+
+    previous_velocity = 0.0
+    prior = [(ts, price) for ts, price in points if ts < ts1]
+
+    if prior:
+        prev_ts, prev_price = prior[-1]
+        elapsed_prev = (ts1 - prev_ts).total_seconds() / 60.0
+
+        if elapsed_prev > 0 and prev_price > 0:
+            previous_move = _pct(p1, prev_price)
+            previous_velocity = previous_move / elapsed_prev
+
     acceleration = velocity - previous_velocity
 
-    volumes = [_value((x.get("market_data") or x), "volume") for x in history]
+    volumes = [
+        _value((x.get("market_data") or x), "volume")
+        for x in history
+    ]
     current_volume = _value(md, "volume")
-    avg_volume = sum(v for v in volumes[:-1] if v > 0) / max(1, sum(1 for v in volumes[:-1] if v > 0))
-    volume_ratio = current_volume / avg_volume if avg_volume > 0 and current_volume > 0 else 0.0
+    valid_volumes = [v for v in volumes if v > 0]
+
+    avg_volume = (
+        sum(valid_volumes) / len(valid_volumes)
+        if valid_volumes else 0.0
+    )
+
+    volume_ratio = (
+        current_volume / avg_volume
+        if avg_volume > 0 and current_volume > 0
+        else 0.0
+    )
 
     bid = _value(md, "bid_price", _value(md, "bid"))
     ask = _value(md, "ask_price", _value(md, "ask"))
-    spread_pct = ((ask - bid) / ltp * 100.0) if ltp > 0 and ask >= bid > 0 else 999.0
 
-    reasons: list[str] = []
+    spread_pct = (
+        (ask - bid) / ltp * 100.0
+        if ltp > 0 and ask >= bid > 0
+        else 999.0
+    )
+
+    reasons = []
     score = 0.0
-    if move_1m >= 1.5:
-        score += 20; reasons.append("1m_price_acceleration")
-    if move_3m >= 2.5:
-        score += 20; reasons.append("3m_momentum")
-    if move_5m >= 4.0:
-        score += 15; reasons.append("5m_expansion")
-    if acceleration >= 0.75:
-        score += 20; reasons.append("accelerating_velocity")
-    if volume_ratio >= 1.5:
-        score += 15; reasons.append("volume_expansion")
-    elif volume_ratio >= 1.2:
-        score += 8; reasons.append("volume_support")
-    if spread_pct <= 2.0:
-        score += 10; reasons.append("liquid_spread")
-    elif spread_pct > 5.0:
-        score -= 20; reasons.append("wide_spread_penalty")
 
-    early = score >= 55 and acceleration >= 0.5 and move_5m < 20.0
+    if move_1m >= 1.5:
+        score += 20
+        reasons.append("1m_price_acceleration")
+
+    if move_3m >= 2.5:
+        score += 20
+        reasons.append("3m_momentum")
+
+    if move_5m >= 4.0:
+        score += 15
+        reasons.append("5m_expansion")
+
+    if acceleration >= 0.75:
+        score += 20
+        reasons.append("accelerating_velocity")
+
+    if volume_ratio >= 1.5:
+        score += 15
+        reasons.append("volume_expansion")
+    elif volume_ratio >= 1.2:
+        score += 8
+        reasons.append("volume_support")
+
+    if spread_pct <= 2.0:
+        score += 10
+        reasons.append("liquid_spread")
+    elif spread_pct > 5.0:
+        score -= 20
+        reasons.append("wide_spread_penalty")
+
+    early = (
+        score >= 55
+        and acceleration >= 0.5
+        and move_5m < 20.0
+    )
+
     return ExplosiveMoveSignal(
         symbol=symbol,
         option_type=option_type,
