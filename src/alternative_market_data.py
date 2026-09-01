@@ -84,7 +84,16 @@ class UpstoxMarketData:
             print(f"[UPSTOX] request failed: {exc}")
             return None
         if response.status_code != 200:
-            print(f"[UPSTOX] HTTP {response.status_code}; provider unavailable for this request.")
+            body = ""
+            try:
+                body = response.text.strip()
+            except Exception:
+                body = ""
+            print(
+                f"[UPSTOX] HTTP {response.status_code}; "
+                f"url={response.url}; "
+                f"response={body[:1000]}"
+            )
             return None
         try:
             payload = response.json()
@@ -168,14 +177,32 @@ class UpstoxMarketData:
         """Backward-compatible alias for :meth:`get_candles`."""
         return self.get_candles(symbol, interval_minutes=interval_minutes)
 
-    def get_option_chain(self, symbol: str, expiry: str = "current_week") -> list[dict[str, Any]] | None:
+    def get_option_chain(self, symbol: str, expiry: str | None = None) -> list[dict[str, Any]] | None:
         if not self.available():
             return None
+
         underlying_key = self.instrument_keys.get(symbol.upper())
         if not underlying_key:
             print(f"[UPSTOX] No underlying instrument mapping for {symbol}.")
             return None
-        payload = self._get(f"{UPSTOX_V2_BASE_URL}/option/chain", {"instrument_key": underlying_key, "expiry_date": expiry})
+
+        # Upstox option-chain requires an actual expiry date (YYYY-MM-DD).
+        # Never send the legacy "current_week" placeholder.
+        if not expiry or expiry == "current_week":
+            print(
+                f"[UPSTOX] Option chain skipped for {symbol}: "
+                "no explicit YYYY-MM-DD expiry supplied."
+            )
+            return None
+
+        payload = self._get(
+            f"{UPSTOX_V2_BASE_URL}/option/chain",
+            {
+                "instrument_key": underlying_key,
+                "expiry_date": str(expiry),
+            },
+        )
+
         data = payload.get("data") if payload else None
         return data if isinstance(data, list) else None
 

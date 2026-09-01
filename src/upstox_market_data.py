@@ -45,27 +45,33 @@ def access_token() -> str:
     return os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
 
 
-def instrument_keys() -> dict[str, str]:
-    """Return only explicitly configured Upstox instrument mappings.
+DEFAULT_INSTRUMENT_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+    "NIFTYNXT50": "NSE_INDEX|Nifty Next 50",
+    "NIFTYFPI": "NSE_INDEX|Nifty India FPI 150",
+}
 
-    No built-in fallback mappings are used. Missing mappings therefore
-    fail closed instead of silently selecting an assumed instrument.
-    """
+
+def instrument_keys() -> dict[str, str]:
     raw = os.getenv("UPSTOX_INSTRUMENT_KEYS_JSON", "").strip()
     if not raw:
-        return {}
+        return dict(DEFAULT_INSTRUMENT_KEYS)
+
     try:
         value = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    return {
-        str(k).upper().strip(): str(v).strip()
-        for k, v in value.items()
-        if str(v).strip()
-    }
-
+        if not isinstance(value, dict):
+            raise ValueError("JSON must be an object")
+        return {
+            str(k).upper().strip(): str(v).strip()
+            for k, v in value.items()
+            if str(v).strip()
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        print("[UPSTOX] Invalid instrument JSON; using canonical mappings")
+        return dict(DEFAULT_INSTRUMENT_KEYS)
 
 def _headers() -> dict[str, str]:
     token = access_token()

@@ -283,6 +283,7 @@ def _derive_momentum_fields(df):
 
 def _scan_one(symbol, exchange, token):
     candles = None
+    upstox_snapshot = None
     source = "cache"
     entry = _CANDLE_CACHE.get(symbol)
     if entry and entry.get("bucket") == _closed_candle_bucket(datetime.now(IST)):
@@ -316,11 +317,17 @@ def _scan_one(symbol, exchange, token):
         if bucket is None:
             _SCAN_STATS["stale_or_invalid"] += 1
             return None, False
-        _CANDLE_CACHE[symbol] = {"candles": candles, "bucket": bucket, "source": source}
+        _CANDLE_CACHE[symbol] = {
+            "candles": candles,
+            "bucket": bucket,
+            "source": source,
+            "upstox_snapshot": upstox_snapshot,
+        }
         _persist_candle_cache()
         _SCAN_STATS["live_refreshes"] += 1
     else:
         source = entry.get("source", "cache") if entry else "cache"
+        upstox_snapshot = entry.get("upstox_snapshot") if entry else None
     freshness_age = _validate_candle_freshness(candles, symbol)
     if freshness_age is None or len(candles) < 30:
         _SCAN_STATS["stale_or_invalid"] += 1
