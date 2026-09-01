@@ -1,16 +1,14 @@
 """Index momentum/scalp strategy for fast CE/PE opportunities."""
 
 from __future__ import annotations
+from src.upgrade_config import ENTRY_START, LAST_ENTRY
 
-from datetime import time
 from typing import Any, Iterable
 
 # All index option underlyings currently covered by the scanner. Stock-option
 # strategies remain separate so the fast index strategy cannot accidentally
 # turn every equity signal into an option scalp.
 INDEX_SYMBOLS = {"SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
-ENTRY_START = time(9, 30)
-LAST_ENTRY = time(14, 45)
 MIN_SCORE = 72
 
 
