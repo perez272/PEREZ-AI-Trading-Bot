@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -14,6 +14,8 @@ import requests
 
 UPSTOX_BASE_URL = "https://api.upstox.com/v3"
 UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
+IST = timezone(timedelta(hours=5, minutes=30))
+
 UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
 UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
 UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(15, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
@@ -23,7 +25,7 @@ DEFAULT_INSTRUMENT_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
     "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY": "NSE_INDEX|Nifty Midcap Select",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
     "NIFTYNXT50": "NSE_INDEX|Nifty Next 50",
     "NIFTYFPI": "NSE_INDEX|Nifty India FPI 150",
 }
@@ -187,19 +189,49 @@ class UpstoxMarketData:
             return None
 
         # Upstox option-chain requires an actual expiry date (YYYY-MM-DD).
-        # Never send the legacy "current_week" placeholder.
-        if not expiry or expiry == "current_week":
-            print(
-                f"[UPSTOX] Option chain skipped for {symbol}: "
-                "no explicit YYYY-MM-DD expiry supplied."
+        # Resolve the legacy/default "current_week" request from the
+        # currently available option contracts instead of skipping the chain.
+        resolved_expiry = None if not expiry or expiry == "current_week" else str(expiry)
+
+        if resolved_expiry is None:
+            contracts_payload = self._get(
+                f"{UPSTOX_V2_BASE_URL}/option/contract",
+                {"instrument_key": underlying_key},
             )
-            return None
+            contracts = contracts_payload.get("data") if contracts_payload else None
+
+            if isinstance(contracts, list):
+                expiries = sorted(
+                    {
+                        str(row.get("expiry"))
+                        for row in contracts
+                        if isinstance(row, dict)
+                        and row.get("expiry")
+                        and len(str(row.get("expiry"))) == 10
+                        and str(row.get("expiry"))[4] == "-"
+                        and str(row.get("expiry"))[7] == "-"
+                    }
+                )
+                if expiries:
+                    resolved_expiry = expiries[0]
+
+            if not resolved_expiry:
+                print(
+                    f"[UPSTOX] Option chain skipped for {symbol}: "
+                    "could not resolve an available YYYY-MM-DD expiry."
+                )
+                return None
+
+            print(
+                f"[UPSTOX] Resolved {symbol} option-chain expiry "
+                f"{resolved_expiry} from option contracts."
+            )
 
         payload = self._get(
             f"{UPSTOX_V2_BASE_URL}/option/chain",
             {
                 "instrument_key": underlying_key,
-                "expiry_date": str(expiry),
+                "expiry_date": resolved_expiry,
             },
         )
 
@@ -215,6 +247,66 @@ class UpstoxMarketData:
             return None
         quote = next(iter(data.values()))
         return quote if isinstance(quote, dict) else None
+
+    def get_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return a compact validated Upstox market snapshot for integrity checks."""
+        symbol = str(symbol).upper().strip()
+
+        if not self.available():
+            raise RuntimeError("Upstox market data is unavailable")
+
+        instrument_key = self.instrument_keys.get(symbol)
+        if not instrument_key:
+            raise RuntimeError(
+                f"No Upstox instrument key configured for {symbol}"
+            )
+
+        candles = self.get_candles(symbol, interval_minutes=5)
+        if not candles:
+            raise RuntimeError(f"No Upstox 5m candles returned for {symbol}")
+
+        candle = candles[-1]
+        if not isinstance(candle, (list, tuple)) or len(candle) < 5:
+            raise RuntimeError(f"Invalid Upstox candle returned for {symbol}")
+
+        timestamp_raw = candle[0]
+        close = float(candle[4])
+
+        timestamp = datetime.fromisoformat(
+            str(timestamp_raw).replace("Z", "+00:00")
+        )
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=IST)
+        else:
+            timestamp = timestamp.astimezone(IST)
+
+        quote = self.get_full_quote(instrument_key) or {}
+
+        ltp = None
+        for key in ("last_price", "last_traded_price", "ltp"):
+            value = quote.get(key)
+            if value is not None:
+                try:
+                    ltp = float(value)
+                    break
+                except (TypeError, ValueError):
+                    pass
+
+        if ltp is None:
+            raise RuntimeError(f"No Upstox LTP returned for {symbol}")
+
+        age = (datetime.now(IST) - timestamp).total_seconds()
+
+        return {
+            "provider": "upstox",
+            "symbol": symbol,
+            "instrument_key": instrument_key,
+            "ltp": ltp,
+            "closed_5m_close": close,
+            "closed_5m_timestamp": timestamp.isoformat(),
+            "candle_age_seconds": round(age, 1),
+        }
 
     def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
         chain = self.get_option_chain(symbol)
@@ -247,11 +339,36 @@ class UpstoxMarketData:
         _, _, _, spread_pct, row, option, ltp, greeks = candidates[0]
         instrument_key = str(option.get("instrument_key", ""))
         exchange = "NFO" if instrument_key.startswith("NSE_FO|") else "BFO" if instrument_key.startswith("BSE_FO|") else ""
+
+        lot_size = option.get("lot_size") or row.get("lot_size") or 0
+        contract_symbol = option.get("trading_symbol") or row.get("trading_symbol", "")
+        contract_expiry = str(row.get("expiry", ""))
+
+        # Upstox option-chain legs do not reliably expose lot_size/trading_symbol.
+        # Enrich the selected contract from the authoritative option-contract API.
+        if not lot_size and instrument_key:
+            contracts_payload = self._get(
+                f"{UPSTOX_V2_BASE_URL}/option/contract",
+                {"instrument_key": self.instrument_keys[symbol.upper()]},
+            )
+            contracts = contracts_payload.get("data") if contracts_payload else None
+            if isinstance(contracts, list):
+                for contract_row in contracts:
+                    if not isinstance(contract_row, dict):
+                        continue
+                    if str(contract_row.get("instrument_key", "")) != instrument_key:
+                        continue
+                    if contract_expiry and str(contract_row.get("expiry", "")) != contract_expiry:
+                        continue
+                    lot_size = contract_row.get("lot_size") or 0
+                    contract_symbol = contract_row.get("trading_symbol") or contract_symbol
+                    break
+
         return {
             "status": "CONTRACT VALID", "option_type": option_type,
-            "contract": option.get("trading_symbol") or row.get("trading_symbol", ""),
-            "exchange": exchange, "token": instrument_key, "expiry": row.get("expiry", ""),
-            "strike": float(row.get("strike_price")), "lotsize": int(option.get("lot_size") or row.get("lot_size") or 0),
+            "contract": contract_symbol,
+            "exchange": exchange, "token": instrument_key, "expiry": contract_expiry,
+            "strike": float(row.get("strike_price")), "lotsize": int(lot_size),
             "ltp": ltp, "spread_pct": round(spread_pct, 3),
             "volume": float((option.get("market_data") or {}).get("volume", 0) or 0),
             "oi": float((option.get("market_data") or {}).get("oi", 0) or 0),

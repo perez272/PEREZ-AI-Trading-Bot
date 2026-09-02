@@ -30,10 +30,13 @@ def calculate_score(df):
         score -= 10
 
     try:
-        if last["close"] > last["VWAP"]:
-            score += 10
-        else:
-            score -= 10
+        vwap = last["VWAP"]
+        if vwap == vwap:  # finite/available enough to compare; NaN == NaN is False
+            if last["close"] > vwap:
+                score += 10
+            else:
+                score -= 10
+        # Unavailable VWAP is neutral: do not treat missing volume as bearish.
     except Exception:
         pass
 

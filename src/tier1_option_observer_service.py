@@ -21,7 +21,7 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     print("PEREZ AI Tier-1 Option Observer — PAPER/OBSERVATION ONLY")
-    print("Universe: NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | NIFTYNXT50 | NIFTYFPI")
+    print("Universe: NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | NIFTYNXT50")
     print("Explosive detector: 1m/3m/5m velocity + acceleration + volume + spread")
     while RUNNING:
         try:
