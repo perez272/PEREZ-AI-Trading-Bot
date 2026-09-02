@@ -10,6 +10,9 @@ from src.capital_manager import get_available_capital
 from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
+from src.trading_risk_manager import TradingRiskManager
+
+TRADING_RISK_MANAGER = TradingRiskManager()
 from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover, CANDIDATE_FILE
 from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
@@ -269,6 +272,24 @@ def main():
                     print("Trade was not created:", trade)
                     record_cycle(rejections=1)
                     continue
+
+                import uuid
+                trade_id = str(uuid.uuid4())
+                lineage_id = trade.get("lineage_id") or trade_id
+                trade["trade_id"] = trade_id
+                trade["lineage_id"] = lineage_id
+
+                allowed, reason = TRADING_RISK_MANAGER.can_open_trade(
+                    trade_id, lineage_id=lineage_id
+                )
+                if not allowed:
+                    print(f"RISK MANAGER BLOCKED: {reason}")
+                    record_cycle(rejections=1)
+                    continue
+
+                TRADING_RISK_MANAGER.register_entry(
+                    trade_id, float(trade["entry"]), lineage_id=lineage_id
+                )
 
                 if momentum_strategy:
                     exits = build_dynamic_exits(live_ltp, candidate.get("atr", 0), live_ltp)

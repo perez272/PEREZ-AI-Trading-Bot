@@ -4,8 +4,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_CONSECUTIVE_LOSSES, MAX_DAILY_DRAWDOWN_PCT
+from src.trading_risk_manager import TradingRiskManager
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Persistent timed circuit breaker / trailing-risk state.
+TRADING_RISK_MANAGER = TradingRiskManager()
 
 
 def now_ist():
@@ -73,6 +77,8 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, f"Daily loss limit reached (2% of capital = Rs {daily_loss_limit:.2f})", summary
     if capital > 0 and summary["pnl"] <= -dynamic_limit:
         return False, f"Daily drawdown limit reached ({MAX_DAILY_DRAWDOWN_PCT:.1f}%)", summary
-    if summary["consecutive_losses"] >= MAX_CONSECUTIVE_LOSSES:
-        return False, f"Consecutive-loss circuit breaker reached ({MAX_CONSECUTIVE_LOSSES})", summary
+    if TRADING_RISK_MANAGER.is_circuit_breaker_active():
+        remaining = TRADING_RISK_MANAGER.circuit_breaker_remaining()
+        minutes = max(1, int((remaining + 59) // 60))
+        return False, f"Timed circuit breaker active ({minutes} min remaining)", summary
     return True, "Risk checks passed", summary

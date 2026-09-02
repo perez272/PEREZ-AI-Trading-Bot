@@ -11,6 +11,7 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
     from src.risk_manager import should_force_exit
     from src.telegram_alert import send_exit_alert, send_alert
     from src.trade_logger import log_closed_trade
+    from src.trading_risk_manager import TradingRiskManager
     from src.trade_monitor import monitor_trade
 
     print("=" * 60)
@@ -52,6 +53,45 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
 
             if result["closed"]:
                 record = log_closed_trade(trade, result, log_path)
+
+                trade_id = trade.get("trade_id")
+                if trade_id:
+                    risk_manager = TradingRiskManager()
+
+                    try:
+                        pnl = float(result.get("pnl", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        pnl = 0.0
+
+                    exit_reason = str(
+                        result.get("exit_reason", "")
+                    ).upper()
+
+                    stop_loss_trigger = (
+                        pnl <= 0.0
+                        and (
+                            exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
+                            or "STOP" in exit_reason
+                        )
+                    )
+
+                    if stop_loss_trigger:
+                        _, sl_reason = risk_manager.record_stop_loss(trade_id)
+                        print(f"RISK MANAGER: SL update | {sl_reason}")
+
+                    risk_manager.record_trade_result(
+                        trade_id,
+                        pnl,
+                        stop_loss=stop_loss_trigger,
+                    )
+
+                    rs = risk_manager.status()
+                    print(
+                        f"RISK MANAGER: loss_streak="
+                        f"{rs['consecutive_losses']} | "
+                        f"breaker={rs['circuit_breaker_active']}"
+                    )
+
                 if notify:
                     send_exit_alert(trade, result)
                 print(f"TRADE CLOSED: {result['exit_reason']}")

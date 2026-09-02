@@ -24,6 +24,9 @@ def monitor_trade(trade, current_price):
     target1 = float(trade["target1"])
     target2 = float(trade["target2"])
     target1_hit = False
+    trail_pct = float(trade.get("trailing_stop_pct", 15.0))
+    high_watermark = max(float(trade.get("high_watermark", entry)), current_price)
+    trade["high_watermark"] = round(high_watermark, 2)
 
     if not trade["partial_booked"] and current_price >= target1:
         booked_qty = remaining // 2
@@ -41,11 +44,16 @@ def monitor_trade(trade, current_price):
             print(f">>> Realized P/L: {trade['realized_pnl']}")
 
     risk = entry - initial_stop
-    if risk > 0 and not target1_hit:
+    if risk > 0 and not trade.get("partial_booked", False):
         if current_price >= entry + risk:
             stop_loss = max(stop_loss, entry)
         if current_price >= entry + 2 * risk:
             stop_loss = max(stop_loss, current_price - risk)
+
+    if trade.get("partial_booked", False) and trail_pct > 0:
+        trailing_stop = high_watermark * (1.0 - trail_pct / 100.0)
+        stop_loss = max(stop_loss, trailing_stop)
+
     trade["stop_loss"] = round(stop_loss, 2)
 
     unrealized = round((current_price - entry) * remaining, 2)
@@ -56,9 +64,7 @@ def monitor_trade(trade, current_price):
 
     status = "RUNNING"
     exit_reason = ""
-    if current_price >= target2:
-        status, exit_reason = "TARGET 2 HIT", "TARGET2"
-    elif current_price <= stop_loss:
+    if current_price <= stop_loss:
         status, exit_reason = "STOP LOSS HIT", "TRAILING_STOP"
 
     return {
@@ -66,6 +72,7 @@ def monitor_trade(trade, current_price):
         "contract": trade["contract"], "entry": entry, "current": current_price,
         "quantity": remaining, "original_quantity": original_quantity,
         "remaining_quantity": remaining, "stop_loss": stop_loss, "target": target2,
+        "high_watermark": high_watermark, "trailing_stop_pct": trail_pct,
         "realized_pnl": realized, "unrealized_pnl": unrealized, "pnl": pnl,
         "pnl_percent": pnl_percent, "status": status, "exit_reason": exit_reason,
         "target1_hit": bool(trade.get("partial_booked")), "closed": status != "RUNNING",

@@ -39,7 +39,7 @@ def test_target_and_stop_loss(tmp_path):
         log_path=str(log_file),
     )
     assert target_result["closed"] is True
-    assert target_result["exit_reason"] == "TARGET2"
+    assert target_result["exit_reason"] == "MARKET_CLOSE"
 
     stop_result = run_monitor(
         _base_trade(),
