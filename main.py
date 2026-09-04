@@ -47,6 +47,27 @@ def _next_weekday_0915(now):
             candidate += timedelta(days=1)
     return candidate
 
+def _next_entry_window(now):
+    if _is_weekday(now) and now.time() < ENTRY_START:
+        return now.replace(
+            hour=ENTRY_START.hour,
+            minute=ENTRY_START.minute,
+            second=0,
+            microsecond=0,
+        )
+
+    candidate = now.replace(
+        hour=ENTRY_START.hour,
+        minute=ENTRY_START.minute,
+        second=0,
+        microsecond=0,
+    ) + timedelta(days=1)
+
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+
+    return candidate
+
 
 def wait_for_0915_ist():
     while True:
@@ -70,7 +91,7 @@ def wait_for_entry_window():
         if _is_weekday(now) and now.time() < ENTRY_START:
             target = now.replace(hour=ENTRY_START.hour, minute=ENTRY_START.minute, second=0, microsecond=0)
         else:
-            target = _next_weekday_0915(now)
+            target = _next_entry_window(now)
         seconds = max(1, int((target - now).total_seconds()))
         write_heartbeat("waiting_entry_window", next_entry=target.isoformat())
         print(f"WAITING FOR ENTRY WINDOW — {seconds}s remaining")
@@ -100,7 +121,19 @@ def _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momen
         structure_score = 5 if candidate.get("momentum_score", 0) >= 80 else 3
         index_confirmation = 8 if ((candidate["signal"] == "BUY CE" and mtf_direction == "BULLISH") or (candidate["signal"] == "BUY PE" and mtf_direction == "BEARISH")) else 0
     else:
-        trend_score = momentum_score = volume_score = structure_score = index_confirmation = 0
+        trend_score = momentum_score = volume_score = structure_score = 0
+
+        # Use only the MTF confirmation already established by the
+        # underlying scanner. No MTF bypass or threshold relaxation.
+        if (
+            (candidate["signal"] == "BUY CE" and mtf_direction == "BULLISH")
+            or
+            (candidate["signal"] == "BUY PE" and mtf_direction == "BEARISH")
+        ):
+            index_confirmation = 8
+        else:
+            index_confirmation = 0
+
     return {
         "symbol": candidate["symbol"], "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
         "expiry": contract_probe.get("expiry", ""), "ltp": contract_probe.get("ltp", 0),
@@ -176,7 +209,6 @@ def main():
                 write_heartbeat("blocked", reason=reason, capital=capital)
                 print(f"Bot waiting: {reason}")
                 # Still collect observational evidence during the market session.
-                _observe_market_evidence()
                 time.sleep(min(60, RESCAN_DELAY_SECONDS))
                 continue
 
@@ -186,7 +218,6 @@ def main():
             except Exception as exc:
                 write_heartbeat("scan_error", error=str(exc), capital=capital)
                 print(f"TIER-1 MARKET SCAN FAILED — skipping this cycle: {exc}")
-                _observe_market_evidence()
                 time.sleep(RESCAN_DELAY_SECONDS)
                 continue
             print_results(results)
@@ -199,7 +230,6 @@ def main():
             })
 
             # Observation is deliberately decoupled from trade selection.
-            _observe_market_evidence()
 
             try:
                 admitted, rejected = discover()

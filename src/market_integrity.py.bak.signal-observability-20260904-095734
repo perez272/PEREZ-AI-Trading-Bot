@@ -22,16 +22,8 @@ def validate_candidate(candidate: Dict[str, Any], now: datetime | None = None) -
         reasons.append("INVALID_CANDLE_AGE")
     if not candidate.get("candle_bucket"):
         reasons.append("MISSING_CANDLE_BUCKET")
-    # A raw BUY CE/PE can be intentionally converted to NO TRADE by the
-    # MTF hard gate.  Do not misclassify that controlled rejection as an
-    # invalid strategy signal.
-    signal = candidate.get("signal")
-    raw_signal = candidate.get("raw_signal", signal)
-
-    if signal not in ("BUY CE", "BUY PE"):
-        if raw_signal not in ("BUY CE", "BUY PE"):
-            reasons.append("INVALID_SIGNAL")
-
+    if candidate.get("signal") not in ("BUY CE", "BUY PE"):
+        reasons.append("INVALID_SIGNAL")
     if candidate.get("mtf_aligned") is not True:
         reasons.append("MTF_NOT_ALIGNED")
     direction = str(candidate.get("m15_trend", "")).upper()

@@ -166,8 +166,7 @@ class Tier1OptionObserver:
                         event_key = f"{key}|{threshold}|{observed_ts[:16]}"
                         features = self._features(symbol, option_type, row, market, move_pct, baseline)
                         try:
-                            detection_ts = datetime.now(timezone.utc).isoformat()
-                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,detection_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, detection_ts, json.dumps(features, separators=(",", ":"))))
+                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, json.dumps(features, separators=(",", ":"))))
                             db.execute(
                                 "UPDATE observer_meta SET value=value+1 "
                                 "WHERE key='surge_events_total'"

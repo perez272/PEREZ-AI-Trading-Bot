@@ -479,22 +479,14 @@ def _scan_one(symbol, exchange, token):
         score = max(0, min(100, int(directional_score) + int(mtf["quality"])))
         fields = _derive_momentum_fields(df)
 
-        # Preserve the strategy decision separately from the final admitted
-        # signal.  MTF remains a hard safety gate; this only makes the
-        # rejection reason observable instead of turning a valid BUY CE/PE
-        # into an ambiguous INVALID_SIGNAL.
-        raw_signal = signal
-        signal_block_reason = None
-        if raw_signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
-            signal_block_reason = "MTF_NOT_ALIGNED"
-            signal = "NO TRADE"
-
         # Index spot candles are price data; their native volume can be
         # zero. Use the nearest traded index future for participation.
         if symbol.upper() in {
             "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"
         }:
             fields.update(_get_index_futures_participation(symbol))
+        if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
+            signal = "NO TRADE"
         candidate = {
             "symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]),
             "rsi": float(last["RSI"]), "signal": signal, "trend": trend,
@@ -502,8 +494,6 @@ def _scan_one(symbol, exchange, token):
             "candle_age_seconds": round(freshness_age, 1),
             "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
             "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
-            "raw_signal": raw_signal,
-            "signal_block_reason": signal_block_reason,
             "data_source": source,
             "upstox_snapshot": upstox_snapshot,
         }

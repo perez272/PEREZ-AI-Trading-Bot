@@ -284,9 +284,9 @@ def _derive_momentum_fields(df):
 def _get_index_futures_participation(symbol):
     """Get real traded participation from the nearest index future.
 
-    Spot index volume can legitimately be zero because the index itself
-    is not a traded instrument. Use the corresponding index future for
-    participation and cache the result for the current 5-minute bucket.
+    Spot index volume from Upstox can legitimately be zero because the
+    index itself is not a traded instrument. Never convert that zero into
+    fake participation. Index momentum uses the corresponding future.
     """
     index_symbols = {
         "NIFTY",
@@ -297,7 +297,6 @@ def _get_index_futures_participation(symbol):
     }
 
     symbol = str(symbol or "").upper()
-
     if symbol not in index_symbols:
         return {
             "volume_ratio": 0.0,
@@ -307,13 +306,6 @@ def _get_index_futures_participation(symbol):
             "participation_source": "native",
         }
 
-    bucket = _closed_candle_bucket(datetime.now(IST))
-    cache = getattr(_get_index_futures_participation, "_cache", {})
-    cached = cache.get(symbol)
-
-    if cached and cached.get("bucket") == bucket:
-        return dict(cached["fields"])
-
     try:
         router = _get_router()
         candles, metadata, source = router.get_index_futures_candles(
@@ -321,72 +313,74 @@ def _get_index_futures_participation(symbol):
             CANDLE_INTERVAL_MINUTES,
         )
 
-        metadata = metadata or {}
-
         if not candles or len(candles) < 21:
-            fields = {
+            return {
                 "volume_ratio": 0.0,
                 "volume_available": False,
                 "volume_source": "index_future_unavailable",
                 "participation_ratio": 0.0,
                 "participation_source": "index_future_unavailable",
-                "futures_instrument_key": metadata.get("instrument_key"),
-                "futures_expiry": metadata.get("expiry"),
-                "futures_trading_symbol": metadata.get("trading_symbol"),
+                "futures_instrument_key": (
+                    metadata.get("instrument_key") if metadata else None
+                ),
+                "futures_expiry": (
+                    metadata.get("expiry") if metadata else None
+                ),
+                "futures_trading_symbol": (
+                    metadata.get("trading_symbol") if metadata else None
+                ),
             }
+
+        volumes = []
+        for row in candles:
+            try:
+                volumes.append(float(row[5]))
+            except (TypeError, ValueError, IndexError):
+                volumes.append(0.0)
+
+        if len(volumes) < 21:
+            return {
+                "volume_ratio": 0.0,
+                "volume_available": False,
+                "volume_source": "index_future_invalid",
+                "participation_ratio": 0.0,
+                "participation_source": "index_future_invalid",
+            }
+
+        baseline = sum(volumes[-21:-1]) / 20.0
+        latest = volumes[-1]
+
+        if baseline <= 0.0 or latest < 0.0:
+            ratio = 0.0
+            available = False
         else:
-            volumes = []
+            ratio = latest / baseline
+            available = True
 
-            for row in candles:
-                try:
-                    volumes.append(float(row[5]))
-                except (TypeError, ValueError, IndexError):
-                    volumes.append(0.0)
-
-            if len(volumes) < 21:
-                fields = {
-                    "volume_ratio": 0.0,
-                    "volume_available": False,
-                    "volume_source": "index_future_invalid",
-                    "participation_ratio": 0.0,
-                    "participation_source": "index_future_invalid",
-                }
-            else:
-                baseline = sum(volumes[-21:-1]) / 20.0
-                latest = volumes[-1]
-
-                if baseline <= 0.0 or latest < 0.0:
-                    ratio = 0.0
-                    available = False
-                else:
-                    ratio = latest / baseline
-                    available = True
-
-                fields = {
-                    "volume_ratio": float(ratio),
-                    "volume_available": available,
-                    "volume_source": "upstox_index_future",
-                    "participation_ratio": float(ratio),
-                    "participation_source": "upstox_index_future",
-                    "futures_instrument_key": metadata.get("instrument_key"),
-                    "futures_expiry": metadata.get("expiry"),
-                    "futures_trading_symbol": metadata.get("trading_symbol"),
-                }
-
-        cache[symbol] = {
-            "bucket": bucket,
-            "fields": dict(fields),
+        return {
+            # Compatibility field consumed by index_momentum_strategy.py.
+            "volume_ratio": float(ratio),
+            "volume_available": available,
+            "volume_source": "upstox_index_future",
+            "participation_ratio": float(ratio),
+            "participation_source": "upstox_index_future",
+            "futures_instrument_key": (
+                metadata.get("instrument_key") if metadata else None
+            ),
+            "futures_expiry": (
+                metadata.get("expiry") if metadata else None
+            ),
+            "futures_trading_symbol": (
+                metadata.get("trading_symbol") if metadata else None
+            ),
         }
-        _get_index_futures_participation._cache = cache
-
-        return fields
 
     except Exception as exc:
         print(
-            f"[MARKET DATA] Futures participation failed for {symbol}: {exc}"
+            f"[MARKET DATA] Futures participation failed "
+            f"for {symbol}: {exc}"
         )
-
-        fields = {
+        return {
             "volume_ratio": 0.0,
             "volume_available": False,
             "volume_source": "index_future_error",
@@ -394,13 +388,6 @@ def _get_index_futures_participation(symbol):
             "participation_source": "index_future_error",
         }
 
-        cache[symbol] = {
-            "bucket": bucket,
-            "fields": dict(fields),
-        }
-        _get_index_futures_participation._cache = cache
-
-        return fields
 
 def _scan_one(symbol, exchange, token):
     candles = None
@@ -479,22 +466,14 @@ def _scan_one(symbol, exchange, token):
         score = max(0, min(100, int(directional_score) + int(mtf["quality"])))
         fields = _derive_momentum_fields(df)
 
-        # Preserve the strategy decision separately from the final admitted
-        # signal.  MTF remains a hard safety gate; this only makes the
-        # rejection reason observable instead of turning a valid BUY CE/PE
-        # into an ambiguous INVALID_SIGNAL.
-        raw_signal = signal
-        signal_block_reason = None
-        if raw_signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
-            signal_block_reason = "MTF_NOT_ALIGNED"
-            signal = "NO TRADE"
-
         # Index spot candles are price data; their native volume can be
         # zero. Use the nearest traded index future for participation.
         if symbol.upper() in {
             "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"
         }:
             fields.update(_get_index_futures_participation(symbol))
+        if signal in ("BUY CE", "BUY PE") and not mtf["aligned"]:
+            signal = "NO TRADE"
         candidate = {
             "symbol": symbol, "score": score, "base_score": int(base_score), "close": float(last["close"]),
             "rsi": float(last["RSI"]), "signal": signal, "trend": trend,
@@ -502,8 +481,6 @@ def _scan_one(symbol, exchange, token):
             "candle_age_seconds": round(freshness_age, 1),
             "candle_bucket": _candle_bucket(candles).isoformat(), "market_data_fresh": freshness_age <= MAX_CANDLE_AGE_SECONDS,
             "m15_trend": mtf["m15"], "h1_trend": mtf["h1"], "mtf_aligned": mtf["aligned"],
-            "raw_signal": raw_signal,
-            "signal_block_reason": signal_block_reason,
             "data_source": source,
             "upstox_snapshot": upstox_snapshot,
         }

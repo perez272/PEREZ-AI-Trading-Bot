@@ -63,6 +63,7 @@ class Tier1OptionObserver:
                 events_count INTEGER NOT NULL DEFAULT 0
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol, threshold)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS observer_meta (
                     key TEXT PRIMARY KEY,
@@ -80,7 +81,6 @@ class Tier1OptionObserver:
                     "INSERT INTO observer_meta(key,value) VALUES('surge_events_total',?)",
                     (int(retained),),
                 )
-            db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
 
     @staticmethod
     def _contract_key(symbol: str, row: dict[str, Any], option_type: str) -> str:
@@ -166,13 +166,12 @@ class Tier1OptionObserver:
                         event_key = f"{key}|{threshold}|{observed_ts[:16]}"
                         features = self._features(symbol, option_type, row, market, move_pct, baseline)
                         try:
-                            detection_ts = datetime.now(timezone.utc).isoformat()
-                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,detection_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, detection_ts, json.dumps(features, separators=(",", ":"))))
+                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, json.dumps(features, separators=(",", ":"))))
                             db.execute(
                                 "UPDATE observer_meta SET value=value+1 "
                                 "WHERE key='surge_events_total'"
                             )
-                            events.append({"type": "THRESHOLD", "threshold": threshold, **features})
+events.append({"type": "THRESHOLD", "threshold": threshold, **features})
                         except sqlite3.IntegrityError:
                             pass
                     db.execute("UPDATE baselines SET last_ltp=?, last_ts=? WHERE contract_key=?", (ltp, observed_ts, key))
@@ -227,6 +226,8 @@ class Tier1OptionObserver:
             "observations": int(observations),
             "surge_events": int(surge_events),
             "surge_events_total": int(surge_events_total),
+            "wins": 0,
+            "win_rate": 0.0,
         }
 
     def match(self, symbol: str, features: dict[str, Any], threshold: float | None = None, limit: int = 50) -> dict[str, Any]:

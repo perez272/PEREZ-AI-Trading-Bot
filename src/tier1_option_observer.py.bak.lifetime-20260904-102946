@@ -63,23 +63,6 @@ class Tier1OptionObserver:
                 events_count INTEGER NOT NULL DEFAULT 0
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol, threshold)")
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS observer_meta (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL
-                )
-            """)
-            existing_total = db.execute(
-                "SELECT value FROM observer_meta WHERE key='surge_events_total'"
-            ).fetchone()
-            if existing_total is None:
-                retained = db.execute(
-                    "SELECT COUNT(*) FROM move_events"
-                ).fetchone()[0]
-                db.execute(
-                    "INSERT INTO observer_meta(key,value) VALUES('surge_events_total',?)",
-                    (int(retained),),
-                )
             db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
 
     @staticmethod
@@ -166,12 +149,7 @@ class Tier1OptionObserver:
                         event_key = f"{key}|{threshold}|{observed_ts[:16]}"
                         features = self._features(symbol, option_type, row, market, move_pct, baseline)
                         try:
-                            detection_ts = datetime.now(timezone.utc).isoformat()
-                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,detection_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, detection_ts, json.dumps(features, separators=(",", ":"))))
-                            db.execute(
-                                "UPDATE observer_meta SET value=value+1 "
-                                "WHERE key='surge_events_total'"
-                            )
+                            db.execute("INSERT INTO move_events(event_key,symbol,option_type,contract,expiry,strike,threshold,baseline_ltp,ltp,move_pct,observed_ts,features_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, symbol, option_type, features.get("contract"), row.get("expiry"), row.get("strike_price"), threshold, baseline, ltp, move_pct, observed_ts, json.dumps(features, separators=(",", ":"))))
                             events.append({"type": "THRESHOLD", "threshold": threshold, **features})
                         except sqlite3.IntegrityError:
                             pass
@@ -207,27 +185,9 @@ class Tier1OptionObserver:
 
     def stats(self) -> dict[str, Any]:
         with self._connect() as db:
-            observations = db.execute(
-                "SELECT COUNT(*) FROM observations"
-            ).fetchone()[0]
-            surge_events = db.execute(
-                "SELECT COUNT(*) FROM move_events"
-            ).fetchone()[0]
-            total_row = db.execute(
-                "SELECT value FROM observer_meta "
-                "WHERE key='surge_events_total'"
-            ).fetchone()
-            surge_events_total = (
-                int(total_row[0])
-                if total_row is not None
-                else int(surge_events)
-            )
-
-        return {
-            "observations": int(observations),
-            "surge_events": int(surge_events),
-            "surge_events_total": int(surge_events_total),
-        }
+            observations = db.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+            surge_events = db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0]
+        return {"observations": int(observations), "surge_events": int(surge_events), "wins": 0, "win_rate": 0.0}
 
     def match(self, symbol: str, features: dict[str, Any], threshold: float | None = None, limit: int = 50) -> dict[str, Any]:
         clauses = ["symbol=?"]

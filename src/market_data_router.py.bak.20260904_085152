@@ -145,29 +145,6 @@ class MarketDataRouter:
                 self.stats["provider_failures"] += 1
         return None, "none"
 
-    def get_index_futures_candles(
-        self, symbol: str, interval_minutes: int = 5
-    ) -> tuple[list[list[Any]] | None, dict[str, Any] | None, str]:
-        """Return nearest index-future candles and resolver metadata."""
-        self._validate_mode()
-
-        if self.mode != "angel" and self.upstox.available():
-            try:
-                candles, metadata = self.upstox.get_futures_candles(
-                    symbol,
-                    interval_minutes=interval_minutes,
-                )
-                if candles:
-                    return candles, metadata, "upstox"
-            except Exception as exc:
-                self.stats["provider_failures"] += 1
-                print(
-                    f"[MARKET DATA] Upstox index-future "
-                    f"exception for {symbol}: {exc}"
-                )
-
-        return None, None, "none"
-
     def get_option_quote(self, exchange: str, token: str) -> tuple[dict[str, Any] | None, str]:
         """Fetch an option quote with the same Angel-first auto ordering as candles."""
         self._validate_mode()

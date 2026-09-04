@@ -1,6 +1,5 @@
 """Long-running observational worker for Tier-1 option-chain learning."""
 from __future__ import annotations
-import os
 
 import signal
 import time
@@ -10,7 +9,7 @@ from src.tier1_option_observer import observe_tier1_option_chains
 RUNNING = True
 # Keep the observer responsive enough to see fast moves while retaining the
 # existing Upstox request pacing (one request/sec) inside the provider client.
-INTERVAL_SECONDS = max(1, int(os.getenv("TIER1_OBSERVER_INTERVAL_SECONDS", "5")))
+INTERVAL_SECONDS = 60
 
 
 def _stop(*_args):

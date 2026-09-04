@@ -262,7 +262,7 @@ class UpstoxMarketData:
         encoded = quote(str(instrument_key), safe="")
 
         response = self._get(
-            f"{UPSTOX_BASE_URL}/historical-candle/"
+            f"{BASE_URL}/historical-candle/"
             f"{encoded}/minutes/{int(interval_minutes)}/"
             f"{today.isoformat()}/{from_date.isoformat()}"
         )
