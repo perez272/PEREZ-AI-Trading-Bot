@@ -101,11 +101,19 @@ def build_dynamic_exits(entry: float, atr: float, option_ltp: float) -> dict[str
     entry = float(entry)
     atr = max(float(atr or 0), 0.0)
     option_ltp = max(float(option_ltp or entry), 0.01)
+    # Initial option risk is capped at 2%.
+    # ATR is supplied by the scanner; do NOT recalculate it here.
+    MAX_INITIAL_STOP_PCT = 0.02
+
     if atr <= 0:
-        stop_pct, target1_pct, target2_pct = 0.10, 0.15, 0.30
+        # Safe fallback when ATR is unavailable: never use the old 10% stop.
+        stop_pct = MAX_INITIAL_STOP_PCT
+        target1_pct, target2_pct = 0.15, 0.30
     else:
         range_pct = min(max(atr / max(option_ltp, 1.0), 0.08), 0.35)
-        stop_pct = min(max(range_pct * 0.45, 0.08), 0.14)
+
+        # Preserve ATR-driven targets while strictly bounding initial risk.
+        stop_pct = min(max(range_pct * 0.45, 0.005), MAX_INITIAL_STOP_PCT)
         target1_pct = min(max(range_pct * 0.90, 0.12), 0.25)
         target2_pct = min(max(range_pct * 1.80, 0.22), 0.50)
     return {

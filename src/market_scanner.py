@@ -275,6 +275,9 @@ def _derive_momentum_fields(df):
         "body_strength": round(body / candle_range, 4),
         "ema_gap_pct": round(ema_gap_pct, 4),
         "rsi_slope": round(rsi_slope, 4),
+        "atr": round(atr, 4),
+
+
         "atr_pct": round(atr_pct, 4),
         "percent_change": round(_safe_pct(close - float(previous.get("close", close)), float(previous.get("close", close))), 4),
         "volume_ratio": round(volume_ratio, 4),

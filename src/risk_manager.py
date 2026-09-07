@@ -62,7 +62,7 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     the authoritative daily loss limit is 2% of the live capital.
     """
     if not is_entry_window():
-        return False, "Outside entry window: 09:30-14:45 IST", daily_summary()
+        return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
     if summary["closed_trades"] >= max_trades:

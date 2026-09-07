@@ -49,5 +49,5 @@ def test_target_and_stop_loss(tmp_path):
         log_path=str(log_file),
     )
     assert stop_result["closed"] is True
-    assert stop_result["exit_reason"] == "TRAILING_STOP"
+    assert stop_result["exit_reason"] == "STOP_LOSS"
     assert Path(log_file).exists()

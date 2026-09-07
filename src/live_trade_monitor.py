@@ -54,6 +54,19 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
             if result["closed"]:
                 record = log_closed_trade(trade, result, log_path)
 
+                # Persist closed outcome into canonical learning memory.
+                # Observational only; never changes trading or risk decisions.
+                try:
+                    from src.outcome_recorder import record_closed_outcome
+                    outcome_written = record_closed_outcome(trade, result)
+                    print(
+                        'OUTCOME MEMORY:',
+                        'RECORDED' if outcome_written else 'ALREADY_RECORDED',
+                        f"trade_id={trade.get('trade_id', '')}",
+                    )
+                except Exception as outcome_error:
+                    print('OUTCOME MEMORY ERROR:', outcome_error)
+
                 trade_id = trade.get("trade_id")
                 if trade_id:
                     risk_manager = TradingRiskManager()
