@@ -12,4 +12,5 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PEREZ_BOT_ROOT=/home/ubuntu/PEREZ-AI-Trading-Bot
 Environment=PEREZ_MAIN_SERVICE=perez-ai.service
 Environment=PEREZ_HEALTH_MAX_HEARTBEAT_AGE=180
+Environment=PEREZ_HEALTH_STARTUP_GRACE_SECONDS=360
 Environment=PEREZ_HEALTH_ALLOW_RESTART=true

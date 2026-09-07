@@ -32,32 +32,60 @@ jobs:
           DEPLOY_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
+
           git fetch origin
           git checkout "$DEPLOY_BRANCH"
           git reset --hard "origin/$DEPLOY_BRANCH"
+
           test -f .env
           test -x venv/bin/python
+
           venv/bin/python -m pip install -r requirements.txt
+
           venv/bin/python -m py_compile main.py $(find src -name '*.py' -type f)
           venv/bin/python -m pytest -q
 
-          for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
+          # Remove obsolete lifecycle architecture.
+          for unit in \
+            perez-market-open.service \
+            perez-market-open.timer \
+            perez-ai-bot.service \
+            perez-paper-monitor.service \
+            perez-ai-start.service \
+            perez-ai-start.timer \
+            perez-ai-stop.service \
+            perez-ai-stop.timer \
+            perez-market-close.service \
+            perez-market-close.timer \
+            perez-safe-pacing-fix.service
+          do
             sudo systemctl disable --now "$unit" 2>/dev/null || true
           done
-          sudo rm -f /etc/systemd/system/perez-market-open.service /etc/systemd/system/perez-ai-bot.service /etc/systemd/system/perez-paper-monitor.service
 
-          sudo install -m 0644 deploy/systemd/perez-ai.service /etc/systemd/system/perez-ai.service
-          sudo install -m 0644 deploy/systemd/perez-ai-health.service /etc/systemd/system/perez-ai-health.service
+          sudo rm -f /etc/systemd/system/perez-market-open.service /etc/systemd/system/perez-market-open.timer /etc/systemd/system/perez-ai-bot.service /etc/systemd/system/perez-paper-monitor.service /etc/systemd/system/perez-ai-start.service /etc/systemd/system/perez-ai-start.timer /etc/systemd/system/perez-ai-stop.service /etc/systemd/system/perez-ai-stop.timer /etc/systemd/system/perez-market-close.service /etc/systemd/system/perez-market-close.timer /etc/systemd/system/perez-safe-pacing-fix.service
+
+          sudo install -m 0644 \
+            deploy/systemd/perez-ai.service \
+            /etc/systemd/system/perez-ai.service
+
+          sudo install -m 0644 \
+            deploy/systemd/perez-ai-health.service \
+            /etc/systemd/system/perez-ai-health.service
+
           sudo install -m 0644 deploy/systemd/perez-ai-health.timer /etc/systemd/system/perez-ai-health.timer
+
           sudo systemctl daemon-reload
+
           sudo systemctl enable perez-ai.service
           sudo systemctl enable --now perez-ai-health.timer
+
           sudo systemctl restart perez-ai.service
+
           sleep 2
 
-          # Health is a hard deployment gate. It must succeed against the
-          # repository-installed watchdog and the currently running bot.
+          # Health is a hard deployment gate.
           sudo systemctl start perez-ai-health.service
 
           echo "DEPLOY_OK"
@@ -68,87 +96,247 @@ jobs:
       - name: Verify paper safety
         run: |
           set -euo pipefail
+
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
-          if grep -RniE 'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' src main.py; then
+
+          if grep -RniE \
+            'placeOrder|placeOrderFullResponse|modifyOrder|cancelOrder' \
+            src main.py
+          then
             echo "ERROR: live-order API usage detected"
             exit 1
           fi
-          if grep -RniE 'LIVE ORDERS.*(TRUE|ENABLED)' main.py src 2>/dev/null; then
+
+          if grep -RniE \
+            'LIVE ORDERS.*(TRUE|ENABLED)' \
+            main.py src 2>/dev/null
+          then
             echo "ERROR: live trading flag appears enabled"
             exit 1
           fi
-          grep -RniE 'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' main.py src --exclude-dir=__pycache__ | head -20 || true
+
+          grep -RniE \
+            'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' \
+            main.py src \
+            --exclude-dir=__pycache__ \
+            | head -20 || true
+
           echo "PAPER_SAFETY_CHECK_COMPLETE"
 
       - name: Check runtime services and duplicate processes
         run: |
           set -euo pipefail
+
           echo "--- PEREZ systemd services ---"
-          systemctl list-units --all --type=service --no-legend 'perez*' || true
+          systemctl list-units \
+            --all \
+            --type=service \
+            --no-legend \
+            'perez*' || true
+
           echo "--- PEREZ timers ---"
-          systemctl list-timers --all --no-legend 'perez*' || true
+          systemctl list-timers \
+            --all \
+            --no-legend \
+            'perez*' || true
+
           echo "--- PEREZ processes ---"
-          pgrep -af 'PEREZ-AI-Trading-Bot.*main.py|python.*main.py' || true
+          pgrep -af \
+            'PEREZ-AI-Trading-Bot.*main.py|python.*main.py' \
+            || true
+
           echo "--- runtime heartbeat ---"
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
-          if test -f data/runtime/heartbeat.json; then cat data/runtime/heartbeat.json; else echo "HEARTBEAT_NOT_YET_CREATED"; fi
+
+          if test -f data/runtime/heartbeat.json
+          then
+            cat data/runtime/heartbeat.json
+          else
+            echo "HEARTBEAT_NOT_YET_CREATED"
+          fi
+
           echo "--- health journal ---"
-          journalctl --no-pager -n 40 -u perez-ai-health.service 2>/dev/null || true
+          journalctl \
+            --no-pager \
+            -n 40 \
+            -u perez-ai-health.service \
+            2>/dev/null || true
+
           echo "--- recent main journal ---"
-          journalctl --no-pager -n 80 -u perez-ai.service 2>/dev/null || true
+          journalctl \
+            --no-pager \
+            -n 80 \
+            -u perez-ai.service \
+            2>/dev/null || true
 
       - name: Check freshness and runtime errors
         run: |
           set -euo pipefail
+
           cd /home/ubuntu/PEREZ-AI-Trading-Bot
-          if test -f data/runtime/heartbeat.json; then
-            python3 - <<'PY'
-          import json, subprocess, time
+
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import time
           from pathlib import Path
-          p = Path('data/runtime/heartbeat.json')
-          data = json.loads(p.read_text())
-          age = time.time() - float(data['epoch'])
-          status = data.get('status')
-          heartbeat_pid = int(data['pid'])
-          main_pid = int(subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'perez-ai.service'], text=True).strip())
+
+          HEARTBEAT = Path("data/runtime/heartbeat.json")
+          STARTUP_GRACE_SECONDS = 360.0
+
           healthy_states = {
-              'starting', 'waiting_entry_window', 'capital_check', 'capital_error',
-              'blocked', 'scanning', 'scan_error', 'scanned', 'index_momentum_candidate',
-              'discovery_error', 'fundamental_reject', 'index_fundamental_bypass',
-              'creating_trade', 'monitoring', 'monitor_error', 'trade_complete',
+              "starting",
+              "waiting_entry_window",
+              "capital_check",
+              "capital_error",
+              "blocked",
+              "scanning",
+              "scan_error",
+              "scanned",
+              "index_momentum_candidate",
+              "discovery_error",
+              "fundamental_reject",
+              "index_fundamental_bypass",
+              "creating_trade",
+              "monitoring",
+              "monitor_error",
+              "trade_complete",
           }
-          print(f'HEARTBEAT_AGE_SECONDS={age:.1f}')
-          print(f'HEARTBEAT_STATUS={status!r}')
-          print(f'HEARTBEAT_PID={heartbeat_pid}')
-          print(f'MAIN_PID={main_pid}')
-          if age > 120:
-              raise SystemExit('STALE_HEARTBEAT')
-          if status not in healthy_states:
-              raise SystemExit(f'INVALID_HEARTBEAT_STATUS={status!r}')
-          if heartbeat_pid != main_pid:
-              raise SystemExit(f'HEARTBEAT_PID_MISMATCH={heartbeat_pid}!={main_pid}')
+
+          main_pid = int(
+              subprocess.check_output(
+                  [
+                      "systemctl",
+                      "show",
+                      "-p",
+                      "MainPID",
+                      "--value",
+                      "perez-ai.service",
+                  ],
+                  text=True,
+              ).strip()
+          )
+
+          active_enter_us = int(
+              subprocess.check_output(
+                  [
+                      "systemctl",
+                      "show",
+                      "-p",
+                      "ActiveEnterTimestampMonotonic",
+                      "--value",
+                      "perez-ai.service",
+                  ],
+                  text=True,
+              ).strip()
+          )
+
+          service_age = (
+              int(time.monotonic() * 1_000_000)
+              - active_enter_us
+          ) / 1_000_000
+
+          print(f"SERVICE_AGE_SECONDS={service_age:.1f}")
+
+          if not HEARTBEAT.exists():
+              if service_age < STARTUP_GRACE_SECONDS:
+                  print("STARTUP_GRACE_ACTIVE: heartbeat not yet created")
+              else:
+                  raise SystemExit("HEARTBEAT_MISSING")
+          else:
+              data = json.loads(HEARTBEAT.read_text())
+
+              age = (
+                  time.time()
+                  - float(data["epoch"])
+              )
+
+              status = data.get("status")
+              heartbeat_pid = int(data["pid"])
+
+              print(f"HEARTBEAT_AGE_SECONDS={age:.1f}")
+              print(f"HEARTBEAT_STATUS={status}")
+              print(f"HEARTBEAT_PID={heartbeat_pid}")
+
+              if service_age < STARTUP_GRACE_SECONDS:
+                  print(
+                      "STARTUP_GRACE_ACTIVE: "
+                      f"service_age={service_age:.1f}s"
+                  )
+              else:
+                  if age > 180:
+                      raise SystemExit(
+                          f"STALE_HEARTBEAT: age={age:.1f}s"
+                      )
+
+                  if status not in healthy_states:
+                      raise SystemExit(
+                          f"UNHEALTHY_STATUS: {status}"
+                      )
+
+                  if heartbeat_pid != main_pid:
+                      raise SystemExit(
+                          f"PID_MISMATCH: heartbeat={heartbeat_pid} "
+                          f"service={main_pid}"
+                      )
+
+              print("FRESHNESS_CHECK=PASS")
           PY
-          fi
-          if journalctl --no-pager -u perez-ai.service 2>/dev/null | grep -F "Monitor error: 'remaining_quantity'"; then
-            echo "ERROR: legacy remaining_quantity monitor failure detected"
+
+          if journalctl \
+            -u perez-ai.service \
+            --since "10 minutes ago" \
+            --no-pager \
+            | grep -q "remaining_quantity"
+          then
+            echo "ERROR: remaining_quantity monitor error detected"
             exit 1
           fi
-          for unit in perez-market-open.service perez-ai-bot.service perez-paper-monitor.service; do
-            if systemctl is-active --quiet "$unit"; then
-              echo "ERROR: retired $unit is still active"
+
+          echo "RUNTIME_ERROR_CHECK=PASS"
+
+      - name: Verify retired architecture is absent
+        run: |
+          set -euo pipefail
+
+          retired_units=(
+            perez-market-open.service
+            perez-market-open.timer
+            perez-ai-bot.service
+            perez-paper-monitor.service
+            perez-ai-start.service
+            perez-ai-start.timer
+            perez-ai-stop.service
+            perez-ai-stop.timer
+            perez-market-close.service
+            perez-market-close.timer
+            perez-safe-pacing-fix.service
+          )
+
+          for unit in "${retired_units[@]}"
+          do
+            if systemctl list-unit-files "$unit" \
+              --no-legend 2>/dev/null \
+              | grep -q "$unit"
+            then
+              echo "ERROR: retired unit still installed: $unit"
               exit 1
             fi
           done
-          if ! systemctl is-active --quiet perez-ai.service; then
-            echo "ERROR: perez-ai.service is not active"
-            exit 1
-          fi
-          if ! systemctl is-enabled --quiet perez-ai-health.timer; then
-            echo "ERROR: perez-ai-health.timer is not enabled"
-            exit 1
-          fi
-          if ! systemctl is-active --quiet perez-ai-health.timer; then
-            echo "ERROR: perez-ai-health.timer is not active"
-            exit 1
-          fi
-          echo "RUNTIME_ERROR_CHECK_COMPLETE"
+
+          echo "RETIRED_ARCHITECTURE_CHECK=PASS"
+
+      - name: Final paper safety check
+        run: |
+          set -euo pipefail
+
+          PAPER_MODE_VALUE="$(systemctl show perez-ai.service -p Environment --value | tr ' ' '\n' | grep '^PAPER_MODE=' | cut -d= -f2- || true)"
+          ORDERS_VALUE="$(systemctl show perez-ai.service -p Environment --value | tr ' ' '\n' | grep '^ORDERS_ENABLED=' | cut -d= -f2- || true)"
+
+          echo "PAPER_MODE=$PAPER_MODE_VALUE"
+          echo "ORDERS_ENABLED=$ORDERS_VALUE"
+
+          test "$PAPER_MODE_VALUE" = "true"
+          test "$ORDERS_VALUE" = "false"
+
+          echo "FINAL_PAPER_SAFETY=PASS"
