@@ -18,6 +18,7 @@ from src.high_conviction_discovery import discover, CANDIDATE_FILE
 from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
 from src.tier1_option_observer import observe_tier1_option_chains
 from src.learning_status import record_cycle
+from src.rejection_recorder import record_rejection
 from src.upgrade_config import (
     RESCAN_DELAY_SECONDS, MINIMUM_SCORE, MAX_TECHNICAL_BYPASS_SCORE,
     MAX_TRADES_PER_DAY, OPTIONS_MIN_SCORE, OPTION_MAX_PREMIUM,
@@ -242,6 +243,16 @@ def main():
                 print(f"FUNDAMENTAL DISCOVERY FAILED — continuing with technical admission: {exc}")
             print(f"Fundamental candidates admitted: {len(admitted)} | rejected: {len(rejected)}")
             if rejected:
+                for item in rejected:
+                    try:
+                        record_rejection(
+                            symbol=item.get("symbol", ""),
+                            score=item.get("score"),
+                            reason=item.get("reason", "DISCOVERY_REJECT"),
+                            features=item,
+                        )
+                    except Exception as exc:
+                        print(f"REJECTION PERSISTENCE FAILED — continuing: {exc}")
                 record_cycle(rejections=len(rejected))
 
             queue = _candidate_queue(results, admitted)
@@ -256,6 +267,7 @@ def main():
                 admitted_ok, admission_reason = _fundamental_admission(admitted, symbol, candidate.get("score", 0), momentum_strategy)
                 if not admitted_ok:
                     write_heartbeat("fundamental_reject", symbol=symbol, reason=admission_reason)
+                    record_rejection(symbol=symbol, score=candidate.get("score"), reason=admission_reason, features=candidate)
                     record_cycle(rejections=1)
                     print(f"FUNDAMENTAL GATE REJECTED {symbol}: {admission_reason}")
                     continue
@@ -269,6 +281,7 @@ def main():
                     continue
                 if contract_probe.get("status") != "CONTRACT VALID":
                     print(f"OPTION CONTRACT REJECTED for {symbol}: {contract_probe}")
+                    record_rejection(symbol=symbol, score=candidate.get("score"), reason=str(contract_probe.get("reason") or contract_probe.get("status") or "CONTRACT_REJECTED"), features={"candidate": candidate, "contract": contract_probe})
                     record_cycle(rejections=1)
                     continue
 
@@ -284,12 +297,14 @@ def main():
                 gate = options_result.get("options_gate", {})
                 print(f"OPTIONS GATE: {options_result.get('options_score', 0)}/100 | {gate.get('decision', 'NO TRADE')} | {', '.join(gate.get('reasons', []))}")
                 if not options_result.get("paper_trade_candidate"):
+                    record_rejection(symbol=symbol, score=candidate.get("score"), options_score=options_result.get("options_score"), reason="; ".join(gate.get("reasons", [])) or "OPTIONS_GATE_REJECTED", features={"candidate": candidate, "options": options_result})
                     record_cycle(rejections=1)
                     continue
 
                 live_ltp = float(options_result.get("ltp", 0) or 0)
                 if live_ltp <= 0 or live_ltp > OPTION_MAX_PREMIUM:
                     print(f"LIVE OPTION PRICE CHANGED — no trade for {symbol}: Rs {live_ltp:.2f}")
+                    record_rejection(symbol=symbol, score=candidate.get("score"), options_score=options_result.get("options_score"), reason="LIVE_OPTION_PRICE_INVALID", features={"ltp": live_ltp, "max_premium": OPTION_MAX_PREMIUM, "contract": contract_probe})
                     record_cycle(rejections=1)
                     continue
                 contract_probe["ltp"] = live_ltp
@@ -317,6 +332,7 @@ def main():
                 )
                 if not allowed:
                     print(f"RISK MANAGER BLOCKED: {reason}")
+                    record_rejection(symbol=symbol, score=candidate.get("score"), options_score=options_result.get("options_score"), reason=f"RISK_MANAGER:{reason}", features={"candidate": candidate, "trade": trade})
                     record_cycle(rejections=1)
                     continue
 
