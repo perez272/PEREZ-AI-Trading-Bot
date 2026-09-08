@@ -40,6 +40,16 @@ def _connect() -> sqlite3.Connection:
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS lessons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            category TEXT NOT NULL,
+            lesson TEXT NOT NULL,
+            evidence_json TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_trade_id
         ON outcomes(trade_id)
         WHERE trade_id IS NOT NULL AND trade_id != ''
@@ -58,6 +68,9 @@ def record_closed_outcome(
 
     if not trade_id:
         raise ValueError("Cannot persist outcome without trade_id")
+
+    if not result or not result.get("closed"):
+        raise ValueError("OUTCOME_NOT_CLOSED")
 
     def num(value: Any, default: float = 0.0) -> float:
         try:
@@ -154,9 +167,26 @@ def record_closed_outcome(
             trade_id,
         ))
 
+        inserted = conn.total_changes > before
+
+        if inserted:
+            conn.execute(
+                "INSERT INTO lessons(ts,category,lesson,evidence_json) VALUES(?,?,?,?)",
+                (
+                    str(result.get("time") or ""),
+                    "TRADE_OUTCOME",
+                    "Completed paper trade outcome stored for adaptive confidence; no strategy code is auto-modified.",
+                    json.dumps(
+                        {"trade": trade, "result": result},
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                ),
+            )
+
         conn.commit()
 
-        return conn.total_changes > before
+        return inserted
 
     finally:
         conn.close()
