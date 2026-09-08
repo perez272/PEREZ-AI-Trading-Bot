@@ -35,6 +35,7 @@ ALLOW_RESTART = (
 HEALTHY_HEARTBEAT_STATES = {
     "starting",
     "waiting_entry_window",
+    "waiting_for_market_session",
     "capital_check",
     "capital_error",
     "blocked",

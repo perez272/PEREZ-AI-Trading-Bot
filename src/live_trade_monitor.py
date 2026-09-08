@@ -1,8 +1,19 @@
 import time
 
 
-def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data/trades.csv"):
-    """Monitor one paper trade without importing broker/Telegram modules at collection time."""
+def run_monitor(
+    trade,
+    poll_seconds=3,
+    get_ltp=None,
+    notify=True,
+    log_path="data/trades.csv",
+    persist_outcome=True,
+):
+    """Monitor one paper trade without importing broker/Telegram modules at collection time.
+
+    ``persist_outcome`` allows isolated lifecycle tests to avoid writing
+    synthetic outcomes into the production learning database.
+    """
     # Lazy imports keep unit-test collection offline and prevent optional broker
     # integrations from becoming import-time dependencies.
     if get_ltp is None:
@@ -13,6 +24,7 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
     from src.trade_logger import log_closed_trade
     from src.trading_risk_manager import TradingRiskManager
     from src.trade_monitor import monitor_trade
+    from src.production_guard import write_heartbeat
 
     print("=" * 60)
     print("PEREZ AI LIVE PAPER-TRADE MONITOR")
@@ -22,8 +34,10 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
 
     while True:
         try:
+            write_heartbeat("monitoring", symbol=trade.get("symbol"), contract=trade.get("contract"), strategy=trade.get("strategy", "CORE"))
             ltp = get_ltp(trade["exchange"], trade["contract"], trade["token"])
             if ltp is None:
+                write_heartbeat("monitoring_ltp_unavailable", symbol=trade.get("symbol"), contract=trade.get("contract"), strategy=trade.get("strategy", "CORE"))
                 consecutive_errors += 1
                 print(f"LTP unavailable; retrying ({consecutive_errors})")
                 if consecutive_errors >= 3 and time.time() - last_health_alert > 300:
@@ -56,55 +70,63 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
 
                 # Persist closed outcome into canonical learning memory.
                 # Observational only; never changes trading or risk decisions.
-                try:
-                    from src.outcome_recorder import record_closed_outcome
-                    outcome_written = record_closed_outcome(trade, result)
-                    print(
-                        'OUTCOME MEMORY:',
-                        'RECORDED' if outcome_written else 'ALREADY_RECORDED',
-                        f"trade_id={trade.get('trade_id', '')}",
-                    )
-                except Exception as outcome_error:
-                    print('OUTCOME MEMORY ERROR:', outcome_error)
-
-                trade_id = trade.get("trade_id")
-                if trade_id:
-                    risk_manager = TradingRiskManager()
-
+                if persist_outcome:
                     try:
-                        pnl = float(result.get("pnl", 0.0) or 0.0)
-                    except (TypeError, ValueError):
-                        pnl = 0.0
-
-                    exit_reason = str(
-                        result.get("exit_reason", "")
-                    ).upper()
-
-                    stop_loss_trigger = (
-                        pnl <= 0.0
-                        and (
-                            exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
-                            or "STOP" in exit_reason
+                        from src.outcome_recorder import record_closed_outcome
+                        outcome_written = record_closed_outcome(trade, result)
+                        print(
+                            'OUTCOME MEMORY:',
+                            'RECORDED' if outcome_written else 'ALREADY_RECORDED',
+                            f"trade_id={trade.get('trade_id', '')}",
                         )
-                    )
+                    except Exception as outcome_error:
+                        print('OUTCOME MEMORY ERROR:', outcome_error)
+                else:
+                    print("OUTCOME MEMORY: SKIPPED (isolated lifecycle test)")
 
-                    if stop_loss_trigger:
-                        _, sl_reason = risk_manager.record_stop_loss(trade_id)
-                        print(f"RISK MANAGER: SL update | {sl_reason}")
+                # Production risk bookkeeping is skipped for isolated
+                # lifecycle tests. Production defaults to persist_outcome=True.
+                if persist_outcome:
+                                trade_id = trade.get("trade_id")
+                                if trade_id:
+                                    risk_manager = TradingRiskManager()
 
-                    risk_manager.record_trade_result(
-                        trade_id,
-                        pnl,
-                        stop_loss=stop_loss_trigger,
-                    )
+                                    try:
+                                        pnl = float(result.get("pnl", 0.0) or 0.0)
+                                    except (TypeError, ValueError):
+                                        pnl = 0.0
 
-                    rs = risk_manager.status()
-                    print(
-                        f"RISK MANAGER: loss_streak="
-                        f"{rs['consecutive_losses']} | "
-                        f"breaker={rs['circuit_breaker_active']}"
-                    )
+                                    exit_reason = str(
+                                        result.get("exit_reason", "")
+                                    ).upper()
 
+                                    stop_loss_trigger = (
+                                        pnl <= 0.0
+                                        and (
+                                            exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
+                                            or "STOP" in exit_reason
+                                        )
+                                    )
+
+                                    if stop_loss_trigger:
+                                        _, sl_reason = risk_manager.record_stop_loss(trade_id)
+                                        print(f"RISK MANAGER: SL update | {sl_reason}")
+
+                                    risk_manager.record_trade_result(
+                                        trade_id,
+                                        pnl,
+                                        stop_loss=stop_loss_trigger,
+                                    )
+
+                                    rs = risk_manager.status()
+                                    print(
+                                        f"RISK MANAGER: loss_streak="
+                                        f"{rs['consecutive_losses']} | "
+                                        f"breaker={rs['circuit_breaker_active']}"
+                                    )
+
+                else:
+                    print("RISK MANAGER: SKIPPED (isolated lifecycle test)")
                 if notify:
                     send_exit_alert(trade, result)
                 print(f"TRADE CLOSED: {result['exit_reason']}")
@@ -116,6 +138,7 @@ def run_monitor(trade, poll_seconds=3, get_ltp=None, notify=True, log_path="data
             print("Monitor stopped manually.")
             return None
         except Exception as error:
+            write_heartbeat("monitoring_error", symbol=trade.get("symbol"), contract=trade.get("contract"), strategy=trade.get("strategy", "CORE"), error=str(error))
             consecutive_errors += 1
             print("Monitor error:", error)
             if consecutive_errors >= 3 and time.time() - last_health_alert > 300:

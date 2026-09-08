@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 FIELDS = [
+    "trade_id",
     "closed_at", "underlying", "signal", "contract", "exchange",
     "entry", "exit", "original_quantity", "exit_quantity", "remaining_quantity",
     "lots", "investment", "realized_pnl", "unrealized_pnl", "pnl",
@@ -30,6 +31,7 @@ def log_closed_trade(trade, result, path="data/trades.csv"):
     output.parent.mkdir(parents=True, exist_ok=True)
     _ensure_schema(output)
     record = {
+        "trade_id": str(trade.get("trade_id") or ""),
         "closed_at": result["time"],
         "underlying": trade.get("symbol", ""),
         "signal": trade.get("signal", ""),

@@ -79,6 +79,7 @@ def wait_for_0915_ist():
         if not (_is_weekday(now) and now.time() < MARKET_OPEN):
             target = _next_weekday_0915(now)
         seconds = max(1, int((target - now).total_seconds()))
+        write_heartbeat("waiting_for_market_session", next_entry=target.isoformat())
         print(f"WAITING FOR NEXT MARKET SESSION — {seconds}s remaining")
         time.sleep(min(seconds, 60))
 
@@ -137,6 +138,8 @@ def _build_option_gate_candidate(candidate, contract_probe, mtf_direction, momen
     return {
         "symbol": candidate["symbol"], "option_type": "CE" if candidate["signal"] == "BUY CE" else "PE",
         "expiry": contract_probe.get("expiry", ""), "ltp": contract_probe.get("ltp", 0),
+        "live_option_quote": contract_probe.get("live_option_quote"),
+        "live_option_greeks": contract_probe.get("live_option_greeks"),
         "exchange": contract_probe.get("exchange", "NFO"), "token": contract_probe.get("token", ""),
         "underlying_signal": candidate["signal"], "mtf_direction": mtf_direction,
         "trend_score": trend_score, "momentum_score": momentum_score, "volume_score": volume_score,

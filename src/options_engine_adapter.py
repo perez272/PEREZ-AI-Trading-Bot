@@ -54,30 +54,127 @@ def evidence_from_candidate(candidate: Dict[str, Any]) -> OptionEvidence:
 
 
 def _apply_quote(result: Dict[str, Any], quote: Dict[str, Any]) -> None:
-    """Normalize Angel/Upstox quote fields into the existing option engine schema."""
+    """Normalize Angel One and Upstox option quote schemas."""
     ltp = _num(quote.get("ltp") or quote.get("last_price"))
+
+    volume = _num(
+        quote.get("tradeVolume")
+        or quote.get("volume")
+    )
+    open_interest = _num(
+        quote.get("opnInterest")
+        or quote.get("oi")
+    )
+
+    # Angel One uses total buy/sell quantities; Upstox option-chain
+    # uses bid_qty / ask_qty. Preserve either representation.
+    buy_quantity = _num(
+        quote.get("totBuyQuan")
+        or quote.get("total_buy_quantity")
+        or quote.get("bid_qty")
+    )
+    sell_quantity = _num(
+        quote.get("totSellQuan")
+        or quote.get("total_sell_quantity")
+        or quote.get("ask_qty")
+    )
+
+    last_trade_qty = _num(
+        quote.get("lastTradeQty")
+        or quote.get("last_trade_qty")
+        or quote.get("last_traded_quantity")
+    )
+
+    # Do NOT treat close_price as average/VWAP.
+    # A genuine average price must come from an actual average-price field.
+    avg_price = _num(
+        quote.get("avgPrice")
+        or quote.get("average_price")
+        or quote.get("avg_price")
+    )
+
+    net_change = _num(
+        quote.get("netChange")
+        or quote.get("net_change")
+    )
+    percent_change = _num(
+        quote.get("percentChange")
+        if quote.get("percentChange") not in (None, "")
+        else quote.get("percent_change")
+    )
+
+    # Upstox option-chain data provides previous close instead of
+    # Angel-style netChange / percentChange.
+    close_price = _num(
+        quote.get("close_price")
+        or quote.get("prev_close")
+    )
+
+    if close_price > 0 and ltp > 0:
+        if not net_change:
+            net_change = ltp - close_price
+        if not percent_change:
+            percent_change = (
+                (ltp - close_price) / close_price
+            ) * 100.0
+
+    prev_oi = _num(quote.get("prev_oi"))
+
+    oi_change = 0.0
+    if open_interest > 0 and prev_oi > 0:
+        oi_change = open_interest - prev_oi
+
     result.update({
         "ltp": ltp,
-        "volume": _num(quote.get("tradeVolume") or quote.get("volume")),
-        "open_interest": _num(quote.get("opnInterest") or quote.get("oi")),
-        "buy_quantity": _num(quote.get("totBuyQuan") or quote.get("total_buy_quantity")),
-        "sell_quantity": _num(quote.get("totSellQuan") or quote.get("total_sell_quantity")),
-        "last_trade_qty": _num(quote.get("lastTradeQty")),
-        "avg_price": _num(quote.get("avgPrice") or quote.get("average_price")),
-        "net_change": _num(quote.get("netChange") or quote.get("net_change")),
-        "percent_change": _num(quote.get("percentChange")),
+        "volume": volume,
+        "open_interest": open_interest,
+        "buy_quantity": buy_quantity,
+        "sell_quantity": sell_quantity,
+        "last_trade_qty": last_trade_qty,
+        "avg_price": avg_price,
+        "net_change": net_change,
+        "percent_change": percent_change,
+        "close_price": close_price,
+        "prev_oi": prev_oi,
+        "oi_change": oi_change,
     })
-    depth = quote.get("depth") or {}
-    buys, sells = depth.get("buy") or [], depth.get("sell") or []
-    bid = _num(buys[0].get("price")) if buys else 0.0
-    ask = _num(sells[0].get("price")) if sells else 0.0
-    result["best_bid"], result["best_ask"] = bid, ask
-    if bid > 0 and ask > 0 and ask >= bid and ltp > 0:
-        result["spread_pct"] = max(0.0, (ask - bid) / ltp * 100.0)
-        result["slippage_pct"] = max(0.0, (ask - ltp) / ltp * 100.0)
-    else:
-        result["spread_pct"] = result["slippage_pct"] = 999.0
 
+    depth = quote.get("depth") or {}
+    buys = depth.get("buy") or []
+    sells = depth.get("sell") or []
+
+    bid = (
+        _num(buys[0].get("price"))
+        if buys
+        else _num(
+            quote.get("bid_price")
+            or quote.get("best_bid")
+        )
+    )
+    ask = (
+        _num(sells[0].get("price"))
+        if sells
+        else _num(
+            quote.get("ask_price")
+            or quote.get("best_ask")
+        )
+    )
+
+    result["best_bid"] = bid
+    result["best_ask"] = ask
+
+    if bid > 0 and ask > 0 and ask >= bid and ltp > 0:
+        result["spread_pct"] = max(
+            0.0,
+            (ask - bid) / ltp * 100.0,
+        )
+        result["slippage_pct"] = max(
+            0.0,
+            (ask - ltp) / ltp * 100.0,
+        )
+    else:
+        result["spread_pct"] = 999.0
+        result["slippage_pct"] = 999.0
 
 def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(candidate)
@@ -91,7 +188,7 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
     result["live_market_data"] = False
     result["live_data_error"] = "NOT_ATTEMPTED"
     exchange = _text(candidate.get("exchange") or candidate.get("exch_seg") or candidate.get("exchange_segment"), "NFO")
-    token = _text(candidate.get("token") or candidate.get("symbolToken") or candidate.get("symbol_token") or candidate.get("contract_token"))
+    token = _text(candidate.get("token") or candidate.get("symbolToken") or candidate.get("symbol_token") or candidate.get("contract_token") or candidate.get("instrument_token"))
     contract = candidate.get("contract")
     if isinstance(contract, dict):
         exchange = _text(contract.get("exchange") or contract.get("exch_seg"), exchange)
@@ -100,7 +197,21 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         result["live_data_error"] = "MISSING_OPTION_TOKEN"
         return result
     try:
-        quote, source = _get_market_data_router().get_option_quote(exchange, token)
+        handoff_quote = candidate.get("live_option_quote")
+
+        if isinstance(handoff_quote, dict) and _num(
+            handoff_quote.get("ltp") or handoff_quote.get("last_price")
+        ) > 0:
+            quote = handoff_quote
+            source = _text(
+                candidate.get("data_source"),
+                "option_chain_handoff",
+            )
+        else:
+            quote, source = _get_market_data_router().get_option_quote(
+                exchange, token
+            )
+
         if not quote:
             result["live_data_error"] = "NO_MARKET_DATA"
             result["data_source"] = source
@@ -119,11 +230,60 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
         result["vwap_score"] = 7.0 if avg > 0 and ltp > avg else (3.0 if avg > 0 and ltp == avg else 0.0)
         result["volume_score"] = min(8.0, max(0.0, result["volume"] / 100000.0)) if result["volume"] > 0 else 0.0
         result["oi_score"] = 5.0 if result["open_interest"] > 0 else 0.0
-        result["oi_change_score"] = 0.0
-        result["oi_change_available"] = False
-        result["iv_score"] = 0.0
-        result["iv_available"] = False
-        result["greeks_available"] = False
+
+        # Use the genuine current-vs-previous OI supplied by Upstox.
+        # Positive OI expansion is evidence of participation/position
+        # build-up. Score it proportionally, capped at the existing
+        # 8-point gate allocation.
+        current_oi = result["open_interest"]
+        previous_oi = result["prev_oi"]
+        oi_change = result["oi_change"]
+
+        if current_oi > 0 and previous_oi > 0:
+            oi_change_pct = (oi_change / previous_oi) * 100.0
+            result["oi_change_pct"] = oi_change_pct
+            result["oi_change_available"] = True
+
+            # 0% -> 0 points, 20%+ increase -> full 8 points.
+            result["oi_change_score"] = min(
+                8.0,
+                max(0.0, oi_change_pct / 20.0 * 8.0),
+            )
+        else:
+            result["oi_change_pct"] = 0.0
+            result["oi_change_score"] = 0.0
+            result["oi_change_available"] = False
+
+        # Upstox supplies genuine implied volatility in the option Greeks.
+        # IV is treated as an availability/volatility-quality signal here,
+        # not as a directional signal. Direction continues to come from
+        # trend/momentum/MTF/index confirmation.
+        iv = _num(
+            (candidate.get("live_option_greeks") or {}).get("iv")
+        )
+        result["iv"] = iv
+
+        if iv > 0:
+            result["iv_available"] = True
+
+            # Positive IV availability earns up to the existing 5-point
+            # volatility allocation. Keep the score bounded and avoid
+            # rewarding extreme IV linearly.
+            result["iv_score"] = min(
+                5.0,
+                max(0.0, iv / 20.0 * 5.0),
+            )
+        else:
+            result["iv_score"] = 0.0
+            result["iv_available"] = False
+
+        greeks = candidate.get("live_option_greeks") or {}
+        result["delta"] = _num(greeks.get("delta"))
+        result["gamma"] = _num(greeks.get("gamma"))
+        result["theta"] = _num(greeks.get("theta"))
+        result["vega"] = _num(greeks.get("vega"))
+        result["pop"] = _num(greeks.get("pop"))
+        result["greeks_available"] = bool(greeks and iv > 0)
         if result["buy_quantity"] + result["sell_quantity"] > 0:
             imbalance = result["buy_quantity"] / max(result["sell_quantity"], 1.0)
             result["liquidity_score"] = min(7.0, max(0.0, 3.0 + imbalance - 1.0))
@@ -170,9 +330,27 @@ def evaluate_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
         gate["score"] = min(100.0, round(gate["score"] + memory_bonus, 2))
         gate["memory_bonus"] = memory_bonus
         gate["memory_matches"] = enriched.get("move_memory", {}).get("matches", 0)
-        if gate["score"] >= 60 and "PATTERN_MEMORY_CONFIRMATION" not in gate["reasons"]:
-            gate["reasons"] = [r for r in gate["reasons"] if not r.startswith("SCORE_BELOW_")]
-            gate["reasons"].append("PATTERN_MEMORY_CONFIRMATION")
+        if gate["score"] >= 60:
+            gate["reasons"] = [
+                r for r in gate["reasons"]
+                if not r.startswith("SCORE_BELOW_")
+            ]
+            gate["memory_confirmation"] = True
+            gate["confirmations"] = [
+                "PATTERN_MEMORY_CONFIRMATION"
+            ]
+        else:
+            gate["memory_confirmation"] = False
+            gate["confirmations"] = []
+    # Recompute final eligibility after memory-adjusted score/reasons.
+    # validate_trade() calculated eligibility before the memory bonus was applied.
+    gate["eligible"] = not bool(gate.get("reasons"))
+    gate["decision"] = (
+        "PAPER TRADE CANDIDATE"
+        if gate["eligible"]
+        else "NO TRADE"
+    )
+
     enriched["options_gate"] = gate
     enriched["options_score"] = gate["score"]
     enriched["paper_trade_candidate"] = gate["eligible"]

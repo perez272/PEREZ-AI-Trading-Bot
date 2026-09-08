@@ -63,9 +63,14 @@ class UpstoxMarketData:
         self.instrument_keys.update(_env_instrument_keys())
         self._last_request = 0.0
         self._session = requests.Session()
+    def _refresh_access_token(self) -> str:
+        token = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
+        if token:
+            self.access_token = token
+        return self.access_token
 
     def available(self) -> bool:
-        return self.enabled and bool(self.access_token)
+        return self.enabled and bool(self._refresh_access_token())
 
     def status(self) -> dict[str, Any]:
         return {"provider": self.provider_name, "enabled": self.enabled, "configured": bool(self.access_token), "available": self.available()}
@@ -77,13 +82,17 @@ class UpstoxMarketData:
         self._last_request = time.monotonic()
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        if not self.available():
+        token = self._refresh_access_token()
+        if not self.enabled or not token:
             return None
         self._pace()
         try:
-            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
+            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
         except requests.RequestException as exc:
             print(f"[UPSTOX] request failed: {exc}")
+            return None
+        if response.status_code in {401, 403}:
+            print(f"[UPSTOX][AUTH] HTTP {response.status_code}; access token rejected or unauthorized.")
             return None
         if response.status_code != 200:
             body = ""
@@ -518,6 +527,8 @@ class UpstoxMarketData:
             "exchange": exchange, "token": instrument_key, "expiry": contract_expiry,
             "strike": float(row.get("strike_price")), "lotsize": int(lot_size),
             "ltp": ltp, "spread_pct": round(spread_pct, 3),
+        "live_option_quote": dict(option.get("market_data") or {}),
+        "live_option_greeks": dict(greeks or {}),
             "volume": float((option.get("market_data") or {}).get("volume", 0) or 0),
             "oi": float((option.get("market_data") or {}).get("oi", 0) or 0),
             "iv": float(greeks.get("iv", 0) or 0), "delta": float(greeks.get("delta", 0) or 0),

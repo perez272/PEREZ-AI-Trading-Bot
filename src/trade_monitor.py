@@ -64,7 +64,23 @@ def monitor_trade(trade, current_price):
 
     status = "RUNNING"
     exit_reason = ""
-    if current_price <= stop_loss:
+
+    # TARGET 2 closes the remaining position at the observed market price.
+    # Use the already-resolved trade["target2"]; do not hardcode a percentage.
+    if current_price >= target2 and remaining > 0:
+        status = "TARGET 2 HIT"
+        exit_reason = "TARGET_2"
+        trade["realized_pnl"] = round(
+            realized + (current_price - entry) * remaining, 2
+        )
+        trade["remaining_quantity"] = 0
+        remaining = 0
+        realized = trade["realized_pnl"]
+        unrealized = 0.0
+        pnl = realized
+        pnl_percent = round((pnl / initial_exposure) * 100, 2)
+
+    elif current_price <= stop_loss:
         status = "STOP LOSS HIT"
         # Trailing stop is active only after partial booking.
         # Before that, this is a normal initial/breakeven stop.

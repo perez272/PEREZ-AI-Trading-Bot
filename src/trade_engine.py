@@ -1,3 +1,4 @@
+import os
 from src.affordable_options import find_affordable_contract
 from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.alternative_market_data import get_upstox_client
@@ -15,11 +16,22 @@ def resolve_option_contract(symbol, spot, signal):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
 
     option_type = "CE" if signal == "BUY CE" else "PE"
+    provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
+    upstox = get_upstox_client()
+    if provider == "upstox" or (provider == "auto" and upstox.available()):
+        fallback = upstox.resolve_affordable_option(symbol, float(spot), option_type, OPTION_MAX_PREMIUM)
+        if fallback and fallback.get("status") == "CONTRACT VALID":
+            fallback["max_premium"] = OPTION_MAX_PREMIUM
+            fallback["affordability_score"] = fallback.get("affordability_score", 0)
+            print(f"[TRADE ENGINE] Upstox provider selected {fallback.get("contract", "UNKNOWN")} LTP=Rs {float(fallback.get("ltp", 0) or 0):.2f}")
+            return fallback
+        if provider == "upstox":
+            return {"status": "NO AFFORDABLE OPTION", "reason": "Upstox could not resolve a valid affordable option"}
     affordable = find_affordable_contract(
         symbol, spot, option_type, get_option_ltp, OPTION_MAX_PREMIUM, batch_ltp_getter=get_option_ltp_batch
     )
     if affordable.get("status") not in ("NO CONTRACT", "NO AFFORDABLE OPTION"):
-        return {
+        result = {
             "status": "CONTRACT VALID", "option_type": option_type, "contract": affordable["symbol"],
             "exchange": affordable["exchange"], "token": affordable["token"], "expiry": affordable["expiry"],
             "strike": affordable["strike"], "lotsize": int(affordable["lotsize"]), "ltp": float(affordable["ltp"]),
@@ -27,15 +39,25 @@ def resolve_option_contract(symbol, spot, signal):
             "data_source": "angel_one_option_chain",
         }
 
-    # Angel One may be rate-limited while the underlying scanner is healthy via
-    # Upstox. Use the same premium cap and a live option-chain quote; never
-    # synthesize a contract or price. The downstream options gate still runs.
-    fallback = get_upstox_client().resolve_affordable_option(symbol, float(spot), option_type, OPTION_MAX_PREMIUM)
-    if fallback and fallback.get("status") == "CONTRACT VALID":
-        fallback["max_premium"] = OPTION_MAX_PREMIUM
-        fallback["affordability_score"] = 0
-        print(f"[TRADE ENGINE] Upstox option fallback selected {fallback['contract']} LTP=Rs {fallback['ltp']:.2f}")
-        return fallback
+        # Preserve the full live quote for the downstream options gate.
+        # Contract selection itself remains unchanged.
+        try:
+            from src.live_option_price import get_option_quote
+
+            full_quote = get_option_quote(
+                affordable["exchange"],
+                affordable["symbol"],
+                affordable["token"],
+            )
+
+            if isinstance(full_quote, dict) and float(full_quote.get("ltp", 0) or 0) > 0:
+                result["live_option_quote"] = full_quote
+                result["ltp"] = float(full_quote["ltp"])
+        except Exception as exc:
+            print(f"[TRADE ENGINE] Angel full option quote enrichment failed: {exc}")
+
+        return result
+
 
     return affordable
 
