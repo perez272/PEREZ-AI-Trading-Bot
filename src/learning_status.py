@@ -15,6 +15,19 @@ from src.tier1_option_observer import get_tier1_option_observer
 
 STATUS_PATH = Path("data/runtime/learning_status.json")
 TRADES_PATH = Path("data/trades.csv")
+DB_PATH = Path("data/memory/perez_ai_memory.db")
+
+
+def _canonical_learning_counts() -> tuple[int, int, int]:
+    """Return canonical SQLite counts for rejections, lessons, and outcomes."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            rejections = int(db.execute("SELECT COUNT(*) FROM rejections").fetchone()[0])
+            lessons = int(db.execute("SELECT COUNT(*) FROM lessons").fetchone()[0])
+            outcomes = int(db.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0])
+        return rejections, lessons, outcomes
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return 0, 0, 0
 
 
 def _load() -> dict[str, Any]:
@@ -84,14 +97,15 @@ def get_learning_status() -> dict[str, Any]:
     wins, win_rate = _historical_trade_stats()
     observations = int(observer_stats.get("observations", 0) or 0)
     last_observation = _persisted_observation_timestamp(observer, observations)
+    canonical_rejections, canonical_lessons, canonical_outcomes = _canonical_learning_counts()
     return {
         "completed_paper_trades": risk["closed_trades"],
         "wins": wins,
         "learned_win_rate": win_rate,
         "learned_pnl": risk["pnl"],
         "observations": observations,
-        "rejections": int(data.get("rejections", 0)),
-        "lessons_events": int(data.get("lessons_events", 0)),
+        "rejections": canonical_rejections,
+        "lessons_events": canonical_lessons,
         "option_surge_events": observer_stats.get("surge_events", 0),
         "option_surge_events_total": observer_stats.get("surge_events_total", observer_stats.get("surge_events", 0)),
         "outcome_learning": "READY" if risk["closed_trades"] else "WAITING_FOR_FIRST_CLOSED_TRADE",
