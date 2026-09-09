@@ -153,14 +153,6 @@ def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
     live["bid"] = live.get("bid", live.get("best_bid"))
     live["ask"] = live.get("ask", live.get("best_ask"))
 
-    # Tier-1 memory currently stores upward moves only.
-    # Opposite movement direction is not a compatible pattern.
-    live_move = live.get("percent_change")
-    hist_move = hist.get("percent_change")
-    if _present(live_move) and _present(hist_move):
-        if (_num(live_move) > 0) != (_num(hist_move) > 0):
-            return 0.0
-
     # Raw market quantities are compared logarithmically because the
     # historical population spans several orders of magnitude.
     # Positive market quantities use symmetric log-ratio.

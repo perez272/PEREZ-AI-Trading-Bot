@@ -144,38 +144,16 @@ def _relative_distance(a: float, b: float, scale: float) -> float:
 
 
 def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
-    """Compare normalized live/historical market-state features."""
-    # Normalize provider-specific field names at the memory boundary.
-    live = dict(candidate)
-    hist = dict(historical)
-
-    live["oi"] = live.get("oi", live.get("open_interest"))
-    live["bid"] = live.get("bid", live.get("best_bid"))
-    live["ask"] = live.get("ask", live.get("best_ask"))
-
-    # Tier-1 memory currently stores upward moves only.
-    # Opposite movement direction is not a compatible pattern.
-    live_move = live.get("percent_change")
-    hist_move = hist.get("percent_change")
-    if _present(live_move) and _present(hist_move):
-        if (_num(live_move) > 0) != (_num(hist_move) > 0):
-            return 0.0
-
-    # Raw market quantities are compared logarithmically because the
-    # historical population spans several orders of magnitude.
-    # Positive market quantities use symmetric log-ratio.
-    positive_raw_features = {
-        "volume": 1.0,
-        "oi": 1.0,
-        "iv": 1.0,
-        "delta": 1.0,
-        "gamma": 1.0,
-        "vega": 1.0,
-    }
-
-    # Signed Greeks must use ordinary normalized distance.
-    signed_raw_features = {
+    """Compare only compatible, actually-present historical/live features."""
+    # Raw fields are normalized independently from the gate's score fields.
+    raw_scales = {
+        "volume": 2.0,
+        "oi": 2.0,
+        "iv": 20.0,
+        "delta": 0.5,
+        "gamma": 0.05,
         "theta": 5.0,
+        "vega": 5.0,
     }
 
     score_scales = {
@@ -202,57 +180,38 @@ def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
         "mtf_aligned": 1.0,
     }
 
+    raw_features = tuple(raw_scales)
+    score_features = tuple(score_scales)
+
     distance = 0.0
     weight = 0.0
 
-    for feature in positive_raw_features:
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
+    for feature in raw_features:
+        if not (_present(candidate.get(feature)) and _present(historical.get(feature))):
             continue
 
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        if a <= 0 or b <= 0:
-            distance += 1.0
-        else:
-            # Symmetric log-ratio. Equal values = 0.
-            distance += min(
-                abs(math.log(a / b)),
-                3.0,
-            )
-
+        a = _num(candidate.get(feature))
+        b = _num(historical.get(feature))
+        distance += _relative_distance(a, b, raw_scales[feature])
         weight += 1.0
 
-    for feature, scale in signed_raw_features.items():
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
+    for feature in score_features:
+        if not (_present(candidate.get(feature)) and _present(historical.get(feature))):
             continue
 
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        # Signed values such as theta must not use log-ratio.
+        a = _num(candidate.get(feature))
+        b = _num(historical.get(feature))
         distance += min(
-            abs(a - b) / max(scale, 1e-9),
+            abs(a - b) / max(score_scales[feature], 1e-9),
             3.0,
         )
         weight += 1.0
 
-    for feature, scale in score_scales.items():
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
-            continue
-
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        # percent_change is directional and therefore intentionally signed.
-        distance += min(abs(a - b) / max(scale, 1e-9), 3.0)
-        weight += 1.0
-
+    # No comparable information means no similarity.
     if weight <= 0:
         return 0.0
 
     return max(0.0, 1.0 - distance / (weight * 1.5))
-
 
 def similarity_bonus(
     candidate: dict[str, Any],

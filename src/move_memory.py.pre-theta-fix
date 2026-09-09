@@ -153,29 +153,16 @@ def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
     live["bid"] = live.get("bid", live.get("best_bid"))
     live["ask"] = live.get("ask", live.get("best_ask"))
 
-    # Tier-1 memory currently stores upward moves only.
-    # Opposite movement direction is not a compatible pattern.
-    live_move = live.get("percent_change")
-    hist_move = hist.get("percent_change")
-    if _present(live_move) and _present(hist_move):
-        if (_num(live_move) > 0) != (_num(hist_move) > 0):
-            return 0.0
-
     # Raw market quantities are compared logarithmically because the
     # historical population spans several orders of magnitude.
-    # Positive market quantities use symmetric log-ratio.
-    positive_raw_features = {
+    raw_features = {
         "volume": 1.0,
         "oi": 1.0,
         "iv": 1.0,
         "delta": 1.0,
         "gamma": 1.0,
+        "theta": 1.0,
         "vega": 1.0,
-    }
-
-    # Signed Greeks must use ordinary normalized distance.
-    signed_raw_features = {
-        "theta": 5.0,
     }
 
     score_scales = {
@@ -205,7 +192,7 @@ def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
     distance = 0.0
     weight = 0.0
 
-    for feature in positive_raw_features:
+    for feature in raw_features:
         if not (_present(live.get(feature)) and _present(hist.get(feature))):
             continue
 
@@ -221,20 +208,6 @@ def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
                 3.0,
             )
 
-        weight += 1.0
-
-    for feature, scale in signed_raw_features.items():
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
-            continue
-
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        # Signed values such as theta must not use log-ratio.
-        distance += min(
-            abs(a - b) / max(scale, 1e-9),
-            3.0,
-        )
         weight += 1.0
 
     for feature, scale in score_scales.items():

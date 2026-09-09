@@ -62,7 +62,7 @@ def _num(v: Any) -> float:
 
 
 def _historical_features(row: sqlite3.Row) -> dict[str, Any]:
-    """Decode Tier-1 raw market features without inventing score fields."""
+    """Decode the Tier-1 observer feature snapshot."""
     raw = row["features_json"]
 
     try:
@@ -73,34 +73,18 @@ def _historical_features(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
 
+    # Bridge Tier-1 field names to the feature names used by this module.
     mapped = dict(data)
 
-    # The observer's raw move percentage is authoritative.
     mapped["percent_change"] = _num(
         mapped.get("percent_change", mapped.get("move_pct", row["move_pct"]))
     )
 
-    # Do NOT map raw volume/OI/IV into score fields.
-    # The live candidate and historical observer use different scales.
-    # Preserve raw values so the matcher can normalize them correctly.
-    for key in (
-        "volume",
-        "oi",
-        "iv",
-        "bid",
-        "ask",
-        "delta",
-        "gamma",
-        "theta",
-        "vega",
-    ):
-        if key in mapped and mapped[key] not in (None, ""):
-            mapped[key] = _num(mapped[key])
-
-    # Preserve genuine derived fields only when they actually exist.
-    for key in FEATURES:
-        if key in mapped and mapped[key] not in (None, ""):
-            mapped[key] = _num(mapped[key])
+    mapped["iv_score"] = _num(mapped.get("iv_score", mapped.get("iv")))
+    mapped["oi_score"] = _num(mapped.get("oi_score", mapped.get("oi")))
+    mapped["volume_score"] = _num(
+        mapped.get("volume_score", mapped.get("volume"))
+    )
 
     return mapped
 
@@ -117,141 +101,51 @@ def record_move(candidate: dict[str, Any]) -> list[float]:
             candidate.get("move_pct", candidate.get("percentChange")),
         )
     )
+
     if pct <= 0:
         return []
+
     return [target for target in TARGETS if pct >= target]
 
 
-def _present(value: Any) -> bool:
-    """Return True only when a feature is genuinely available."""
-    if value is None or value == "":
-        return False
-
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return False
-
-    return math.isfinite(value)
-
-
-def _relative_distance(a: float, b: float, scale: float) -> float:
-    """Bounded relative distance for positive raw market quantities."""
-    if a <= 0 or b <= 0:
-        return min(abs(a - b) / max(scale, 1e-9), 3.0)
-
-    return min(abs(math.log1p(a) - math.log1p(b)) / max(scale, 1e-9), 3.0)
-
-
 def _similarity(candidate: dict[str, Any], historical: dict[str, Any]) -> float:
-    """Compare normalized live/historical market-state features."""
-    # Normalize provider-specific field names at the memory boundary.
-    live = dict(candidate)
-    hist = dict(historical)
-
-    live["oi"] = live.get("oi", live.get("open_interest"))
-    live["bid"] = live.get("bid", live.get("best_bid"))
-    live["ask"] = live.get("ask", live.get("best_ask"))
-
-    # Tier-1 memory currently stores upward moves only.
-    # Opposite movement direction is not a compatible pattern.
-    live_move = live.get("percent_change")
-    hist_move = hist.get("percent_change")
-    if _present(live_move) and _present(hist_move):
-        if (_num(live_move) > 0) != (_num(hist_move) > 0):
-            return 0.0
-
-    # Raw market quantities are compared logarithmically because the
-    # historical population spans several orders of magnitude.
-    # Positive market quantities use symmetric log-ratio.
-    positive_raw_features = {
-        "volume": 1.0,
-        "oi": 1.0,
-        "iv": 1.0,
-        "delta": 1.0,
-        "gamma": 1.0,
-        "vega": 1.0,
-    }
-
-    # Signed Greeks must use ordinary normalized distance.
-    signed_raw_features = {
-        "theta": 5.0,
-    }
-
-    score_scales = {
-        "percent_change": 10.0,
-        "trend_score": 15.0,
-        "momentum_score": 10.0,
-        "vwap_score": 7.0,
-        "volume_score": 8.0,
-        "oi_score": 5.0,
-        "oi_change_score": 8.0,
-        "iv_score": 5.0,
-        "liquidity_score": 7.0,
-        "spread_pct": 2.0,
-        "slippage_pct": 2.0,
-        "atr_pct": 2.0,
-        "rsi": 20.0,
-        "rsi_slope": 5.0,
-        "ema_gap_pct": 2.0,
-        "breakout_strength": 2.0,
-        "body_strength": 1.0,
-        "volume_ratio": 2.0,
-        "spot_change_pct": 2.0,
-        "spot_score": 100.0,
-        "mtf_aligned": 1.0,
+    """Bounded, scale-aware similarity without future price information."""
+    scales = {
+        "percent_change": 10,
+        "trend_score": 15,
+        "momentum_score": 10,
+        "vwap_score": 7,
+        "volume_score": 8,
+        "oi_score": 10,
+        "oi_change_score": 8,
+        "iv_score": 5,
+        "liquidity_score": 7,
+        "spread_pct": 2,
+        "slippage_pct": 2,
+        "atr_pct": 2,
+        "rsi": 20,
+        "rsi_slope": 5,
+        "ema_gap_pct": 2,
+        "breakout_strength": 2,
+        "body_strength": 1,
+        "volume_ratio": 2,
+        "spot_change_pct": 2,
+        "spot_score": 100,
+        "mtf_aligned": 1,
     }
 
     distance = 0.0
     weight = 0.0
 
-    for feature in positive_raw_features:
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
-            continue
+    for feature in FEATURES:
+        scale = scales.get(feature, 1)
+        a = _num(candidate.get(feature))
+        b = _num(historical.get(feature))
 
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        if a <= 0 or b <= 0:
-            distance += 1.0
-        else:
-            # Symmetric log-ratio. Equal values = 0.
-            distance += min(
-                abs(math.log(a / b)),
-                3.0,
-            )
-
-        weight += 1.0
-
-    for feature, scale in signed_raw_features.items():
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
-            continue
-
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        # Signed values such as theta must not use log-ratio.
-        distance += min(
-            abs(a - b) / max(scale, 1e-9),
-            3.0,
-        )
-        weight += 1.0
-
-    for feature, scale in score_scales.items():
-        if not (_present(live.get(feature)) and _present(hist.get(feature))):
-            continue
-
-        a = _num(live[feature])
-        b = _num(hist[feature])
-
-        # percent_change is directional and therefore intentionally signed.
         distance += min(abs(a - b) / max(scale, 1e-9), 3.0)
         weight += 1.0
 
-    if weight <= 0:
-        return 0.0
-
-    return max(0.0, 1.0 - distance / (weight * 1.5))
+    return max(0.0, 1.0 - distance / max(weight * 1.5, 1.0))
 
 
 def similarity_bonus(
@@ -306,18 +200,11 @@ def similarity_bonus(
         if candidate_type and historical_type and historical_type != candidate_type:
             continue
 
-        historical = _historical_features(row)
-
         observation_minute = str(row["observed_ts"] or "")[:16]
-        historical_instrument = str(
-            historical.get("instrument_key", "")
-            or historical.get("instrument", "")
-        ).strip()
 
         event_identity = (
             historical_symbol,
             historical_type,
-            historical_instrument,
             str(row["expiry"] or ""),
             _num(row["strike"]),
             observation_minute,

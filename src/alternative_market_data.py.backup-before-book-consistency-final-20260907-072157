@@ -1,0 +1,866 @@
+"""Alternative authenticated market-data provider used when Angel One is unavailable."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import requests
+
+UPSTOX_BASE_URL = "https://api.upstox.com/v3"
+UPSTOX_V2_BASE_URL = "https://api.upstox.com/v2"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+UPSTOX_TIMEOUT_SECONDS = float(os.getenv("UPSTOX_TIMEOUT_SECONDS", "8"))
+UPSTOX_REQUEST_INTERVAL_SECONDS = float(os.getenv("UPSTOX_REQUEST_INTERVAL_SECONDS", "1.0"))
+UPSTOX_HISTORICAL_LOOKBACK_DAYS = max(15, int(os.getenv("UPSTOX_HISTORICAL_LOOKBACK_DAYS", "15")))
+INSTRUMENT_FILE = Path("data/instruments.json")
+
+DEFAULT_INSTRUMENT_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+    "NIFTYNXT50": "NSE_INDEX|Nifty Next 50",
+    "NIFTYFPI": "NSE_INDEX|Nifty India FPI 150",
+}
+
+
+def _env_instrument_keys() -> dict[str, str]:
+    raw = os.getenv("UPSTOX_INSTRUMENT_KEYS_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            return {}
+        return {str(k).upper(): str(v) for k, v in value.items()}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        print("[UPSTOX] Invalid UPSTOX_INSTRUMENT_KEYS_JSON; using built-in mappings.")
+        return {}
+
+
+def _local_instrument_keys() -> dict[str, str]:
+    """Never derive Upstox keys from the Angel instrument master."""
+    return {}
+
+
+class UpstoxMarketData:
+    """Defensive wrapper around Upstox V3 historical candles and V2 option APIs."""
+
+    provider_name = "upstox"
+
+    def __init__(self, access_token: str | None = None):
+        self.access_token = (access_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
+        self.enabled = os.getenv("UPSTOX_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.instrument_keys = dict(DEFAULT_INSTRUMENT_KEYS)
+        self.instrument_keys.update(_local_instrument_keys())
+        self.instrument_keys.update(_env_instrument_keys())
+        self._last_request = 0.0
+        self._session = requests.Session()
+
+    def available(self) -> bool:
+        return self.enabled and bool(self.access_token)
+
+    def status(self) -> dict[str, Any]:
+        return {"provider": self.provider_name, "enabled": self.enabled, "configured": bool(self.access_token), "available": self.available()}
+
+    def _pace(self) -> None:
+        remaining = UPSTOX_REQUEST_INTERVAL_SECONDS - (time.monotonic() - self._last_request)
+        if remaining > 0:
+            time.sleep(remaining)
+        self._last_request = time.monotonic()
+
+    def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not self.available():
+            return None
+        self._pace()
+        try:
+            response = self._session.get(url, params=params, headers={"Accept": "application/json", "Authorization": f"Bearer {self.access_token}"}, timeout=UPSTOX_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            print(f"[UPSTOX] request failed: {exc}")
+            return None
+        if response.status_code != 200:
+            body = ""
+            try:
+                body = response.text.strip()
+            except Exception:
+                body = ""
+            print(
+                f"[UPSTOX] HTTP {response.status_code}; "
+                f"url={response.url}; "
+                f"response={body[:1000]}"
+            )
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            print("[UPSTOX] invalid JSON response.")
+            return None
+        if str(payload.get("status", "")).lower() not in {"success", "ok"}:
+            print("[UPSTOX] unsuccessful response.")
+            return None
+        return payload
+
+    @staticmethod
+    def _normalize_candles(candles: Any) -> list[list[Any]] | None:
+        if not isinstance(candles, list):
+            return None
+        valid: list[list[Any]] = []
+        seen: set[str] = set()
+        for row in candles:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                o, h, low, close = (float(row[i]) for i in range(1, 5))
+                volume = float(row[5])
+                if min(o, h, low, close, volume) < 0 or close <= 0:
+                    continue
+                if h < max(o, low, close) or low > min(o, h, close):
+                    continue
+                key = timestamp.isoformat()
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Canonical scanner schema: timestamp, open, high, low, close, volume.
+                # Upstox may return additional fields; do not pass them downstream.
+                valid.append([row[0], row[1], row[2], row[3], row[4], row[5]])
+            except (TypeError, ValueError, IndexError):
+                continue
+        valid.sort(key=lambda row: datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")))
+        return valid or None
+
+    def resolve_index_future(self, symbol: str, force: bool = False) -> dict[str, Any] | None:
+        """Resolve the nearest active Upstox index future.
+
+        IMPORTANT:
+        Upstox instrument_key values are not Angel One exchange tokens.
+        This resolver obtains the real Upstox key from Instrument Search.
+        """
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return None
+
+        now = time.monotonic()
+        cached = getattr(self, "_future_resolution_cache", {}).get(symbol)
+        if not force and cached and (now - cached.get("ts", 0.0)) < 900:
+            return cached.get("data")
+
+        today = datetime.now().date()
+
+        response = self._get(
+            "https://api.upstox.com/v2/instruments/search",
+            params={
+                "query": symbol,
+                "segment": "FO",
+                "instrument_type": "FUT",
+                "page_number": 1,
+                "records_per_page": 50,
+            },
+        )
+
+        rows = response.get("data", []) if isinstance(response, dict) else []
+        candidates = []
+
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+
+            instrument_type = str(row.get("instrument_type") or "").upper()
+            segment = str(row.get("segment") or "").upper()
+            underlying = str(row.get("underlying_symbol") or "").upper()
+
+            if instrument_type != "FUT":
+                continue
+            if segment not in {"NSE_FO", "BSE_FO"}:
+                continue
+            if underlying != symbol:
+                continue
+
+            underlying_type = str(row.get("underlying_type") or "").upper()
+            if underlying_type and underlying_type != "INDEX":
+                continue
+
+            expiry_raw = row.get("expiry")
+            if not expiry_raw:
+                continue
+
+            try:
+                expiry = datetime.fromisoformat(
+                    str(expiry_raw).replace("Z", "+00:00")
+                ).date()
+            except ValueError:
+                try:
+                    expiry = datetime.strptime(
+                        str(expiry_raw)[:10], "%Y-%m-%d"
+                    ).date()
+                except ValueError:
+                    continue
+
+            if expiry < today:
+                continue
+
+            key = str(row.get("instrument_key") or "").strip()
+            if not key:
+                continue
+
+            candidates.append((expiry, row))
+
+        if not candidates:
+            print(f"[UPSTOX] No active index future found for {symbol}")
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        expiry, row = candidates[0]
+
+        data = {
+            "symbol": symbol,
+            "instrument_key": str(row.get("instrument_key")),
+            "expiry": expiry.isoformat(),
+            "trading_symbol": str(
+                row.get("trading_symbol")
+                or row.get("name")
+                or row.get("instrument_key")
+            ),
+            "segment": str(row.get("segment") or ""),
+            "lot_size": row.get("lot_size"),
+        }
+
+        if not hasattr(self, "_future_resolution_cache"):
+            self._future_resolution_cache = {}
+        self._future_resolution_cache[symbol] = {
+            "ts": now,
+            "data": data,
+        }
+
+        print(
+            f"[UPSTOX] INDEX FUTURE {symbol}: "
+            f"{data['instrument_key']} "
+            f"expiry={data['expiry']} "
+            f"symbol={data['trading_symbol']}"
+        )
+        return data
+
+    def get_futures_candles(
+        self, symbol: str, interval_minutes: int = 5
+    ) -> tuple[list[list[Any]] | None, dict[str, Any] | None]:
+        """Fetch candles for the nearest active index future."""
+        future = self.resolve_index_future(symbol)
+        if not future:
+            return None, None
+
+        instrument_key = future["instrument_key"]
+        today = datetime.now().date()
+        from_date = today - timedelta(days=15)
+
+        encoded = quote(str(instrument_key), safe="")
+
+        response = self._get(
+            f"{UPSTOX_BASE_URL}/historical-candle/"
+            f"{encoded}/minutes/{int(interval_minutes)}/"
+            f"{today.isoformat()}/{from_date.isoformat()}"
+        )
+
+        candles = None
+        if isinstance(response, dict):
+            data = response.get("data")
+            if isinstance(data, dict):
+                candles = data.get("candles")
+
+        normalized = self._normalize_candles(candles)
+
+        if not normalized:
+            print(
+                f"[UPSTOX] No futures candles for "
+                f"{symbol} {instrument_key}"
+            )
+            return None, future
+
+        return normalized, future
+
+    def get_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
+        """Return multi-day history plus today's intraday candles, merged by timestamp."""
+        if not self.available():
+            return None
+        instrument_key = self.instrument_keys.get(symbol.upper())
+        if not instrument_key:
+            print(f"[UPSTOX] No instrument mapping for {symbol}; skipping fallback.")
+            return None
+        interval = int(interval_minutes)
+        if not 1 <= interval <= 300:
+            raise ValueError("interval_minutes must be between 1 and 300")
+        encoded_key = quote(instrument_key, safe="")
+        today = datetime.now().date()
+        from_date = today - timedelta(days=UPSTOX_HISTORICAL_LOOKBACK_DAYS)
+
+        historical_url = f"{UPSTOX_BASE_URL}/historical-candle/{encoded_key}/minutes/{interval}/{today.isoformat()}/{from_date.isoformat()}"
+        historical_payload = self._get(historical_url)
+        historical = historical_payload.get("data", {}).get("candles") if historical_payload else None
+        merged_rows = self._normalize_candles(historical) or []
+
+        # Today's intraday endpoint supplies the freshest current-session candles.
+        intraday_url = f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/minutes/{interval}"
+        intraday_payload = self._get(intraday_url)
+        intraday = intraday_payload.get("data", {}).get("candles") if intraday_payload else None
+        merged_rows.extend(self._normalize_candles(intraday) or [])
+
+        deduped: dict[str, list[Any]] = {}
+        for row in merged_rows:
+            try:
+                ts = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            except (TypeError, ValueError, IndexError):
+                continue
+            deduped[ts.isoformat()] = row
+        normalized = sorted(deduped.values(), key=lambda row: datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")))
+        if normalized:
+            print(f"[UPSTOX] Historical fallback returned {len(normalized)} {interval}-minute candles for {symbol} (lookback={UPSTOX_HISTORICAL_LOOKBACK_DAYS}d).")
+        return normalized or None
+
+    # Compatibility API used by diagnostics/legacy callers.
+    def get_historical_candles(self, symbol: str, interval_minutes: int = 5) -> list[list[Any]] | None:
+        """Backward-compatible alias for :meth:`get_candles`."""
+        return self.get_candles(symbol, interval_minutes=interval_minutes)
+
+    def get_option_chain(self, symbol: str, expiry: str | None = None) -> list[dict[str, Any]] | None:
+        if not self.available():
+            return None
+
+        underlying_key = self.instrument_keys.get(symbol.upper())
+        if not underlying_key:
+            print(f"[UPSTOX] No underlying instrument mapping for {symbol}.")
+            return None
+
+        # Upstox option-chain requires an actual expiry date (YYYY-MM-DD).
+        # Resolve the legacy/default "current_week" request from the
+        # currently available option contracts instead of skipping the chain.
+        resolved_expiry = None if not expiry or expiry == "current_week" else str(expiry)
+
+        if resolved_expiry is None:
+            contracts_payload = self._get(
+                f"{UPSTOX_V2_BASE_URL}/option/contract",
+                {"instrument_key": underlying_key},
+            )
+            contracts = contracts_payload.get("data") if contracts_payload else None
+
+            if isinstance(contracts, list):
+                expiries = sorted(
+                    {
+                        str(row.get("expiry"))
+                        for row in contracts
+                        if isinstance(row, dict)
+                        and row.get("expiry")
+                        and len(str(row.get("expiry"))) == 10
+                        and str(row.get("expiry"))[4] == "-"
+                        and str(row.get("expiry"))[7] == "-"
+                    }
+                )
+                if expiries:
+                    resolved_expiry = expiries[0]
+
+            if not resolved_expiry:
+                print(
+                    f"[UPSTOX] Option chain skipped for {symbol}: "
+                    "could not resolve an available YYYY-MM-DD expiry."
+                )
+                return None
+
+            print(
+                f"[UPSTOX] Resolved {symbol} option-chain expiry "
+                f"{resolved_expiry} from option contracts."
+            )
+
+        payload = self._get(
+            f"{UPSTOX_V2_BASE_URL}/option/chain",
+            {
+                "instrument_key": underlying_key,
+                "expiry_date": resolved_expiry,
+            },
+        )
+
+        data = payload.get("data") if payload else None
+        return data if isinstance(data, list) else None
+
+    def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
+        if not self.available() or not instrument_key or "|" not in instrument_key:
+            return None
+        payload = self._get(f"{UPSTOX_V2_BASE_URL}/market-quote/quotes", {"instrument_key": instrument_key})
+        data = payload.get("data") if payload else None
+        if not isinstance(data, dict) or not data:
+            return None
+        quote = next(iter(data.values()))
+        return quote if isinstance(quote, dict) else None
+
+    def get_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return a compact validated Upstox market snapshot for integrity checks."""
+        symbol = str(symbol).upper().strip()
+
+        if not self.available():
+            raise RuntimeError("Upstox market data is unavailable")
+
+        instrument_key = self.instrument_keys.get(symbol)
+        if not instrument_key:
+            raise RuntimeError(
+                f"No Upstox instrument key configured for {symbol}"
+            )
+
+        candles = self.get_candles(symbol, interval_minutes=5)
+        if not candles:
+            raise RuntimeError(f"No Upstox 5m candles returned for {symbol}")
+
+        candle = candles[-1]
+        if not isinstance(candle, (list, tuple)) or len(candle) < 5:
+            raise RuntimeError(f"Invalid Upstox candle returned for {symbol}")
+
+        timestamp_raw = candle[0]
+        close = float(candle[4])
+
+        timestamp = datetime.fromisoformat(
+            str(timestamp_raw).replace("Z", "+00:00")
+        )
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=IST)
+        else:
+            timestamp = timestamp.astimezone(IST)
+
+        quote = self.get_full_quote(instrument_key) or {}
+
+        ltp = None
+        for key in ("last_price", "last_traded_price", "ltp"):
+            value = quote.get(key)
+            if value is not None:
+                try:
+                    ltp = float(value)
+                    break
+                except (TypeError, ValueError):
+                    pass
+
+        if ltp is None:
+            raise RuntimeError(f"No Upstox LTP returned for {symbol}")
+
+        age = (datetime.now(IST) - timestamp).total_seconds()
+
+        return {
+            "provider": "upstox",
+            "symbol": symbol,
+            "instrument_key": instrument_key,
+            "ltp": ltp,
+            "closed_5m_close": close,
+            "closed_5m_timestamp": timestamp.isoformat(),
+            "candle_age_seconds": round(age, 1),
+        }
+
+    def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
+        chain = self.get_option_chain(symbol)
+        if not chain or option_type not in {"CE", "PE"}:
+            return None
+
+        candidates = []
+
+        for row in chain:
+            try:
+                strike = float(row.get("strike_price"))
+                option = row.get(
+                    "call_options" if option_type == "CE" else "put_options"
+                ) or {}
+
+                instrument_key = str(option.get("instrument_key") or "").strip()
+                market = option.get("market_data") or {}
+                greeks = option.get("option_greeks") or {}
+
+                ltp = float(market.get("ltp", 0) or 0)
+                bid = float(market.get("bid_price", 0) or 0)
+                ask = float(market.get("ask_price", 0) or 0)
+                volume = float(market.get("volume", 0) or 0)
+                oi = float(market.get("oi", 0) or 0)
+
+                if (
+                    not instrument_key
+                    or ltp <= 0
+                    or ltp > max_premium
+                    or strike <= 0
+                ):
+                    continue
+
+                valid_book = bid > 0 and ask > 0 and ask >= bid
+
+                spread_pct = (
+                    ((ask - bid) / ltp * 100.0)
+                    if valid_book and ltp > 0
+                    else 999.0
+                )
+
+                if spread_pct > 5.0:
+                    continue
+
+                avg_price = float(
+                    market.get("average_price")
+                    or market.get("avg_price")
+                    or market.get("average_traded_price")
+                    or 0
+                )
+
+                slippage_pct = (
+                    ((ask - ltp) / ltp * 100.0)
+                    if ask > 0 and ltp > 0 and ask >= ltp
+                    else 999.0
+                )
+
+                above_average = avg_price > 0 and ltp > avg_price
+
+                total_buy_quantity = float(
+                    market.get("total_buy_quantity")
+                    or market.get("tot_buy_quantity")
+                    or 0
+                )
+                total_sell_quantity = float(
+                    market.get("total_sell_quantity")
+                    or market.get("tot_sell_quantity")
+                    or 0
+                )
+
+                execution_quality = (
+                    1 if valid_book else 0,
+                    1 if above_average else 0,
+                    -slippage_pct,
+                    -spread_pct,
+                    volume,
+                    oi,
+                    -abs(strike - float(spot)),
+                )
+
+                # IMPORTANT:
+                # Carry every execution-quality field with the candidate.
+                # Never depend on loop variables after sorting.
+                candidates.append(
+                    {
+                        "execution_quality": execution_quality,
+                        "spread_pct": spread_pct,
+                        "slippage_pct": slippage_pct,
+                        "row": row,
+                        "option": option,
+                        "ltp": ltp,
+                        "bid": bid,
+                        "ask": ask,
+                        "volume": volume,
+                        "oi": oi,
+                        "avg_price": avg_price,
+                        "buy_quantity": total_buy_quantity,
+                        "sell_quantity": total_sell_quantity,
+                        "greeks": greeks,
+                    }
+                )
+
+            except (TypeError, ValueError):
+                continue
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: item["execution_quality"],
+            reverse=True,
+        )
+
+        selected = candidates[0]
+
+        row = selected["row"]
+        option = selected["option"]
+        greeks = selected["greeks"]
+
+        instrument_key = str(option.get("instrument_key") or "").strip()
+
+        exchange = (
+            "NFO"
+            if instrument_key.startswith("NSE_FO|")
+            else "BFO"
+            if instrument_key.startswith("BSE_FO|")
+            else ""
+        )
+
+        strike = float(row.get("strike_price"))
+        ltp = float(selected["ltp"])
+        bid = float(selected["bid"])
+        ask = float(selected["ask"])
+        volume = float(selected["volume"])
+        oi = float(selected["oi"])
+        avg_price = float(selected["avg_price"])
+        total_buy_quantity = float(selected["buy_quantity"])
+        total_sell_quantity = float(selected["sell_quantity"])
+        spread_pct = float(selected["spread_pct"])
+        slippage_pct = float(selected["slippage_pct"])
+
+        lot_size = option.get("lot_size") or row.get("lot_size") or 0
+        contract_symbol = (
+            option.get("trading_symbol")
+            or row.get("trading_symbol")
+            or ""
+        )
+
+        # Contract identity comes from the selected chain row.
+        contract_expiry = str(
+            row.get("expiry")
+            or row.get("expiry_date")
+            or ""
+        )
+
+        # Upstox option-chain legs do not reliably expose lot size /
+        # trading symbol. Enrich the selected contract only.
+        if not lot_size and instrument_key:
+            contracts_payload = self._get(
+                f"{UPSTOX_V2_BASE_URL}/option/contract",
+                {"instrument_key": self.instrument_keys[symbol.upper()]},
+            )
+
+            contracts = (
+                contracts_payload.get("data")
+                if contracts_payload
+                else None
+            )
+
+            if isinstance(contracts, list):
+                for contract_row in contracts:
+                    if not isinstance(contract_row, dict):
+                        continue
+
+                    if (
+                        str(contract_row.get("instrument_key", ""))
+                        != instrument_key
+                    ):
+                        continue
+
+                    contract_expiry_api = str(
+                        contract_row.get("expiry")
+                        or contract_row.get("expiry_date")
+                        or ""
+                    )
+
+                    if (
+                        contract_expiry
+                        and contract_expiry_api
+                        and contract_expiry_api != contract_expiry
+                    ):
+                        continue
+
+                    lot_size = contract_row.get("lot_size") or 0
+                    contract_symbol = (
+                        contract_row.get("trading_symbol")
+                        or contract_symbol
+                    )
+                    break
+
+        # Refresh execution-quality fields from the authoritative
+        # live quote endpoint for the SELECTED instrument.
+        #
+        # Option chain = contract discovery / Greeks.
+        # Live quote  = executable bid/ask/volume/OI/average/quantities.
+        live_quote = None
+        if instrument_key and "|" in instrument_key:
+            try:
+                live_quote = self.get_full_quote(instrument_key)
+            except Exception:
+                live_quote = None
+
+        if isinstance(live_quote, dict):
+            live_ltp = float(live_quote.get("last_price", 0) or 0)
+            live_bid = float(live_quote.get("bid_price", 0) or 0)
+            live_ask = float(live_quote.get("ask_price", 0) or 0)
+
+            depth = live_quote.get("depth") or {}
+            buys = depth.get("buy") or []
+            sells = depth.get("sell") or []
+
+            if buys:
+                try:
+                    live_bid = float(buys[0].get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+
+            if sells:
+                try:
+                    live_ask = float(sells[0].get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+
+            if live_ltp > 0:
+                ltp = live_ltp
+
+            if live_bid > 0 and live_ask >= live_bid:
+                bid = live_bid
+                ask = live_ask
+                spread_pct = (
+                    (ask - bid) / ltp * 100.0
+                    if ltp > 0
+                    else 999.0
+                )
+                slippage_pct = (
+                    (ask - ltp) / ltp * 100.0
+                    if ltp > 0 and ask >= ltp
+                    else 999.0
+                )
+
+            volume = float(
+                live_quote.get("volume", volume) or volume
+            )
+            oi = float(
+                live_quote.get("oi", oi) or oi
+            )
+            avg_price = float(
+                live_quote.get("average_price", avg_price)
+                or avg_price
+            )
+            total_buy_quantity = float(
+                live_quote.get(
+                    "total_buy_quantity",
+                    total_buy_quantity,
+                )
+                or total_buy_quantity
+            )
+            total_sell_quantity = float(
+                live_quote.get(
+                    "total_sell_quantity",
+                    total_sell_quantity,
+                )
+                or total_sell_quantity
+            )
+
+            net_change = float(
+                live_quote.get("net_change", 0)
+                or 0
+            )
+
+            previous_close = float(
+                (ltp - net_change)
+                if ltp > 0 and net_change != 0
+                else live_quote.get("close_price", 0) or 0
+            )
+
+            percent_change = (
+                (net_change / previous_close) * 100.0
+                if previous_close > 0
+                else 0.0
+            )
+
+            timestamp = (
+                live_quote.get("timestamp")
+                or live_quote.get("last_trade_time")
+            )
+
+            data_source = "upstox_live_quote"
+
+        else:
+            net_change = float(
+                option.get("market_data", {}).get("net_change", 0)
+                or option.get("market_data", {}).get("netChange", 0)
+                or 0
+            )
+
+            previous_close = float(
+                option.get("market_data", {}).get(
+                    "previous_close_price",
+                    0,
+                )
+                or option.get("market_data", {}).get(
+                    "prev_close_price",
+                    0,
+                )
+                or option.get("market_data", {}).get(
+                    "close_price",
+                    0,
+                )
+                or 0
+            )
+
+            percent_change = float(
+                option.get("market_data", {}).get(
+                    "percent_change",
+                    0,
+                )
+                or option.get("market_data", {}).get(
+                    "percentChange",
+                    0,
+                )
+                or 0
+            )
+
+            if percent_change == 0 and previous_close > 0:
+                percent_change = (
+                    (ltp - previous_close)
+                    / previous_close
+                ) * 100.0
+
+            timestamp = option.get("market_data", {}).get("timestamp")
+            data_source = "upstox_option_chain"
+
+        option_snapshot = {
+            "instrument_key": instrument_key,
+            "exchange": exchange,
+            "token": instrument_key,
+            "contract": contract_symbol,
+            "expiry": contract_expiry,
+            "strike": strike,
+            "option_type": option_type,
+            "ltp": ltp,
+            "best_bid": bid,
+            "best_ask": ask,
+            "spread_pct": round(spread_pct, 3),
+            "slippage_pct": round(slippage_pct, 3),
+            "volume": volume,
+            "open_interest": oi,
+            "oi": oi,
+            "avg_price": avg_price,
+            "average_price": avg_price,
+            "net_change": net_change,
+            "percent_change": percent_change,
+            "buy_quantity": total_buy_quantity,
+            "sell_quantity": total_sell_quantity,
+            "iv": float(greeks.get("iv", 0) or 0),
+            "delta": float(greeks.get("delta", 0) or 0),
+            "gamma": float(greeks.get("gamma", 0) or 0),
+            "theta": float(greeks.get("theta", 0) or 0),
+            "vega": float(greeks.get("vega", 0) or 0),
+            "timestamp": timestamp,
+            "data_source": data_source,
+        }
+
+        return {
+            "status": "CONTRACT VALID",
+            "option_type": option_type,
+            "contract": contract_symbol,
+            "exchange": exchange,
+            "token": instrument_key,
+            "expiry": contract_expiry,
+            "strike": strike,
+            "lotsize": int(lot_size),
+            "ltp": ltp,
+            "spread_pct": round(spread_pct, 3),
+            "slippage_pct": round(slippage_pct, 3),
+            "volume": volume,
+            "oi": oi,
+            "avg_price": avg_price,
+            "net_change": net_change,
+            "percent_change": percent_change,
+            "best_bid": bid,
+            "best_ask": ask,
+            "buy_quantity": total_buy_quantity,
+            "sell_quantity": total_sell_quantity,
+            "iv": option_snapshot["iv"],
+            "delta": option_snapshot["delta"],
+            "gamma": option_snapshot["gamma"],
+            "theta": option_snapshot["theta"],
+            "vega": option_snapshot["vega"],
+            "option_snapshot": option_snapshot,
+            "data_source": data_source,
+        }
+
+_upstox = UpstoxMarketData()
+
+
+def get_upstox_client() -> UpstoxMarketData:
+    return _upstox
