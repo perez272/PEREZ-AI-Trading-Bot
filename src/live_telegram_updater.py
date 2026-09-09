@@ -75,33 +75,52 @@ def _compact_option_id(symbol=None, option_type=None, expiry=None, contract=None
 def _event_details(events):
     if not events:
         return "No persisted events yet."
-    lines = []
-    for idx, event in enumerate(events[-3:], 1):
-        if not isinstance(event, dict):
-            lines.append(f"{idx}. {event}")
-            continue
-        event_type = event.get("type", "EVENT")
-        lines.append(f"{idx}. {event_type}")
-        compact_id = _compact_option_id(
-            event.get("symbol"), event.get("option_type"), event.get("expiry"), event.get("contract")
-        )
-        if any(event.get(k) not in (None, "", []) for k in ("symbol", "option_type", "expiry", "contract")):
-            lines.append(f"   ID: {compact_id}")
-        preferred = (
-            "signal", "direction", "price", "ltp", "move_pct", "surge_pct", "score", "confidence", "reason",
-            "decision", "status", "source", "timestamp", "threshold", "volume", "oi", "iv", "delta", "gamma",
-            "theta", "vega", "volume_ratio", "spread_pct", "move_1m_pct", "move_3m_pct", "move_5m_pct",
-        )
-        used = {"symbol", "option_type", "expiry", "contract"}
-        for key in preferred:
-            if key in event and event[key] not in (None, "", []):
-                lines.append(f"   {key}: {_fmt_value(event[key])}")
-                used.add(key)
-        extra = [k for k in event if k not in used and k != "type" and event[k] not in (None, "", [])]
-        for key in extra[:6]:
-            lines.append(f"   {key}: {_fmt_value(event[key])}")
-    return "\n".join(lines)
 
+    # Use the latest 50 genuine Tier-1 events, then collapse repeated
+    # threshold crossings for the same option contract.
+    unique = {}
+    for event in events[-50:]:
+        if not isinstance(event, dict):
+            continue
+        symbol = str(event.get("symbol") or "").upper()
+        option_type = str(event.get("option_type") or "").upper()
+        expiry = str(event.get("expiry") or "").upper()
+        strike = event.get("strike")
+        contract = str(event.get("contract") or "").upper()
+        key = (symbol, expiry, str(strike or ""), option_type, contract)
+        unique[key] = event
+
+    if not unique:
+        return "No structured Tier-1 events yet."
+
+    lines = [
+        f"Unique contracts: {len(unique)} (from latest {min(len(events), 50)} events)",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for idx, event in enumerate(unique.values(), 1):
+        symbol = str(event.get("symbol") or "?").upper()
+        expiry = str(event.get("expiry") or "?").upper()
+        strike = event.get("strike")
+        option_type = str(event.get("option_type") or "?").upper()
+        move = event.get("move_pct")
+        ltp = event.get("ltp")
+        volume = event.get("volume")
+        oi = event.get("oi")
+        threshold = event.get("threshold")
+
+        move_text = f"{float(move):+.2f}%" if isinstance(move, (int, float)) else str(move or "?")
+        ltp_text = _fmt_value(ltp) if ltp not in (None, "") else "?"
+        vol_text = _fmt_value(volume) if volume not in (None, "") else "?"
+        oi_text = _fmt_value(oi) if oi not in (None, "") else "?"
+        threshold_text = _fmt_value(threshold) if threshold not in (None, "") else "?"
+
+        lines.append(
+            f"{idx}. {symbol} | {expiry} | {strike if strike not in (None, "") else "?"} {option_type} | "
+            f"{move_text} | LTP {ltp_text} | V {vol_text} | OI {oi_text} | T{threshold_text}"
+        )
+
+    return "\n".join(lines)
 
 def _read_heartbeat():
     try:

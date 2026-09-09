@@ -55,6 +55,23 @@ def record_cycle(*, observations: int = 0, rejections: int = 0, lessons_events: 
     _persist(data)
 
 
+def _latest_tier1_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Return the latest genuine Tier-1 move events for Telegram evidence."""
+    try:
+        with sqlite3.connect("data/memory/tier1_option_moves.sqlite3") as db:
+            rows = db.execute("SELECT threshold, features_json, observed_ts FROM move_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        events = []
+        for threshold, features_json, observed_ts in rows:
+            features = json.loads(features_json or "{}")
+            event = dict(features)
+            event["type"] = "THRESHOLD"
+            event["threshold"] = threshold
+            event["observed_ts"] = observed_ts
+            events.append(event)
+        return events
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return []
+
 def _historical_trade_stats() -> tuple[int, float]:
     if not TRADES_PATH.exists():
         return 0, 0.0
@@ -111,5 +128,5 @@ def get_learning_status() -> dict[str, Any]:
         "outcome_learning": "READY" if risk["closed_trades"] else "WAITING_FOR_FIRST_CLOSED_TRADE",
         "pattern_learning": "READY" if observations else "WAITING_FOR_OBSERVATIONS",
         "last_observation": last_observation,
-        "last_events": data.get("last_events", []),
+        "last_events": _latest_tier1_events(),
     }
