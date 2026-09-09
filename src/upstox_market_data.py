@@ -157,6 +157,49 @@ def get_latest_closed_candle(instrument_key: str, interval_minutes: int = 5) -> 
     return row
 
 
+def get_session_vwap(instrument_key: str, interval_minutes: int = 5) -> float:
+    """Calculate today's session VWAP from closed Upstox OHLCV candles."""
+    candles = get_intraday_candles(instrument_key, interval_minutes)
+    if not candles:
+        raise RuntimeError(f"No Upstox candles for {instrument_key}")
+
+    now = datetime.now(IST)
+    bucket_minute = (now.minute // interval_minutes) * interval_minutes
+    current_bucket = now.replace(minute=bucket_minute, second=0, microsecond=0)
+    latest_closed = current_bucket - timedelta(minutes=interval_minutes)
+    session_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    pv_total = 0.0
+    volume_total = 0.0
+
+    for row in candles:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            ts = _parse_timestamp(row[0]).replace(second=0, microsecond=0)
+            open_price = float(row[1])
+            high = float(row[2])
+            low = float(row[3])
+            close = float(row[4])
+            volume = float(row[5])
+        except (TypeError, ValueError, IndexError):
+            continue
+
+        if ts.date() != now.date() or ts < session_start or ts > latest_closed:
+            continue
+        if (open_price <= 0 or high <= 0 or low <= 0 or close <= 0 or volume <= 0 or high < max(open_price, low, close) or low > min(open_price, high, close)):
+            continue
+
+        typical_price = (high + low + close) / 3.0
+        pv_total += typical_price * volume
+        volume_total += volume
+
+    if volume_total <= 0:
+        raise RuntimeError(f"No usable session volume for {instrument_key}")
+
+    return pv_total / volume_total
+
+
 def get_snapshot(symbol: str) -> dict[str, Any]:
     symbol = str(symbol).upper().strip()
     key = instrument_keys().get(symbol)

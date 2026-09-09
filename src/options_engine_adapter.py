@@ -217,6 +217,17 @@ def enrich_with_live_option_data(candidate: Dict[str, Any]) -> Dict[str, Any]:
             result["data_source"] = source
             return result
         _apply_quote(result, quote)
+        if result.get("avg_price", 0.0) <= 0 and source in {"upstox", "upstox_option_chain", "option_chain_handoff"}:
+            try:
+                from src.upstox_market_data import get_session_vwap
+                session_vwap = get_session_vwap(token, 5)
+                if session_vwap > 0:
+                    result["session_vwap"] = session_vwap
+                    result["avg_price"] = session_vwap
+                    result["vwap_source"] = "upstox_option_candles"
+            except Exception as exc:
+                result["vwap_source"] = "unavailable"
+                result["vwap_error"] = str(exc)
         ltp = _num(result.get("ltp"))
         if ltp <= 0:
             result["live_data_error"] = "INVALID_LTP"
