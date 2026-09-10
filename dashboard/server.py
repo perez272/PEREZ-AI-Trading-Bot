@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-import json, os, shutil, sqlite3, subprocess, time
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path('/home/ubuntu/PEREZ-AI-Trading-Bot')
 CORE = ROOT / 'data/memory/perez_ai_memory.db'
 TIER1 = ROOT / 'data/memory/tier1_option_moves.sqlite3'
+INDEX = ROOT / 'dashboard/index.html'
 
 
 def q(db, sql, args=(), default=None):
     try:
         with sqlite3.connect(db, timeout=2) as c:
             c.row_factory = sqlite3.Row
-            rows = c.execute(sql, args).fetchall()
-            return [dict(row) for row in rows]
+            return [dict(r) for r in c.execute(sql, args).fetchall()]
     except Exception:
         return default if default is not None else []
 
 
 def count(db, table):
     rows = q(db, f'SELECT COUNT(*) AS n FROM {table}', default=[{'n': 0}])
-    return rows[0]['n'] if rows else 0
+    return int(rows[0]['n']) if rows else 0
 
 
 def svc(name):
@@ -54,6 +59,11 @@ def state():
     }
     disk = shutil.disk_usage(ROOT)
 
+    early = q(TIER1, 'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 30')
+    moves = q(TIER1, 'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 30')
+    outcomes = q(CORE, 'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 20')
+    rejections = q(CORE, 'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 20')
+
     return {
         'time': time.strftime('%Y-%m-%d %H:%M:%S IST'),
         'services': services,
@@ -81,43 +91,47 @@ def state():
             },
         },
         'latest': {
-            'outcome': (q(CORE, 'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 1') or [None])[0],
-            'early_event': (q(TIER1, 'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 1') or [None])[0],
+            'early_event': early[0] if early else None,
+            'outcome': outcomes[0] if outcomes else None,
         },
         'recent': {
-            'outcomes': q(CORE, 'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 20'),
-            'rejections': q(CORE, 'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 20'),
-            'early_events': q(TIER1, 'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 30'),
-            'move_events': q(TIER1, 'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 30'),
+            'outcomes': outcomes,
+            'rejections': rejections,
+            'early_events': early,
+            'move_events': moves,
         },
     }
 
 
-HTML = (ROOT / 'dashboard/index.html').read_text()
-
-
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
+    def _send(self, status, content_type, body):
+        data = body.encode('utf-8') if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_GET(self):
-        if self.path.split('?')[0] in ('/api', '/api/state'):
-            body = json.dumps(state(), default=str).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        path = self.path.split('?', 1)[0]
+        if path in ('/api', '/api/state'):
+            self._send(200, 'application/json; charset=utf-8', json.dumps(state(), default=str))
             return
+        if path == '/' or path == '/index.html':
+            try:
+                self._send(200, 'text/html; charset=utf-8', INDEX.read_text(encoding='utf-8'))
+            except Exception as exc:
+                self._send(500, 'text/plain; charset=utf-8', f'index error: {exc}')
+            return
+        self._send(404, 'text/plain; charset=utf-8', 'Not found')
 
-        body = HTML.encode()
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def log_message(self, fmt, *args):
+        return
 
 
-ThreadingHTTPServer(('127.0.0.1', 8787), Handler).serve_forever()
+if __name__ == '__main__':
+    port = int(os.getenv('PEREZ_DASHBOARD_PORT', '8787'))
+    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    print(f'PEREZ dashboard listening on 127.0.0.1:{port}', flush=True)
+    server.serve_forever()
