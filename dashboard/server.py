@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# PEREZ-AI Command Center dashboard server
 import json,os,shutil,sqlite3,subprocess,sys,time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
@@ -48,6 +48,8 @@ class Handler(BaseHTTPRequestHandler):
         data=body.encode('utf-8') if isinstance(body,str) else body; self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
         path=self.path.split('?',1)[0]
+        if path=='/api/me':
+            user=str(self.headers.get('X-Remote-User','')).strip(); role='admin' if user=='perez' else 'viewer'; self._send(200,'application/json; charset=utf-8',json.dumps({'ok':True,'user':user,'role':role})); return
         if path in ('/api','/api/state'):self._send(200,'application/json; charset=utf-8',json.dumps(state(),default=str));return
         assets={'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
         if path in assets:
