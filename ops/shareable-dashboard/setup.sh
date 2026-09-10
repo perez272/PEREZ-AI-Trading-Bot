@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # Usage:
+#   sudo bash ops/shareable-dashboard/setup.sh
+# Or use your own DNS hostname:
 #   sudo DOMAIN=dashboard.example.com ADMIN_USER=perez bash ops/shareable-dashboard/setup.sh
-# The script will securely prompt for the dashboard password.
+# With no DOMAIN, the script creates an HTTPS hostname from the EC2 public IPv4 via nip.io.
 # The Python dashboard remains bound to 127.0.0.1:8787. Nginx is the only public entrypoint.
 # This script does NOT change trading/risk settings and refuses to continue if live orders are enabled.
 
@@ -14,7 +16,16 @@ REPO="${REPO:-/home/ubuntu/PEREZ-AI-Trading-Bot}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 
 if [[ $EUID -ne 0 ]]; then echo "Run with sudo."; exit 1; fi
-if [[ -z "$DOMAIN" || "$DOMAIN" == *" "* || "$DOMAIN" == *"/"* ]]; then echo "ERROR: set DOMAIN to your real DNS hostname, e.g. DOMAIN=dashboard.example.com"; exit 2; fi
+
+# If no custom domain is supplied, derive a stable hostname from the current public IPv4.
+if [[ -z "$DOMAIN" ]]; then
+  PUBLIC_IP="$(curl -4fsS --max-time 10 https://api.ipify.org)"
+  [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'ERROR: could not determine EC2 public IPv4'; exit 2; }
+  DOMAIN="${PUBLIC_IP//./-}.nip.io"
+  echo "No DOMAIN supplied; using $DOMAIN"
+fi
+if [[ "$DOMAIN" == *" "* || "$DOMAIN" == *"/"* ]]; then echo "ERROR: invalid DOMAIN"; exit 2; fi
+
 if [[ -z "$ADMIN_PASSWORD" ]]; then
   read -r -s -p "Create dashboard password (14+ chars): " ADMIN_PASSWORD; echo
 fi
@@ -41,7 +52,7 @@ nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
 
-# Obtain a browser-trusted certificate. DNS for DOMAIN must already point to this EC2 public IP.
+# Obtain a browser-trusted certificate. The hostname must resolve to this EC2 and ports 80/443 must be reachable.
 if [[ -n "$CERTBOT_EMAIL" ]]; then
   certbot --nginx --non-interactive --agree-tos --email "$CERTBOT_EMAIL" --redirect -d "$DOMAIN"
 else
@@ -71,4 +82,4 @@ printf 'USER: %s\n' "$ADMIN_USER"
 printf 'Password: the value you entered during setup\n'
 printf 'Python dashboard remains private at 127.0.0.1:8787\n'
 printf 'PAPER_MODE=true and ORDERS_ENABLED=false verified\n'
-printf 'Next: ensure EC2 Security Group allows TCP 80/443 and does NOT allow 8787.\n'
+printf 'IMPORTANT: EC2 Security Group must allow TCP 80/443 and must NOT allow 8787.\n'
