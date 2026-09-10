@@ -4,11 +4,15 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path('/home/ubuntu/PEREZ-AI-Trading-Bot')
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 CORE = ROOT / 'data/memory/perez_ai_memory.db'
 TIER1 = ROOT / 'data/memory/tier1_option_moves.sqlite3'
 INDEX = ROOT / 'dashboard/index.html'
