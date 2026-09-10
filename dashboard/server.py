@@ -62,6 +62,7 @@ def state():
         'perez-ai.service': svc('perez-ai.service'),
         'perez-telegram-updater.service': svc('perez-telegram-updater.service'),
         'perez-tier1-option-observer.service': svc('perez-tier1-option-observer.service'),
+        'perez-surge-trade-bridge.service': svc('perez-surge-trade-bridge.service'),
         'perez-dashboard.service': svc('perez-dashboard.service'),
     }
     disk = shutil.disk_usage(ROOT)
