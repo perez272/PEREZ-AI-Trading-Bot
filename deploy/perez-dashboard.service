@@ -1,0 +1,19 @@
+[Unit]
+Description=PEREZ AI Read-Only Live Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+Environment=PEREZ_DASHBOARD_HOST=127.0.0.1
+Environment=PEREZ_DASHBOARD_PORT=8787
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.perez_dashboard
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
