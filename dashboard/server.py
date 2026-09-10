@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 CORE = ROOT / 'data/memory/perez_ai_memory.db'
 TIER1 = ROOT / 'data/memory/tier1_option_moves.sqlite3'
 INDEX = ROOT / 'dashboard/index.html'
+ADVANCED = ROOT / 'dashboard/advanced.js'
 
 from src.dashboard_control import append_audit, get_state, recent_audit, set_controls
 
@@ -103,9 +104,19 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/api', '/api/state'):
             self._send(200, 'application/json; charset=utf-8', json.dumps(state(), default=str))
             return
+        if path == '/advanced.js':
+            try:
+                self._send(200, 'application/javascript; charset=utf-8', ADVANCED.read_text(encoding='utf-8'))
+            except Exception as exc:
+                self._send(500, 'text/plain; charset=utf-8', f'advanced asset error: {exc}')
+            return
         if path == '/' or path == '/index.html':
             try:
-                self._send(200, 'text/html; charset=utf-8', INDEX.read_text(encoding='utf-8'))
+                html = INDEX.read_text(encoding='utf-8')
+                marker = '</body>'
+                if '/advanced.js' not in html:
+                    html = html.replace(marker, '<script src="/advanced.js"></script>'+marker)
+                self._send(200, 'text/html; charset=utf-8', html)
             except Exception as exc:
                 self._send(500, 'text/plain; charset=utf-8', f'index error: {exc}')
             return
