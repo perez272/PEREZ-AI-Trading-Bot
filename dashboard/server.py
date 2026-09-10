@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
-CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'
+CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'; PROLIVE=ROOT/'dashboard/pro_live.js'
 from src.dashboard_control import append_audit,get_state,recent_audit,set_controls
 from src.dashboard_telemetry import recent as telemetry_recent,event_proof,summary as telemetry_summary
 
@@ -30,7 +30,7 @@ def learning(outcomes,rejections,audit):
     pnls=[float(x.get('pnl') or 0) for x in outcomes]; wins=sum(1 for p in pnls if p>0); losses=sum(1 for p in pnls if p<0); flat=len(pnls)-wins-losses
     manual={}
     for a in audit:
-        k=str(a.get('action') or '');
+        k=str(a.get('action') or '')
         if k not in {'STOP_NEW_TRADES','RESUME_NEW_TRADES','PAUSE_OBSERVER','RESUME_OBSERVER','EMERGENCY_SAFE_MODE','RESUME_SAFE_MODE','RUN_HEALTH_AUDIT'}:manual[k]=manual.get(k,0)+1
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual}
 def state():
@@ -41,7 +41,8 @@ def state():
     outcomes=pick(out_raw,['id','ts','symbol','contract','signal','score','pnl','pnl_percent','exit_reason'])
     rejections=pick(rej_raw,['id','ts','symbol','score','options_score','reason'])
     latest=early[0] if early else None; proof=event_proof(latest.get('event_key')) if latest and latest.get('event_key') else {}
-    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':telemetry_summary()},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
+    tel_summary=telemetry_summary()
+    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
 class Handler(BaseHTTPRequestHandler):
     def _send(self,status,ctype,body):
         data=body.encode('utf-8') if isinstance(body,str) else body; self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
@@ -52,10 +53,15 @@ class Handler(BaseHTTPRequestHandler):
             try:self._send(200,'application/javascript; charset=utf-8',ADVANCED.read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'advanced asset error: {exc}')
             return
+        if path=='/pro_live.js':
+            try:self._send(200,'application/javascript; charset=utf-8',PROLIVE.read_text(encoding='utf-8'))
+            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'pro live asset error: {exc}')
+            return
         if path in ('/','/index.html'):
             try:
                 html=INDEX.read_text(encoding='utf-8'); marker='</body>'
                 if '/advanced.js' not in html:html=html.replace(marker,'<script src="/advanced.js"></script>'+marker)
+                if '/pro_live.js' not in html:html=html.replace(marker,'<script src="/pro_live.js"></script>'+marker)
                 self._send(200,'text/html; charset=utf-8',html)
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'index error: {exc}')
             return
