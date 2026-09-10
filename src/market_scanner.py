@@ -1,3 +1,4 @@
+from src.dashboard_control import scanner_allowed
 import json
 import os
 import tempfile

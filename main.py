@@ -1,3 +1,4 @@
+from src.dashboard_control import scanner_allowed
 import os
 import time
 from datetime import datetime, time as dt_time, timedelta
@@ -332,7 +333,11 @@ def main():
 
             write_heartbeat("scanning", capital=capital)
             try:
-                results = scan_market()
+                if not scanner_allowed():
+                    print("[SCANNER] dashboard pause active; scan skipped.")
+                    results = []
+                else:
+                    results = scan_market()
             except Exception as exc:
                 write_heartbeat("scan_error", error=str(exc), capital=capital)
                 print(f"TIER-1 MARKET SCAN FAILED — skipping this cycle: {exc}")
