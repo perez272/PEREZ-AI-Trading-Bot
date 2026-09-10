@@ -50,7 +50,7 @@ ss -lntp 2>/dev/null | sed -n '1,80p' || true
 
 printf '\n=== SECRET LOCATIONS (names only; contents never printed) ===\n'
 if [[ -d /etc/perez-ai ]]; then
-  find /etc/perez-ai -maxdepth 1 -type f -printf '%f\n' | sort
+  sudo find /etc/perez-ai -maxdepth 1 -type f -printf '%f\n' | sort
 else
   echo '/etc/perez-ai: MISSING'
 fi
