@@ -280,7 +280,7 @@ class Tier1OptionObserver:
 
     def get_pending_early_events(self, limit: int = 10) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("SELECT id,event_key,symbol,option_type,instrument_key,expiry,strike,ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,velocity,acceleration,volume_ratio,spread_pct,reasons_json,features_json,observed_ts,detection_ts FROM early_events WHERE consumed=0 ORDER BY observed_ts DESC,id DESC LIMIT ?", (max(1,int(limit)),)).fetchall()
+            rows = db.execute("SELECT id,event_key,symbol,option_type,instrument_key,expiry,strike,ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,velocity,acceleration,volume_ratio,spread_pct,reasons_json,features_json,observed_ts,detection_ts FROM early_events WHERE consumed=0 AND (julianday('now') - julianday(COALESCE(detection_ts, observed_ts))) * 86400.0 <= 60 ORDER BY observed_ts DESC,id DESC LIMIT ?", (max(1,int(limit)),)).fetchall()
         fields=("id","event_key","symbol","option_type","instrument_key","expiry","strike","ltp","score","move_1m_pct","move_3m_pct","move_5m_pct","velocity","acceleration","volume_ratio","spread_pct","reasons_json","features_json","observed_ts","detection_ts")
         out=[]
         for row in rows:

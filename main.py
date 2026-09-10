@@ -317,7 +317,7 @@ def main():
             # the normal directional index scanner. Existing capital/risk
             # gates remain authoritative.
             try:
-                if _process_pending_surge_events(capital):
+                if allowed and _process_pending_surge_events(capital):
                     time.sleep(RESCAN_DELAY_SECONDS)
                     continue
             except Exception as exc:
