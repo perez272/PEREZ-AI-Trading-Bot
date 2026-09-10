@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_CONSECUTIVE_LOSSES, MAX_DAILY_DRAWDOWN_PCT
+from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_DAILY_DRAWDOWN_PCT
 from src.trading_risk_manager import TradingRiskManager
 
 IST = ZoneInfo("Asia/Kolkata")
