@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.alternative_market_data import get_upstox_client
@@ -11,6 +14,8 @@ from src.upgrade_config import OPTION_MAX_PREMIUM
 
 
 MAX_EVENT_AGE_SECONDS = 60.0
+TIER1_DB = Path(os.getenv("TIER1_OPTION_MEMORY", "data/memory/tier1_option_moves.sqlite3"))
+CLAIM_TABLE = "surge_bridge_claims"
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -68,6 +73,28 @@ def _features(event: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _claim_event(event_id: int) -> bool:
+    """Atomically claim an event so main.py and the bridge worker cannot duplicate it."""
+    TIER1_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(TIER1_DB, timeout=5) as db:
+        db.execute(
+            f"CREATE TABLE IF NOT EXISTS {CLAIM_TABLE} (event_id INTEGER PRIMARY KEY, claimed_at TEXT NOT NULL)"
+        )
+        cur = db.execute(
+            f"INSERT OR IGNORE INTO {CLAIM_TABLE}(event_id, claimed_at) VALUES (?, ?)",
+            (int(event_id), datetime.now(timezone.utc).isoformat()),
+        )
+        return cur.rowcount == 1
+
+
+def _release_event(event_id: int) -> None:
+    try:
+        with sqlite3.connect(TIER1_DB, timeout=5) as db:
+            db.execute(f"DELETE FROM {CLAIM_TABLE} WHERE event_id=?", (int(event_id),))
+    except Exception:
+        pass
+
+
 def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     """Validate one persisted early event against a fresh Upstox quote."""
     symbol = str(event.get("symbol") or "").upper().strip()
@@ -78,41 +105,19 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     features = _features(event)
 
     if _event_age(event) > MAX_EVENT_AGE_SECONDS:
-        return {
-            "eligible": False,
-            "terminal": True,
-            "reason": "STALE_EARLY_EVENT",
-            "reasons": ["STALE_EARLY_EVENT"],
-        }
+        return {"eligible": False, "terminal": True, "reason": "STALE_EARLY_EVENT", "reasons": ["STALE_EARLY_EVENT"]}
 
     client = get_upstox_client()
     if not client.available():
-        return {
-            "eligible": False,
-            "terminal": False,
-            "reason": "UPSTOX_UNAVAILABLE",
-            "reasons": ["UPSTOX_UNAVAILABLE"],
-        }
+        return {"eligible": False, "terminal": False, "reason": "UPSTOX_UNAVAILABLE", "reasons": ["UPSTOX_UNAVAILABLE"]}
 
-    contract = client.resolve_option_by_instrument_key(
-        symbol, instrument_key, expiry=expiry or None
-    )
+    contract = client.resolve_option_by_instrument_key(symbol, instrument_key, expiry=expiry or None)
     if not contract:
-        return {
-            "eligible": False,
-            "terminal": False,
-            "reason": "EXACT_CONTRACT_UNRESOLVED",
-            "reasons": ["EXACT_CONTRACT_UNRESOLVED"],
-        }
+        return {"eligible": False, "terminal": False, "reason": "EXACT_CONTRACT_UNRESOLVED", "reasons": ["EXACT_CONTRACT_UNRESOLVED"]}
 
     quote = client.get_full_quote(instrument_key)
     if not quote:
-        return {
-            "eligible": False,
-            "terminal": False,
-            "reason": "FRESH_OPTION_QUOTE_UNAVAILABLE",
-            "reasons": ["FRESH_OPTION_QUOTE_UNAVAILABLE"],
-        }
+        return {"eligible": False, "terminal": False, "reason": "FRESH_OPTION_QUOTE_UNAVAILABLE", "reasons": ["FRESH_OPTION_QUOTE_UNAVAILABLE"]}
 
     ltp = _quote_value(quote, "last_price", "last_traded_price", "ltp")
     volume = _quote_value(quote, "volume", "tradeVolume")
@@ -166,9 +171,15 @@ def create_surge_trade(
     risk_manager: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Create an exact-contract paper trade after surge + risk validation."""
+    event_id = int(event.get("id"))
+    if not _claim_event(event_id):
+        return None, {"eligible": False, "terminal": False, "reason": "EVENT_ALREADY_CLAIMED", "reasons": ["EVENT_ALREADY_CLAIMED"]}
+
     result = evaluate_pending_surge(event)
 
     if not result.get("eligible"):
+        if not result.get("terminal"):
+            _release_event(event_id)
         return None, result
 
     symbol = str(event.get("symbol") or "").upper().strip()
@@ -180,6 +191,7 @@ def create_surge_trade(
     ).can_open_new_trade(3, None, capital)
 
     if not allowed:
+        _release_event(event_id)
         result["eligible"] = False
         result["terminal"] = False
         result["reason"] = f"RISK_BLOCK:{reason}"
@@ -219,18 +231,14 @@ def create_surge_trade(
     trade["surge_move_5m_pct"] = result["evidence"].move_5m_pct
     trade["option_live_ltp_at_gate"] = result["ltp"]
 
-    allowed, reason = risk_manager.can_open_trade(
-        trade_id, lineage_id=lineage_id
-    )
+    allowed, reason = risk_manager.can_open_trade(trade_id, lineage_id=lineage_id)
     if not allowed:
+        _release_event(event_id)
         result["eligible"] = False
-        result["terminal"] = True
+        result["terminal"] = False
         result["reason"] = f"RISK_MANAGER:{reason}"
         result["reasons"] = [result["reason"]]
         return None, result
 
-    risk_manager.register_entry(
-        trade_id, float(trade["entry"]), lineage_id=lineage_id
-    )
-
+    risk_manager.register_entry(trade_id, float(trade["entry"]), lineage_id=lineage_id)
     return trade, result
