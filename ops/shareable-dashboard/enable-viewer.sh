@@ -39,13 +39,13 @@ grep -qw 'ORDERS_ENABLED=false' <<<"$ENV_OUT" || { echo 'ABORT: PEREZ-AI is not 
 
 printf '%s:%s\n' "$VIEWER_USER" "$(openssl passwd -6 "$VIEWER_PASSWORD")" > "$VIEWER_FILE"
 cat "$ADMIN_FILE" "$VIEWER_FILE" > "$USERS_FILE"
-unset VIEWER_PASSWORD
 chmod 0640 "$ADMIN_FILE" "$VIEWER_FILE" "$USERS_FILE"
 chown root:www-data "$ADMIN_FILE" "$VIEWER_FILE" "$USERS_FILE"
 
-# Preserve the existing Certbot HTTPS/server configuration. Only change the
-# authentication files: normal dashboard requests accept Admin + Viewer;
-# the exact /api/action endpoint accepts Admin only.
+# Preserve the existing Certbot HTTPS/server configuration. Existing installs
+# may have only a generic location / block, so create the exact Admin-only
+# /api/action location when it is missing. No certificate/server blocks are
+# regenerated.
 cp -a "$CONF" "${CONF}.bak-viewer-$(date +%Y%m%d_%H%M%S)"
 python3 - "$CONF" <<'PY'
 from pathlib import Path
@@ -56,18 +56,24 @@ users = '/etc/nginx/.htpasswd-perez-ai-users'
 admin = '/etc/nginx/.htpasswd-perez-ai-admin'
 legacy = '/etc/nginx/.htpasswd-perez-ai'
 
-# Existing configs may reference either the original legacy file or the new
-# admin file. Convert dashboard read access to the combined users file.
+# Convert existing dashboard authentication to the combined Admin+Viewer file.
 s = s.replace(legacy + ';', users + ';')
 s = s.replace(admin + ';', users + ';')
 
-# Then make the exact /api/action location Admin-only.
-m = re.search(r'(location\s*=\s*/api/action\s*\{)(.*?)(\n\s*\})', s, re.S)
-if not m:
-    raise SystemExit('ERROR: exact /api/action location was not found in nginx config')
-block = m.group(0)
-block = block.replace(users + ';', admin + ';', 1)
-s = s[:m.start()] + block + s[m.end():]
+# If an exact /api/action location already exists, make it Admin-only.
+m = re.search(r'(?ms)^\s*location\s*=\s*/api/action\s*\{.*?^\s*\}', s)
+if m:
+    block = m.group(0).replace(users + ';', admin + ';', 1)
+    s = s[:m.start()] + block + s[m.end():]
+else:
+    # Older installs only have a generic location / block. Insert the
+    # Admin-only exact-match block before it. Nginx exact locations win over /.
+    marker = re.search(r'(?m)^\s*location\s+/\s*\{', s)
+    if not marker:
+        raise SystemExit('ERROR: generic dashboard location / was not found in nginx config')
+    action = '''    # Only the Admin credential can execute dashboard control actions.\n    location = /api/action {\n        auth_basic "PEREZ-AI Admin Controls";\n        auth_basic_user_file /etc/nginx/.htpasswd-perez-ai-admin;\n        proxy_pass http://127.0.0.1:8787/api/action;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header X-Remote-User $remote_user;\n        proxy_read_timeout 30s;\n    }\n\n'''
+    s = s[:marker.start()] + action + s[marker.start():]
+
 p.write_text(s)
 PY
 
@@ -80,7 +86,6 @@ CODE="$(curl -ks -o /dev/null -w '%{http_code}' "https://$DOMAIN/" || true)"
 ! ss -lntp | grep -Eq '0\.0\.0\.0:8787|\[::\]:8787' || { echo 'ABORT: dashboard port 8787 is publicly bound'; exit 21; }
 
 # Verify Viewer can read state but cannot execute an action.
-# Keep the generated password in memory until both checks finish.
 VIEW_CODE="$(curl -ks -u "$VIEWER_USER:$VIEWER_PASSWORD" -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/state" || true)"
 ADMIN_ACTION_CODE="$(curl -ks -u "$VIEWER_USER:$VIEWER_PASSWORD" -X POST -H 'Content-Type: application/json' --data '{"action":"RUN_HEALTH_AUDIT"}' -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/action" || true)"
 [[ "$VIEW_CODE" == "200" ]] || { echo "ERROR: viewer state access failed: HTTP $VIEW_CODE"; exit 22; }
