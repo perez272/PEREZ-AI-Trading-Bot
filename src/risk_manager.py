@@ -58,9 +58,17 @@ def daily_summary(path="data/trades.csv", current=None):
 def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     """Apply risk gates using the current available capital.
 
-    max_daily_loss is retained for backwards compatibility, but when omitted
-    the authoritative daily loss limit is 2% of the live capital.
+    Dashboard STOP NEW TRADES / EMERGENCY MODE is an additional fail-safe
+    gate. It cannot enable live orders or change any risk parameter.
     """
+    try:
+        from src.dashboard_control import entries_allowed
+        if not entries_allowed():
+            return False, "Dashboard stop: new entries disabled", daily_summary()
+    except Exception:
+        # Control-plane read failure must not silently block the core engine.
+        pass
+
     if not is_entry_window():
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
