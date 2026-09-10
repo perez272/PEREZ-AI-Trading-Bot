@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
-CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'; PROLIVE=ROOT/'dashboard/pro_live.js'
+CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'; PROLIVE=ROOT/'dashboard/pro_live.js'; APPJS=ROOT/'dashboard/app.js'; SW=ROOT/'dashboard/sw.js'; MANIFEST=ROOT/'dashboard/manifest.webmanifest'; ICON=ROOT/'dashboard/app-icon.svg'
 from src.dashboard_control import append_audit,get_state,recent_audit,set_controls
 from src.dashboard_telemetry import recent as telemetry_recent,event_proof,summary as telemetry_summary
 
@@ -49,19 +49,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=self.path.split('?',1)[0]
         if path in ('/api','/api/state'):self._send(200,'application/json; charset=utf-8',json.dumps(state(),default=str));return
-        if path=='/advanced.js':
-            try:self._send(200,'application/javascript; charset=utf-8',ADVANCED.read_text(encoding='utf-8'))
-            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'advanced asset error: {exc}')
-            return
-        if path=='/pro_live.js':
-            try:self._send(200,'application/javascript; charset=utf-8',PROLIVE.read_text(encoding='utf-8'))
-            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'pro live asset error: {exc}')
+        assets={'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
+        if path in assets:
+            try:p,ctype=assets[path];self._send(200,ctype,p.read_text(encoding='utf-8'))
+            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
             return
         if path in ('/','/index.html'):
             try:
-                html=INDEX.read_text(encoding='utf-8'); marker='</body>'
-                if '/advanced.js' not in html:html=html.replace(marker,'<script src="/advanced.js"></script>'+marker)
-                if '/pro_live.js' not in html:html=html.replace(marker,'<script src="/pro_live.js"></script>'+marker)
+                html=INDEX.read_text(encoding='utf-8'); marker='</head>'
+                head='<link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="PEREZ-AI"><link rel="icon" href="/app-icon.svg">'
+                if '/manifest.webmanifest' not in html:html=html.replace(marker,head+marker)
+                marker='</body>'
+                for src in ('/advanced.js','/pro_live.js','/app.js'):
+                    if src not in html:html=html.replace(marker,f'<script src="{src}"></script>'+marker)
                 self._send(200,'text/html; charset=utf-8',html)
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'index error: {exc}')
             return
