@@ -18,7 +18,7 @@ from src.production_guard import write_heartbeat
 from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.tier1_option_observer import get_tier1_option_observer
-from src.surge_trade_bridge import create_surge_trade
+from src.surge_trade_bridge import create_surge_trade, _release_event
 from src.live_trade_monitor import run_monitor
 from src.trading_risk_manager import TradingRiskManager
 from src.rejection_recorder import record_rejection
@@ -115,11 +115,18 @@ def _process_once() -> bool:
         try:
             result_monitor = run_monitor(trade)
         except Exception as exc:
+            # The paper trade itself is already recorded in the running process,
+            # but the event must not become permanently claimed if monitoring
+            # fails before the lifecycle reaches a terminal outcome.
+            _release_event(event_id)
             write_heartbeat("surge_monitor_error", symbol=symbol, error=str(exc))
-            print(f"[SURGE BRIDGE] monitor failed; event remains unconsumed: {exc}")
+            print(f"[SURGE BRIDGE] monitor failed; event claim released for recovery: {exc}")
             return True
 
         if result_monitor is None:
+            # A manually interrupted monitor did not produce a terminal outcome.
+            # Release the claim rather than silently orphaning the event.
+            _release_event(event_id)
             return True
 
         observer.mark_early_event_consumed(event_id)
