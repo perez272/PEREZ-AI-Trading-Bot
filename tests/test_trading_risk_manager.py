@@ -75,6 +75,16 @@ def test_three_consecutive_losses_activate_breaker(tmp_path):
     assert "CIRCUIT_BREAKER" in reason
 
 
+def test_breakeven_does_not_count_as_loss(tmp_path):
+    rm = manager(tmp_path)
+
+    rm.register_entry("T1", 100)
+    rm.record_trade_result("T1", 0)
+
+    assert rm.status()["consecutive_losses"] == 0
+    assert rm.status()["circuit_breaker_active"] is False
+
+
 def test_win_resets_consecutive_losses(tmp_path):
     rm = manager(tmp_path)
 

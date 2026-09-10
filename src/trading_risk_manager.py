@@ -368,7 +368,7 @@ class TradingRiskManager:
                     position.active = False
                 position.last_update_at = now.isoformat()
 
-            if pnl > 0:
+            if pnl >= 0:
                 self.global_state.consecutive_losses = 0
                 self.global_state.last_failure_trade_id = None
 
