@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PEREZ-AI Live Control</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1020;color:#eef2ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#080c18,#111936);min-height:100vh}.wrap{max-width:1400px;margin:auto;padding:14px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.title{font-size:22px;font-weight:800}.sub{font-size:12px;color:#94a3b8;margin-top:3px}.pill{padding:7px 10px;border-radius:999px;background:#18223d;font-size:12px;font-weight:700}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{background:rgba(20,29,53,.92);border:1px solid #273555;border-radius:14px;padding:12px;box-shadow:0 8px 30px #0003}.wide{grid-column:span 2}.full{grid-column:1/-1}.h{font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:9px}.big{font-size:25px;font-weight:800}.ok{color:#5ee28a}.bad{color:#ff6b7a}.warn{color:#ffd166}.muted{color:#94a3b8}.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #25304a;font-size:13px}.kv:last-child{border:0}.table{width:100%;border-collapse:collapse;font-size:12px}.table th,.table td{text-align:left;padding:7px 5px;border-bottom:1px solid #26324e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}.table th{color:#94a3b8}.scroll{overflow:auto;max-height:330px}.pipeline{display:flex;gap:6px;overflow:auto;padding-bottom:4px}.stage{min-width:115px;padding:10px;border-radius:10px;background:#111a31;border:1px solid #2b395d;text-align:center}.stage b{display:block;font-size:12px}.stage span{font-size:11px;color:#94a3b8}.arrow{align-self:center;color:#64748b}.event{padding:9px;border-left:3px solid #4f7cff;background:#10182d;margin:6px 0;border-radius:7px;font-size:12px}.event strong{font-size:13px}.footer{padding:12px 2px;color:#64748b;font-size:11px;text-align:center}@media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.wide{grid-column:span 2}}@media(max-width:560px){.grid{grid-template-columns:1fr}.wide,.full{grid-column:span 1}.title{font-size:18px}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="top"><div><div class="title">🤖 PEREZ-AI LIVE CONTROL</div><div class="sub">Read-only telemetry • auto refresh every 2 seconds</div></div><div id="health" class="pill">CONNECTING…</div></div>
+<div class="grid">
+<div class="card"><div class="h">Runtime</div><div id="runtime" class="big">—</div><div id="runtime2" class="sub">—</div></div>
+<div class="card"><div class="h">Safety</div><div id="safety" class="big">—</div><div id="safety2" class="sub">—</div></div>
+<div class="card"><div class="h">Data Provider</div><div id="provider" class="big">—</div><div id="provider2" class="sub">—</div></div>
+<div class="card"><div class="h">Disk</div><div id="disk" class="big">—</div><div id="disk2" class="sub">—</div></div>
+
+<div class="card wide"><div class="h">Services</div><div id="services"></div></div>
+<div class="card wide"><div class="h">Learning Counters</div><div id="counts"></div></div>
+
+<div class="card full"><div class="h">Live Pipeline</div><div class="pipeline">
+<div class="stage"><b>📡 Market</b><span>data</span></div><div class="arrow">→</div><div class="stage"><b>🔎 Scanner</b><span>signal</span></div><div class="arrow">→</div><div class="stage"><b>🎯 Score</b><span>quality</span></div><div class="arrow">→</div><div class="stage"><b>🛡 Integrity</b><span>MTF</span></div><div class="arrow">→</div><div class="stage"><b>⚡ Options</b><span>gate</span></div><div class="arrow">→</div><div class="stage"><b>📝 Paper</b><span>entry</span></div><div class="arrow">→</div><div class="stage"><b>📈 Monitor</b><span>exit</span></div><div class="arrow">→</div><div class="stage"><b>🧠 Learning</b><span>outcome</span></div>
+</div></div>
+
+<div class="card wide"><div class="h">Latest Early Event</div><div id="early">—</div></div>
+<div class="card wide"><div class="h">Latest Outcome</div><div id="outcome">—</div></div>
+
+<div class="card full"><div class="h">Recent Early / Explosive Events</div><div class="scroll"><table class="table"><thead><tr><th>Time</th><th>Symbol</th><th>Type</th><th>Strike</th><th>LTP</th><th>Reason</th></tr></thead><tbody id="earlyRows"></tbody></table></div></div>
+<div class="card full"><div class="h">Recent Surge / Move Events</div><div class="scroll"><table class="table"><thead><tr><th>Time</th><th>Symbol</th><th>Type</th><th>Strike</th><th>Window</th><th>Move</th><th>LTP</th></tr></thead><tbody id="moveRows"></tbody></table></div></div>
+<div class="card full"><div class="h">Recent Outcomes</div><div class="scroll"><table class="table"><thead><tr><th>Time</th><th>Symbol</th><th>Signal</th><th>Score</th><th>P&L</th><th>Exit</th></tr></thead><tbody id="outcomeRows"></tbody></table></div></div>
+<div class="card full"><div class="h">Recent Rejections — Why No Trade?</div><div class="scroll"><table class="table"><thead><tr><th>Time</th><th>Symbol</th><th>Score</th><th>Options</th><th>Reason</th></tr></thead><tbody id="rejectRows"></tbody></table></div></div>
+</div><div class="footer">PEREZ-AI dashboard is read-only. It does not enable orders or modify risk settings. Last update: <span id="updated">—</span></div>
+</div>
+<script>
+const $=id=>document.getElementById(id); const esc=x=>String(x??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function svc(v){return `<div class="kv"><span>${esc(v[0])}</span><b class="${v[1]==='active'?'ok':'bad'}">${esc(v[1])}</b></div>`}
+function fmt(v){return v==null?'—':esc(v)}
+function render(d){
+$('health').textContent='🟢 LIVE'; $('health').className='pill ok';
+const s=d.services||{}; $('runtime').textContent=s['perez-ai.service']||'—'; $('runtime').className='big '+(s['perez-ai.service']==='active'?'ok':'bad'); $('runtime2').textContent='Main trading engine';
+const paper=String(d.mode?.paper_mode).toLowerCase()==='true', orders=String(d.mode?.orders_enabled).toLowerCase()==='true'; $('safety').textContent=paper?'PAPER ONLY':'CHECK'; $('safety').className='big '+(paper&&!orders?'ok':'bad'); $('safety2').textContent=`Orders enabled: ${orders}`;
+$('provider').textContent=fmt(d.mode?.provider); $('provider2').textContent=`Upstox: ${fmt(d.mode?.upstox_enabled)}`;
+$('disk').textContent=fmt(d.resources?.disk_used_pct)+'%'; $('disk2').textContent=`Free ${fmt(d.resources?.disk_free_gb)} GB`;
+$('services').innerHTML=Object.entries(s).map(svc).join('');
+const t=d.counts?.tier1||{}, c=d.counts?.core||{}; $('counts').innerHTML=[['Tier-1 observations',t.observations],['Move events',t.move_events],['Early events',t.early_events],['Core observations',c.observations],['Core outcomes',c.outcomes],['Rejections',c.rejections]].map(x=>`<div class="kv"><span>${x[0]}</span><b>${x[1]??0}</b></div>`).join('');
+const e=d.latest?.early_event,o=d.latest?.outcome; $('early').innerHTML=e?`<div class="event"><strong>${fmt(e.symbol)} ${fmt(e.option_type)} ${fmt(e.strike)}</strong><br>${fmt(e.reason)}<br><span class="muted">${fmt(e.observed_ts)} • LTP ${fmt(e.ltp)}</span></div>`:'No early event'; $('outcome').innerHTML=o?`<div class="event"><strong>${fmt(o.symbol)} • ${fmt(o.signal)}</strong><br>P&L ₹${fmt(o.pnl)} (${fmt(o.pnl_percent)}%)<br><span class="muted">${fmt(o.ts)} • ${fmt(o.exit_reason)}</span></div>`:'No outcome';
+$('earlyRows').innerHTML=(d.recent?.early_events||[]).map(x=>`<tr><td>${fmt(x.observed_ts)}</td><td>${fmt(x.symbol)}</td><td>${fmt(x.option_type)}</td><td>${fmt(x.strike)}</td><td>${fmt(x.ltp)}</td><td>${fmt(x.reason)}</td></tr>`).join('');
+$('moveRows').innerHTML=(d.recent?.move_events||[]).map(x=>`<tr><td>${fmt(x.observed_ts)}</td><td>${fmt(x.symbol)}</td><td>${fmt(x.option_type)}</td><td>${fmt(x.strike)}</td><td>${fmt(x.window_minutes)}m</td><td>${fmt(x.change_pct)}%</td><td>${fmt(x.end_ltp)}</td></tr>`).join('');
+$('outcomeRows').innerHTML=(d.recent?.outcomes||[]).map(x=>`<tr><td>${fmt(x.ts)}</td><td>${fmt(x.symbol)}</td><td>${fmt(x.signal)}</td><td>${fmt(x.score)}</td><td class="${Number(x.pnl)>=0?'ok':'bad'}">₹${fmt(x.pnl)}</td><td>${fmt(x.exit_reason)}</td></tr>`).join('');
+$('rejectRows').innerHTML=(d.recent?.rejections||[]).map(x=>`<tr><td>${fmt(x.ts)}</td><td>${fmt(x.symbol)}</td><td>${fmt(x.score)}</td><td>${fmt(x.options_score)}</td><td>${fmt(x.reason)}</td></tr>`).join(''); $('updated').textContent=new Date().toLocaleString();
+}
+async function poll(){try{const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error(r.status);render(await r.json())}catch(e){$('health').textContent='🔴 OFFLINE';$('health').className='pill bad'}} poll(); setInterval(poll,2000);
+</script></body></html>
