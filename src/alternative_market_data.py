@@ -465,6 +465,42 @@ class UpstoxMarketData:
             "candle_age_seconds": round(age, 1),
         }
 
+    def resolve_option_by_instrument_key(self, symbol: str, instrument_key: str, expiry: str | None = None) -> dict[str, Any] | None:
+        """Resolve an exact Upstox option instrument into authoritative contract metadata."""
+        key = str(instrument_key or "").strip()
+        if not key:
+            return None
+        underlying = str(symbol or "").upper().strip()
+        underlying_key = self.instrument_keys.get(underlying)
+        if not underlying_key:
+            return None
+        payload = self._get(
+            f"{UPSTOX_V2_BASE_URL}/option/contract",
+            {"instrument_key": underlying_key},
+        )
+        contracts = (payload or {}).get("data") if isinstance(payload, dict) else None
+        if not isinstance(contracts, list):
+            return None
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+            if str(contract.get("instrument_key", "")) != key:
+                continue
+            contract_expiry = str(contract.get("expiry", "") or "")
+            if expiry and contract_expiry != str(expiry):
+                continue
+            return {
+                "status": "CONTRACT VALID",
+                "option_type": "CE" if " CE " in str(contract.get("trading_symbol", "")) else "PE" if " PE " in str(contract.get("trading_symbol", "")) else "",
+                "contract": contract.get("trading_symbol") or "",
+                "exchange": "NFO" if key.startswith("NSE_FO|") else "BFO" if key.startswith("BSE_FO|") else "",
+                "token": key,
+                "expiry": contract_expiry,
+                "strike": float(contract.get("strike_price") or 0),
+                "lotsize": int(contract.get("lot_size") or contract.get("minimum_lot") or 0),
+            }
+        return None
+
     def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
         chain = self.get_option_chain(symbol)
         if not chain or option_type not in {"CE", "PE"}:

@@ -101,11 +101,8 @@ def run_monitor(
                                     ).upper()
 
                                     stop_loss_trigger = (
-                                        pnl <= 0.0
-                                        and (
-                                            exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
-                                            or "STOP" in exit_reason
-                                        )
+                                        pnl < 0.0
+                                        and exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
                                     )
 
                                     if stop_loss_trigger:

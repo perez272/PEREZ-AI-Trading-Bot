@@ -84,7 +84,14 @@ def monitor_trade(trade, current_price):
         status = "STOP LOSS HIT"
         # Trailing stop is active only after partial booking.
         # Before that, this is a normal initial/breakeven stop.
-        exit_reason = "TRAILING_STOP" if trade.get("partial_booked", False) else "STOP_LOSS"
+        if trade.get("partial_booked", False):
+            exit_reason = "TRAILING_STOP"
+        elif pnl > 0:
+            exit_reason = "PROFIT_PROTECTION_STOP"
+        elif pnl == 0:
+            exit_reason = "BREAKEVEN_STOP"
+        else:
+            exit_reason = "STOP_LOSS"
 
     return {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

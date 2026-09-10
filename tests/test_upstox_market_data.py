@@ -55,11 +55,17 @@ def test_disabled_validation_does_not_change_existing_behavior(monkeypatch):
 
 def test_session_vwap_uses_closed_positive_volume_candles(monkeypatch):
     candles = [
-        ["2026-09-09T13:30:00+05:30", 144.0, 148.0, 142.0, 146.0, 100],
-        ["2026-09-09T13:25:00+05:30", 140.0, 144.0, 138.0, 142.0, 200],
+        ["2026-09-10T13:30:00+05:30", 144.0, 148.0, 142.0, 146.0, 100],
+        ["2026-09-10T13:25:00+05:30", 140.0, 144.0, 138.0, 142.0, 200],
     ]
     monkeypatch.setattr(upstox, "get_intraday_candles", lambda instrument_key, interval_minutes: candles)
-    monkeypatch.setattr(upstox, "datetime", __import__("src.upstox_market_data", fromlist=["datetime"]).datetime)
+
+    class _FrozenDateTime(upstox.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 10, 13, 35, tzinfo=tz)
+
+    monkeypatch.setattr(upstox, "datetime", _FrozenDateTime)
     value = upstox.get_session_vwap("NSE_FO|TEST", 5)
     expected = (((148.0 + 142.0 + 146.0) / 3.0) * 100 + ((144.0 + 138.0 + 142.0) / 3.0) * 200) / 300
     assert value == pytest.approx(expected)

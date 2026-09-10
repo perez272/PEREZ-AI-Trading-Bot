@@ -27,7 +27,7 @@ BASELINE_TTL_SECONDS = int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS", "900")
 # five seconds while still feeding the detector every observation cycle.
 CHAIN_REFRESH_TTL_SECONDS = int(os.getenv("TIER1_OPTION_CHAIN_REFRESH_TTL_SECONDS", "15"))
 MAX_MEMORY_ROWS = int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS", "50000"))
-HISTORY_POINTS = 6
+HISTORY_POINTS = 30
 
 
 class Tier1OptionObserver:
@@ -63,6 +63,32 @@ class Tier1OptionObserver:
                 events_count INTEGER NOT NULL DEFAULT 0
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol, threshold)")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS early_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT UNIQUE NOT NULL,
+                    symbol TEXT NOT NULL,
+                    option_type TEXT NOT NULL,
+                    instrument_key TEXT NOT NULL,
+                    expiry TEXT,
+                    strike REAL,
+                    ltp REAL NOT NULL,
+                    score REAL NOT NULL,
+                    move_1m_pct REAL,
+                    move_3m_pct REAL,
+                    move_5m_pct REAL,
+                    velocity REAL,
+                    acceleration REAL,
+                    volume_ratio REAL,
+                    spread_pct REAL,
+                    reasons_json TEXT NOT NULL,
+                    features_json TEXT NOT NULL,
+                    observed_ts TEXT NOT NULL,
+                    detection_ts TEXT NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_early_events_pending ON early_events(consumed, observed_ts)")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS observer_meta (
                     key TEXT PRIMARY KEY,
@@ -139,12 +165,53 @@ class Tier1OptionObserver:
 
                     fast = self._record_fast_signal(symbol, option_type, market, observed_ts)
                     if fast and fast.early:
-                        events.append({"type": "EARLY_EXPLOSIVE", "symbol": symbol, "option_type": option_type,
-                                       "score": fast.score, "move_1m_pct": fast.move_1m_pct,
-                                       "move_3m_pct": fast.move_3m_pct, "move_5m_pct": fast.move_5m_pct,
-                                       "velocity": fast.velocity_pct_per_min, "acceleration": fast.acceleration_pct_per_min2,
-                                       "volume_ratio": fast.volume_ratio, "spread_pct": fast.spread_pct,
-                                       "reasons": list(fast.reasons), "instrument_key": fast.instrument_key, "ltp": fast.ltp})
+                        features = self._features(
+                            symbol, option_type, row, market,
+                            fast.move_5m_pct, fast.ltp,
+                        )
+                        detection_ts = datetime.now(timezone.utc).isoformat()
+                        early_key = f"{fast.instrument_key}|EARLY|{observed_ts[:19]}"
+                        early_event = {
+                            "type": "EARLY_EXPLOSIVE",
+                            "symbol": symbol,
+                            "option_type": option_type,
+                            "score": fast.score,
+                            "move_1m_pct": fast.move_1m_pct,
+                            "move_3m_pct": fast.move_3m_pct,
+                            "move_5m_pct": fast.move_5m_pct,
+                            "velocity": fast.velocity_pct_per_min,
+                            "acceleration": fast.acceleration_pct_per_min2,
+                            "volume_ratio": fast.volume_ratio,
+                            "spread_pct": fast.spread_pct,
+                            "reasons": list(fast.reasons),
+                            "instrument_key": fast.instrument_key,
+                            "ltp": fast.ltp,
+                            "expiry": row.get("expiry"),
+                            "strike": row.get("strike_price"),
+                            "contract": features.get("contract"),
+                        }
+                        try:
+                            db.execute(
+                                """INSERT INTO early_events(
+                                    event_key,symbol,option_type,instrument_key,expiry,strike,
+                                    ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,
+                                    velocity,acceleration,volume_ratio,spread_pct,
+                                    reasons_json,features_json,observed_ts,detection_ts
+                                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (
+                                    early_key, symbol, option_type, fast.instrument_key,
+                                    row.get("expiry"), row.get("strike_price"), fast.ltp,
+                                    fast.score, fast.move_1m_pct, fast.move_3m_pct,
+                                    fast.move_5m_pct, fast.velocity_pct_per_min,
+                                    fast.acceleration_pct_per_min2, fast.volume_ratio,
+                                    fast.spread_pct, json.dumps(list(fast.reasons)),
+                                    json.dumps(features, separators=(",", ":")),
+                                    observed_ts, detection_ts,
+                                ),
+                            )
+                        except sqlite3.IntegrityError:
+                            pass
+                        events.append(early_event)
 
                     key = self._contract_key(symbol, row, option_type)
                     existing = db.execute("SELECT baseline_ltp, baseline_ts, last_ltp FROM baselines WHERE contract_key=?", (key,)).fetchone()
@@ -198,12 +265,36 @@ class Tier1OptionObserver:
                     if chain:
                         self._chain_cache[symbol] = (time.monotonic(), chain)
                     source = "upstox"
-                if chain:
-                    events.extend(self.observe(symbol, chain))
+                if chain and source == "upstox":
+                    # Only a genuinely refreshed provider snapshot advances
+                    # detector history. Cached snapshots must never receive a
+                    # new wall-clock timestamp and masquerade as new market data.
+                    observed_ts = datetime.now(timezone.utc).isoformat()
+                    events.extend(self.observe(symbol, chain, observed_ts=observed_ts))
                     print(f"[TIER1 OBSERVER] {symbol}: observation source={source}")
+                elif chain:
+                    print(f"[TIER1 OBSERVER] {symbol}: cached snapshot — detector history unchanged")
             except Exception as exc:
                 print(f"[TIER1 OBSERVER] {symbol}: {exc}")
         return events
+
+    def get_pending_early_events(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT id,event_key,symbol,option_type,instrument_key,expiry,strike,ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,velocity,acceleration,volume_ratio,spread_pct,reasons_json,features_json,observed_ts,detection_ts FROM early_events WHERE consumed=0 ORDER BY observed_ts DESC,id DESC LIMIT ?", (max(1,int(limit)),)).fetchall()
+        fields=("id","event_key","symbol","option_type","instrument_key","expiry","strike","ltp","score","move_1m_pct","move_3m_pct","move_5m_pct","velocity","acceleration","volume_ratio","spread_pct","reasons_json","features_json","observed_ts","detection_ts")
+        out=[]
+        for row in rows:
+            e=dict(zip(fields,row))
+            try: e["reasons"]=json.loads(e.pop("reasons_json"))
+            except (TypeError,ValueError,json.JSONDecodeError): e["reasons"]=[]
+            try: e["features"]=json.loads(e.pop("features_json"))
+            except (TypeError,ValueError,json.JSONDecodeError): e["features"]={}
+            out.append(e)
+        return out
+
+    def mark_early_event_consumed(self, event_id: int) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE early_events SET consumed=1 WHERE id=? AND consumed=0", (int(event_id),))
 
     def stats(self) -> dict[str, Any]:
         with self._connect() as db:

@@ -17,6 +17,8 @@ from src.options_engine_adapter import evaluate_option_candidate
 from src.high_conviction_discovery import discover, CANDIDATE_FILE
 from src.index_momentum_strategy import select_index_momentum_candidate, build_dynamic_exits
 from src.tier1_option_observer import observe_tier1_option_chains
+from src.tier1_option_observer import get_tier1_option_observer
+from src.surge_trade_bridge import create_surge_trade
 from src.learning_status import record_cycle
 from src.rejection_recorder import record_rejection
 from src.upgrade_config import (
@@ -162,6 +164,108 @@ def _candidate_queue(results, admitted):
     return candidates
 
 
+def _process_pending_surge_events(capital):
+    """Route fresh Tier-1 explosive events into the existing paper lifecycle."""
+    observer = get_tier1_option_observer()
+    events = observer.get_pending_early_events(limit=20)
+    if not events:
+        return False
+
+    # One attempt per exact contract per cycle; keep the strongest event.
+    selected = {}
+    for event in events:
+        key = str(event.get("instrument_key") or "")
+        if not key:
+            continue
+        previous = selected.get(key)
+        if previous is None or float(event.get("score", 0) or 0) > float(previous.get("score", 0) or 0):
+            selected[key] = event
+
+    for event in sorted(selected.values(), key=lambda x: float(x.get("score", 0) or 0), reverse=True):
+        symbol = str(event.get("symbol") or "")
+        option_type = str(event.get("option_type") or "").upper()
+        print(
+            f"[SURGE] EARLY EXPLOSIVE: {symbol} {option_type} "
+            f"{event.get('strike')} | score={event.get('score')} | "
+            f"5m={event.get('move_5m_pct')}%"
+        )
+
+        try:
+            trade, result = create_surge_trade(
+                event, capital, TRADING_RISK_MANAGER
+            )
+        except Exception as exc:
+            print(f"[SURGE] bridge failure — event retained: {exc}")
+            continue
+
+        if trade is None:
+            print(
+                f"[SURGE] {symbol} {option_type} rejected: "
+                f"{result.get('reason', 'NO TRADE')}"
+            )
+            if result.get("terminal"):
+                observer.mark_early_event_consumed(int(event["id"]))
+            continue
+
+        trade["surge_score"] = result.get("gate", {}).get("score", 0)
+        trade["surge_reasons"] = result.get("gate", {}).get("reasons", [])
+        write_heartbeat(
+            "creating_trade",
+            symbol=trade.get("symbol"),
+            capital=capital,
+            strategy="SURGE_EARLY_EXPLOSIVE",
+        )
+        print(
+            f"[SURGE] PAPER TRADE: {trade.get('contract')} | "
+            f"score={trade.get('surge_score')} | "
+            f"quantity={trade.get('quantity')} | "
+            f"investment=Rs {trade.get('investment', 0):.2f}"
+        )
+
+        try:
+            send_entry_alert(trade)
+        except Exception as exc:
+            print(f"TELEGRAM ALERT FAILED — surge trade remains paper-managed: {exc}")
+
+        write_heartbeat(
+            "monitoring",
+            symbol=trade.get("symbol"),
+            contract=trade.get("contract"),
+            strategy="SURGE_EARLY_EXPLOSIVE",
+        )
+
+        try:
+            monitor_result = run_monitor(trade)
+        except Exception as exc:
+            write_heartbeat(
+                "monitor_error",
+                symbol=trade.get("symbol"),
+                error=str(exc),
+            )
+            print(f"[SURGE] TRADE MONITOR FAILED — event retained: {exc}")
+            return True
+
+        if monitor_result is None:
+            write_heartbeat("stopped")
+            print("[SURGE] Monitor stopped manually.")
+            return True
+
+        observer.mark_early_event_consumed(int(event["id"]))
+        record_cycle(observations=1, lessons_events=1)
+        write_heartbeat(
+            "trade_complete",
+            symbol=trade.get("symbol"),
+            strategy="SURGE_EARLY_EXPLOSIVE",
+        )
+        print(
+            f"[SURGE] Trade cycle complete: "
+            f"{trade.get('contract')} — returning to scanner."
+        )
+        return True
+
+    return False
+
+
 def _observe_market_evidence():
     """Run the observational learner independently from trade admission."""
     try:
@@ -209,6 +313,16 @@ def main():
             print(f"{'Virtual' if PAPER_MODE else 'Available'} capital: Rs {capital:.2f} | Dynamic 2% daily loss limit: Rs {capital * 0.02:.2f}")
             allowed, reason, summary = can_open_new_trade(MAX_TRADES_PER_DAY, None, capital)
             print(f"Today's closed trades: {summary['closed_trades']} | Today's P/L: Rs {summary['pnl']:.2f}")
+            # Early explosive option events are evaluated independently of
+            # the normal directional index scanner. Existing capital/risk
+            # gates remain authoritative.
+            try:
+                if _process_pending_surge_events(capital):
+                    time.sleep(RESCAN_DELAY_SECONDS)
+                    continue
+            except Exception as exc:
+                print(f"[SURGE] pending-event processing failed — normal path unchanged: {exc}")
+
             if not allowed:
                 write_heartbeat("blocked", reason=reason, capital=capital)
                 print(f"Bot waiting: {reason}")
