@@ -122,7 +122,11 @@ def send_entry_alert(trade):
 def send_exit_alert(trade, result):
     label = {
         "TARGET": "TARGET HIT",
+        "TARGET_2": "TARGET 2 HIT",
         "STOP_LOSS": "STOP LOSS HIT",
+        "TRAILING_STOP": "TRAILING STOP EXIT",
+        "PROFIT_PROTECTION_STOP": "PROFIT PROTECTION EXIT",
+        "BREAKEVEN_STOP": "BREAKEVEN EXIT",
         "MARKET_CLOSE": "MARKET CLOSE EXIT",
     }.get(result["exit_reason"], "PAPER TRADE CLOSED")
 
