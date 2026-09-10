@@ -6,6 +6,7 @@ import signal
 import time
 from datetime import datetime
 
+from src.dashboard_control import observer_allowed
 from src.session_clock import (
     IST,
     MARKET_CLOSE,
@@ -16,8 +17,6 @@ from src.session_clock import (
 from src.tier1_option_observer import observe_tier1_option_chains
 
 RUNNING = True
-# Keep the observer responsive enough to see fast moves while retaining the
-# existing Upstox request pacing (one request/sec) inside the provider client.
 INTERVAL_SECONDS = max(1, int(os.getenv("TIER1_OBSERVER_INTERVAL_SECONDS", "5")))
 OUT_OF_SESSION_SLEEP_SECONDS = 30
 
@@ -28,17 +27,14 @@ def _stop(*_args):
 
 
 def _in_market_session(now: datetime) -> bool:
-    """Return True only during the NSE market session, using canonical IST."""
     return is_weekday(now) and MARKET_OPEN <= now.time() < MARKET_CLOSE
 
 
 def _sleep_until_market_session() -> None:
-    """Sleep safely outside market hours without polling live option chains."""
     global RUNNING
     now = datetime.now(IST)
     if _in_market_session(now):
         return
-
     next_open = next_weekday_0915(now)
     wait_seconds = max(1, int((next_open - now).total_seconds()))
     print(
@@ -46,8 +42,6 @@ def _sleep_until_market_session() -> None:
         f"Next session: {next_open.strftime('%Y-%m-%d %H:%M:%S IST')} "
         f"(sleep={wait_seconds}s)"
     )
-
-    # Keep SIGTERM/SIGINT responsive rather than sleeping for the whole gap.
     remaining = wait_seconds
     while RUNNING and remaining > 0:
         step = min(OUT_OF_SESSION_SLEEP_SECONDS, remaining)
@@ -66,6 +60,10 @@ def main():
         now = datetime.now(IST)
         if not _in_market_session(now):
             _sleep_until_market_session()
+            continue
+        if not observer_allowed():
+            print("[TIER1 OBSERVER] dashboard pause active; no live polling.")
+            time.sleep(5)
             continue
 
         try:
@@ -95,9 +93,9 @@ def main():
         for _ in range(INTERVAL_SECONDS):
             if not RUNNING:
                 break
-            # Re-check the session boundary while waiting so the observer does
-            # not begin another live cycle after 15:30 IST.
             if not _in_market_session(datetime.now(IST)):
+                break
+            if not observer_allowed():
                 break
             time.sleep(1)
 
