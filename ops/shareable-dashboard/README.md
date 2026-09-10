@@ -10,15 +10,29 @@ The trading engine is not exposed directly. Dashboard actions continue to use th
 
 ## Deploy
 
-1. Create a DNS A record for your chosen hostname pointing to the EC2 public IP.
-2. In the EC2 Security Group, allow TCP 80 and 443 from the internet. Do **not** expose TCP 8787.
-3. From `~/PEREZ-AI-Trading-Bot`, run:
+### Fastest: no domain required
+
+From `~/PEREZ-AI-Trading-Bot`:
+
+```bash
+sudo bash ops/shareable-dashboard/setup.sh
+```
+
+The script derives an HTTPS hostname from the EC2 public IPv4 using nip.io, prompts for the dashboard password without placing it in shell history, installs Nginx + Certbot, enables HTTPS, and verifies the paper-only safety state.
+
+This hostname follows the EC2 public IP. For a permanent production URL, use an Elastic IP and/or supply your own DNS hostname.
+
+### Custom domain
+
+Point an A record at the EC2 public IP, then run:
 
 ```bash
 sudo DOMAIN=dashboard.example.com ADMIN_USER=perez bash ops/shareable-dashboard/setup.sh
 ```
 
-The script prompts for the password without putting it in shell history. It installs Nginx, Certbot and the certificate plugin, configures the reverse proxy, enables HTTPS redirect, and verifies that the dashboard is still paper-only.
+## Network requirement
+
+In the EC2 Security Group, allow TCP 80 and 443 from the internet. Do **not** expose TCP 8787. The Python dashboard must remain loopback-only.
 
 ## Safety invariants
 
@@ -28,4 +42,4 @@ The script prompts for the password without putting it in shell history. It inst
 - The public layer does not contain or modify broker credentials.
 - Dashboard manual actions remain subject to the existing control/risk architecture.
 
-For stronger production authentication, replace Basic Auth with an identity provider/MFA layer (for example AWS ALB authentication or a managed access proxy). AWS recommends encrypted HTTPS listeners and can integrate ALB with ACM certificates and identity-provider authentication. 
+For stronger production authentication, replace Basic Auth with an identity provider/MFA layer (for example AWS ALB authentication or a managed access proxy). AWS supports HTTPS listeners, ACM-managed certificates, and identity-provider authentication at the load-balancer layer. citeturn0search0turn0search6
