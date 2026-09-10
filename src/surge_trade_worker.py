@@ -19,12 +19,11 @@ from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.tier1_option_observer import get_tier1_option_observer
 from src.surge_trade_bridge import create_surge_trade
-from src.trade_logger import log_closed_trade
 from src.live_trade_monitor import run_monitor
 from src.trading_risk_manager import TradingRiskManager
 from src.rejection_recorder import record_rejection
-from src.upgrade_config import MAX_TRADES_PER_DAY, RESCAN_DELAY_SECONDS, ENTRY_START, LAST_ENTRY
-from src.session_clock import IST, MARKET_CLOSE, is_weekday
+from src.upgrade_config import MAX_TRADES_PER_DAY, ENTRY_START, LAST_ENTRY
+from src.session_clock import IST, is_weekday
 
 RUNNING = True
 POLL_SECONDS = max(1, int(os.getenv("SURGE_TRADE_BRIDGE_INTERVAL_SECONDS", "2")))
@@ -48,7 +47,7 @@ def _process_once() -> bool:
     try:
         client = get_client()
         capital = get_available_capital(client, paper_mode=True)
-        allowed, reason, _summary = can_open_new_trade(MAX_TRADES_PER_DAY, None, capital)
+        allowed, _reason, _summary = can_open_new_trade(MAX_TRADES_PER_DAY, None, capital)
         if not allowed:
             return False
     except Exception as exc:
@@ -74,16 +73,17 @@ def _process_once() -> bool:
 
         if trade is None:
             reason_text = str(result.get("reason") or "SURGE_REJECTED")
-            print(f"[SURGE BRIDGE] {symbol} {option_type} rejected: {reason_text}")
-            try:
-                record_rejection(
-                    symbol=symbol,
-                    score=event.get("score"),
-                    reason=f"SURGE:{reason_text}",
-                    features={"event": event, "result": result},
-                )
-            except Exception as exc:
-                print(f"[SURGE BRIDGE] rejection persistence failed: {exc}")
+            if reason_text != "EVENT_ALREADY_CLAIMED":
+                print(f"[SURGE BRIDGE] {symbol} {option_type} rejected: {reason_text}")
+                try:
+                    record_rejection(
+                        symbol=symbol,
+                        score=event.get("score"),
+                        reason=f"SURGE:{reason_text}",
+                        features={"event": event, "result": result},
+                    )
+                except Exception as exc:
+                    print(f"[SURGE BRIDGE] rejection persistence failed: {exc}")
             if result.get("terminal"):
                 observer.mark_early_event_consumed(event_id)
             continue
