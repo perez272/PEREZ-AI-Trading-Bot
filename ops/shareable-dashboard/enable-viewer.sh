@@ -6,14 +6,30 @@ set -euo pipefail
 DOMAIN="${DOMAIN:-15-252-68-195.nip.io}"
 VIEWER_USER="${VIEWER_USER:-viewer}"
 VIEWER_PASSWORD="${VIEWER_PASSWORD:-}"
+LEGACY_ADMIN_FILE=/etc/nginx/.htpasswd-perez-ai
 ADMIN_FILE=/etc/nginx/.htpasswd-perez-ai-admin
 VIEWER_FILE=/etc/nginx/.htpasswd-perez-ai-viewer
 USERS_FILE=/etc/nginx/.htpasswd-perez-ai-users
 CONF=/etc/nginx/sites-available/perez-ai-command-center
 
 if [[ $EUID -ne 0 ]]; then echo 'Run with sudo.'; exit 1; fi
-[[ -s "$ADMIN_FILE" ]] || { echo 'ERROR: existing admin credential file not found; do not continue.'; exit 2; }
 [[ -f "$CONF" ]] || { echo 'ERROR: existing nginx config not found; do not continue.'; exit 4; }
+
+# Migrate the original single-admin credential file if the new Admin file has
+# not been created yet. This copies only the password hash; no plaintext
+# password is exposed or changed.
+if [[ ! -s "$ADMIN_FILE" ]]; then
+    if [[ -s "$LEGACY_ADMIN_FILE" ]]; then
+        cp -a "$LEGACY_ADMIN_FILE" "$ADMIN_FILE"
+        chmod 0640 "$ADMIN_FILE"
+        chown root:www-data "$ADMIN_FILE"
+        echo 'Migrated existing admin credential to the new admin auth file.'
+    else
+        echo 'ERROR: neither the new admin credential file nor the legacy admin credential file exists.'
+        exit 2
+    fi
+fi
+
 if [[ -z "$VIEWER_PASSWORD" ]]; then VIEWER_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(20))')"; fi
 [[ ${#VIEWER_PASSWORD} -ge 14 ]] || { echo 'ERROR: viewer password must be at least 14 characters.'; exit 3; }
 
@@ -38,13 +54,19 @@ p = Path(sys.argv[1])
 s = p.read_text()
 users = '/etc/nginx/.htpasswd-perez-ai-users'
 admin = '/etc/nginx/.htpasswd-perez-ai-admin'
-# First make every existing dashboard auth reference use the combined users file.
-s = s.replace('/etc/nginx/.htpasswd-perez-ai;', users + ';')
+legacy = '/etc/nginx/.htpasswd-perez-ai'
+
+# Existing configs may reference either the original legacy file or the new
+# admin file. Convert dashboard read access to the combined users file.
+s = s.replace(legacy + ';', users + ';')
+s = s.replace(admin + ';', users + ';')
+
 # Then make the exact /api/action location Admin-only.
 m = re.search(r'(location\s*=\s*/api/action\s*\{)(.*?)(\n\s*\})', s, re.S)
 if not m:
     raise SystemExit('ERROR: exact /api/action location was not found in nginx config')
-block = m.group(0).replace(users + ';', admin + ';', 1)
+block = m.group(0)
+block = block.replace(users + ';', admin + ';', 1)
 s = s[:m.start()] + block + s[m.end():]
 p.write_text(s)
 PY
