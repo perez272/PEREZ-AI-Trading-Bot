@@ -1,13 +1,13 @@
 """Forward-outcome learning for Tier-1 surge events.
-Detection features are frozen at detection time. Outcomes use only later quotes.
+Detection features are frozen at detection time. Outcomes use only later quotes
+inside tight horizon windows, preventing future-data leakage and stale backfills.
 Advisory only: never changes risk or order controls.
 """
 from __future__ import annotations
 import hashlib,json,sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-DB_PATH=Path("data/memory/adaptive_trade_memory.sqlite3");HORIZONS=(1,3,5,10,15)
+DB_PATH=Path("data/memory/adaptive_trade_memory.sqlite3");HORIZONS=(1,3,5,10,15);HORIZON_TOLERANCE_MIN=0.5
 def _db(path=DB_PATH):
  p=Path(path);p.parent.mkdir(parents=True,exist_ok=True);c=sqlite3.connect(p);c.execute("PRAGMA journal_mode=WAL");return c
 def _epoch(ts):
@@ -32,9 +32,9 @@ def remember_surge(event,event_key=None,path=DB_PATH):
  try:ltp=float(event.get("ltp") or 0)
  except (TypeError,ValueError):ltp=0
  if not key or not instrument or not ts or ltp<=0:return 0
- features=_feature_copy(event);features["pattern_key"]=pattern_key(features)
+ f=_feature_copy(event);f["pattern_key"]=pattern_key(f)
  with _db(path) as db:
-  db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(key,str(event.get("symbol") or ""),str(event.get("option_type") or ""),instrument,event.get("expiry"),event.get("strike"),ts,ltp,float(event.get("score") or 0),json.dumps(features,separators=(",",":"),default=str),"UNRESOLVED","live"));row=db.execute("SELECT id FROM surge_candidates WHERE event_key=?",(key,)).fetchone();return int(row[0]) if row else 0
+  db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(key,str(event.get("symbol") or ""),str(event.get("option_type") or ""),instrument,event.get("expiry"),event.get("strike"),ts,ltp,float(event.get("score") or 0),json.dumps(f,separators=(",",":"),default=str),"UNRESOLVED","live"));row=db.execute("SELECT id FROM surge_candidates WHERE event_key=?",(key,)).fetchone();return int(row[0]) if row else 0
 def _apply_quotes(db,quotes):
  changed=0
  for instrument_key,observed_ts,price in quotes:
@@ -44,11 +44,13 @@ def _apply_quotes(db,quotes):
   for cid,dts,entry in rows:
    det=_epoch(dts)
    if det is None or now<=det or entry<=0:continue
-   age=(now-det)/60.0;out=db.execute("SELECT h1_ltp,h3_ltp,h5_ltp,h10_ltp,h15_ltp,mfe_pct,mae_pct FROM surge_outcomes WHERE candidate_id=?",(cid,)).fetchone()
+   age=(now-det)/60.0
+   if age>15.0+HORIZON_TOLERANCE_MIN:continue
+   out=db.execute("SELECT h1_ltp,h3_ltp,h5_ltp,h10_ltp,h15_ltp,mfe_pct,mae_pct FROM surge_outcomes WHERE candidate_id=?",(cid,)).fetchone()
    if out is None:out=(None,None,None,None,None,0.0,0.0);db.execute("INSERT OR IGNORE INTO surge_outcomes(candidate_id) VALUES(?)",(cid,))
    vals=list(out);fp=_pct(price,entry);vals[5]=max(float(vals[5] or 0),fp);vals[6]=min(float(vals[6] or 0),fp)
    for i,h in enumerate(HORIZONS):
-    if vals[i] is None and age>=h:vals[i]=price
+    if vals[i] is None and h<=age<=h+HORIZON_TOLERANCE_MIN:vals[i]=price
    label=None
    if vals[4] is not None:
     final=_pct(vals[4],entry);mfe=float(vals[5] or 0);mae=float(vals[6] or 0)
@@ -60,8 +62,7 @@ def _apply_quotes(db,quotes):
    if label:db.execute("UPDATE surge_candidates SET status='RESOLVED' WHERE id=?",(cid,));changed+=1
  return changed
 def record_quotes(quotes,path=DB_PATH):
- _init(path)
- clean=[]
+ _init(path);clean=[]
  for q in quotes:
   try:price=float(q[2] or 0)
   except (TypeError,ValueError):continue
@@ -74,12 +75,11 @@ def backfill_existing_surge_candidates(source_db="data/memory/tier1_option_moves
  with sqlite3.connect(src) as s,_db(path) as db:
   rows=s.execute("SELECT event_key,symbol,option_type,instrument_key,expiry,strike,ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,velocity,acceleration,volume_ratio,spread_pct,reasons_json,features_json,observed_ts,detection_ts FROM early_events").fetchall();added=0
   for r in rows:
-   key,symbol,opt,inst,expiry,strike,ltp,score=r[:8]
-   if not key or not inst or not ltp or not r[18]:continue
-   try:features=json.loads(r[17]) if r[17] else {}
-   except (TypeError,ValueError,json.JSONDecodeError):features={}
-   features.update({"move_1m_pct":r[8],"move_3m_pct":r[9],"move_5m_pct":r[10],"velocity":r[11],"acceleration":r[12],"volume_ratio":r[13],"spread_pct":r[14]});features["pattern_key"]=pattern_key(features)
-   cur=db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(key,symbol,opt,inst,expiry,strike,r[6],float(score or 0),json.dumps(features,separators=(",",":"),default=str),"UNRESOLVED","historical"));added+=cur.rowcount
+   if not r[0] or not r[3] or not r[6] or not r[18]:continue
+   try:f=json.loads(r[17]) if r[17] else {}
+   except (TypeError,ValueError,json.JSONDecodeError):f={}
+   f.update({"move_1m_pct":r[8],"move_3m_pct":r[9],"move_5m_pct":r[10],"velocity":r[11],"acceleration":r[12],"volume_ratio":r[13],"spread_pct":r[14]});f["pattern_key"]=pattern_key(f)
+   cur=db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(r[0],r[1],r[2],r[3],r[4],r[5],r[18],float(r[6]),float(r[7] or 0),json.dumps(f,separators=(",",":"),default=str),"UNRESOLVED","historical"));added+=cur.rowcount
   return added
 def stats(path=DB_PATH):
  _init(path)
