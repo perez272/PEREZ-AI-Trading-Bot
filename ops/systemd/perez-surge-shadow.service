@@ -1,0 +1,18 @@
+[Unit]
+Description=PEREZ AI Surge Shadow Rank Observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PEREZ-AI-Trading-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PAPER_MODE=true
+Environment=ORDERS_ENABLED=false
+ExecStart=/home/ubuntu/PEREZ-AI-Trading-Bot/venv/bin/python -m src.surge_shadow_service
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
