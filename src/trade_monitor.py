@@ -2,7 +2,7 @@ from datetime import datetime
 
 
 def monitor_trade(trade, current_price):
-    """Evaluate one paper trade with consistent partial-exit accounting."""
+    """Evaluate one paper trade and retain MFE/MAE for outcome learning."""
     entry = float(trade["entry"])
     current_price = float(current_price)
     raw_quantity = trade.get("quantity", trade.get("remaining_quantity"))
@@ -23,10 +23,18 @@ def monitor_trade(trade, current_price):
     stop_loss = float(trade["stop_loss"])
     target1 = float(trade["target1"])
     target2 = float(trade["target2"])
-    target1_hit = False
     trail_pct = float(trade.get("trailing_stop_pct", 15.0))
+
+    # Persistent excursion tracking: MFE is the best favorable move seen;
+    # MAE is the worst adverse move seen. Percentages are entry-relative.
     high_watermark = max(float(trade.get("high_watermark", entry)), current_price)
+    low_watermark = min(float(trade.get("low_watermark", entry)), current_price)
     trade["high_watermark"] = round(high_watermark, 2)
+    trade["low_watermark"] = round(low_watermark, 2)
+    mfe = round(max(0.0, (high_watermark - entry) / max(abs(entry), 1e-9) * 100.0), 2)
+    mae = round(min(0.0, (low_watermark - entry) / max(abs(entry), 1e-9) * 100.0), 2)
+    trade["mfe"] = mfe
+    trade["mae"] = mae
 
     if not trade["partial_booked"] and current_price >= target1:
         booked_qty = remaining // 2
@@ -37,7 +45,6 @@ def monitor_trade(trade, current_price):
             trade["remaining_quantity"] = remaining
             stop_loss = entry
             trade["stop_loss"] = stop_loss
-            target1_hit = True
             print(">>> TARGET 1 HIT - 50% BOOKED")
             print(f">>> Booked Qty: {booked_qty}")
             print(f">>> Remaining Qty: {remaining}")
@@ -65,25 +72,18 @@ def monitor_trade(trade, current_price):
     status = "RUNNING"
     exit_reason = ""
 
-    # TARGET 2 closes the remaining position at the observed market price.
-    # Use the already-resolved trade["target2"]; do not hardcode a percentage.
     if current_price >= target2 and remaining > 0:
         status = "TARGET 2 HIT"
         exit_reason = "TARGET_2"
-        trade["realized_pnl"] = round(
-            realized + (current_price - entry) * remaining, 2
-        )
+        trade["realized_pnl"] = round(realized + (current_price - entry) * remaining, 2)
         trade["remaining_quantity"] = 0
         remaining = 0
         realized = trade["realized_pnl"]
         unrealized = 0.0
         pnl = realized
         pnl_percent = round((pnl / initial_exposure) * 100, 2)
-
     elif current_price <= stop_loss:
         status = "STOP LOSS HIT"
-        # Trailing stop is active only after partial booking.
-        # Before that, this is a normal initial/breakeven stop.
         if trade.get("partial_booked", False):
             exit_reason = "TRAILING_STOP"
         elif pnl > 0:
@@ -98,7 +98,8 @@ def monitor_trade(trade, current_price):
         "contract": trade["contract"], "entry": entry, "current": current_price,
         "quantity": remaining, "original_quantity": original_quantity,
         "remaining_quantity": remaining, "stop_loss": stop_loss, "target": target2,
-        "high_watermark": high_watermark, "trailing_stop_pct": trail_pct,
+        "high_watermark": high_watermark, "low_watermark": low_watermark,
+        "trailing_stop_pct": trail_pct, "mfe": mfe, "mae": mae,
         "realized_pnl": realized, "unrealized_pnl": unrealized, "pnl": pnl,
         "pnl_percent": pnl_percent, "status": status, "exit_reason": exit_reason,
         "target1_hit": bool(trade.get("partial_booked")), "closed": status != "RUNNING",
