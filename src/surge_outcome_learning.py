@@ -145,26 +145,52 @@ def stats(path=DB_PATH):
         total=db.execute("SELECT COUNT(*) FROM surge_candidates").fetchone()[0];resolved=db.execute("SELECT COUNT(*) FROM surge_candidates WHERE status='RESOLVED'").fetchone()[0];labels=dict(db.execute("SELECT label,COUNT(*) FROM surge_outcomes GROUP BY label").fetchall());return {"candidates":int(total),"resolved":int(resolved),"unresolved":int(total-resolved),"labels":labels}
 
 
+def _score_from_metrics(win_rate,false_rate,strong_rate,expected_pct):
+    """Convert historical outcome quality into a bounded advisory adjustment.
+    Uses both classification quality and forward 15m expectancy so a pattern
+    cannot look good merely because it has many small wins.
+    """
+    quality=(win_rate+0.5*strong_rate-false_rate)*4.0
+    expectancy=max(-4.0,min(4.0,float(expected_pct or 0.0)))
+    return max(-8.0,min(8.0,quality+expectancy))
+
+
+def _prediction(rows):
+    labels=[r[0] for r in rows]
+    n=len(labels)
+    strong=labels.count("STRONG_WIN");wins=labels.count("WIN");false=labels.count("FALSE_SURGE")
+    return strong/n,wins/n,false/n
+
+
 def learning_signal(event,min_samples=10,path=DB_PATH):
     _init(path);raw=_feature_copy(event);pk=pattern_key(raw);context=_learning_features(raw)
     with _db(path) as db:
-        exact=db.execute("SELECT o.label FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND json_extract(c.features_json,'$.pattern_key')=?",(pk,)).fetchall()
+        exact=db.execute("SELECT o.label,c.entry_ltp,o.h15_ltp FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND json_extract(c.features_json,'$.pattern_key')=?",(pk,)).fetchall()
         exact_n=len(exact)
         if exact_n>=min_samples:
-            labels=[x[0] for x in exact];strong=labels.count("STRONG_WIN");wins=labels.count("WIN");false=labels.count("FALSE_SURGE");score=(strong+0.5*wins-false)/exact_n
-            return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,exact_n/50),2),"samples":exact_n,"match":"EXACT"}
-        rows=db.execute("SELECT o.label,c.features_json FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND c.symbol=? AND c.option_type=?",(context["symbol"],context["option_type"])).fetchall()
+            strong_rate,wins_rate,false_rate=_prediction([(x[0],) for x in exact])
+            returns=[_pct(x[2],x[1]) for x in exact if x[2] is not None and x[1]]
+            expected=sum(returns)/len(returns) if returns else 0.0
+            adj=_score_from_metrics(wins_rate,false_rate,strong_rate,expected)
+            return {"status":"LEARNED","adjustment":round(adj,2),"confidence":round(min(1,exact_n/50),2),"samples":exact_n,"match":"EXACT","win_rate":round(wins_rate,3),"strong_rate":round(strong_rate,3),"false_surge_rate":round(false_rate,3),"expected_return_pct":round(expected,3)}
+        rows=db.execute("SELECT o.label,c.features_json,c.entry_ltp,o.h15_ltp FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND c.symbol=? AND c.option_type=?",(context["symbol"],context["option_type"])).fetchall()
     weighted=[]
-    for label,raw_json in rows:
+    for label,raw_json,entry,h15 in rows:
         try:old=json.loads(raw_json);oldctx=old.get("learning_context") or _learning_features(old)
         except (TypeError,ValueError,json.JSONDecodeError):continue
         same=sum(oldctx.get(k)==context.get(k) for k in ("move_bucket","momentum_bucket","acceleration_bucket","volume_bucket","spread_bucket","score_bucket","regime","mtf"))
-        weighted.append((label,0.5+same/8.0))
-    effective=sum(w for _,w in weighted)
+        weight=0.5+same/8.0
+        weighted.append((label,weight,entry,h15))
+    effective=sum(w for _,w,_,_ in weighted)
     if effective>=min_samples:
-        strong=sum(w for label,w in weighted if label=="STRONG_WIN");wins=sum(w for label,w in weighted if label=="WIN");false=sum(w for label,w in weighted if label=="FALSE_SURGE");score=(strong+0.5*wins-false)/effective
-        return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,effective/50),2),"samples":round(effective,1),"match":"GENERALIZED"}
-    return {"status":"COLD_START","adjustment":0.0,"confidence":0.0,"samples":exact_n,"match":"EXACT"}
+        strong=sum(w for label,w,_,_ in weighted if label=="STRONG_WIN")/effective
+        wins=sum(w for label,w,_,_ in weighted if label=="WIN")/effective
+        false=sum(w for label,w,_,_ in weighted if label=="FALSE_SURGE")/effective
+        returns=[_pct(h15,entry) for _,_,entry,h15 in weighted if h15 is not None and entry]
+        expected=sum(returns)/len(returns) if returns else 0.0
+        adj=_score_from_metrics(wins,false,strong,expected)
+        return {"status":"LEARNED","adjustment":round(adj,2),"confidence":round(min(1,effective/50),2),"samples":round(effective,1),"match":"GENERALIZED","win_rate":round(wins,3),"strong_rate":round(strong,3),"false_surge_rate":round(false,3),"expected_return_pct":round(expected,3)}
+    return {"status":"COLD_START","adjustment":0.0,"confidence":0.0,"samples":exact_n,"match":"EXACT","win_rate":0.0,"strong_rate":0.0,"false_surge_rate":0.0,"expected_return_pct":0.0}
 
 
 _init()
