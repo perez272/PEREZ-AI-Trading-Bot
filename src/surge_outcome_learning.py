@@ -39,26 +39,11 @@ def _init(path=DB_PATH):
 
 
 def _feature_copy(event):
-    """Capture the real detection context regardless of caller shape.
-
-    Older callers supplied fields at the event top level while the observer
-    supplies a nested `features` object. Keep both compatible so new learning
-    events never degrade to a pattern made only from symbol/type.
-    """
     nested=event.get("features") if isinstance(event.get("features"),dict) else {}
     f=dict(nested)
-    keys=(
-        "symbol","option_type","instrument_key","contract","expiry","strike",
-        "move_pct","move_1m_pct","move_3m_pct","move_5m_pct","velocity",
-        "acceleration","velocity_pct_per_min","acceleration_pct_per_min2",
-        "volume_ratio","spread_pct","volume","oi","iv","delta","gamma",
-        "theta","vega","regime","movement_bucket","momentum_bucket",
-        "trend_bucket","volume_bucket","oi_bucket","spread_bucket","mtf",
-        "source","score",
-    )
+    keys=("symbol","option_type","instrument_key","contract","expiry","strike","move_pct","move_1m_pct","move_3m_pct","move_5m_pct","velocity","acceleration","velocity_pct_per_min","acceleration_pct_per_min2","volume_ratio","spread_pct","volume","oi","iv","delta","gamma","theta","vega","regime","movement_bucket","momentum_bucket","trend_bucket","volume_bucket","oi_bucket","spread_bucket","mtf","source","score")
     for k in keys:
-        if k in event and event.get(k) is not None:
-            f[k]=event.get(k)
+        if k in event and event.get(k) is not None:f[k]=event.get(k)
     return {k:v for k,v in f.items() if v is not None}
 
 
@@ -71,33 +56,22 @@ def _bucket(value,edges):
 
 
 def _learning_features(features):
-    """Build a stable, moderately broad context for outcome matching."""
     f=dict(features or {})
-    move=f.get("move_5m_pct",f.get("move_pct"))
-    momentum=f.get("velocity",f.get("velocity_pct_per_min"))
-    acceleration=f.get("acceleration",f.get("acceleration_pct_per_min2"))
-    volume=f.get("volume_ratio")
-    spread=f.get("spread_pct")
-    oi=f.get("oi")
-    score=f.get("score")
     return {
-        "symbol":f.get("symbol","UNKNOWN"),
-        "option_type":f.get("option_type","UNKNOWN"),
-        "move_bucket":_bucket(move,[("<1",1),("1-2",2),("2-4",4),("4-8",8),("8+",10**9)]),
-        "momentum_bucket":_bucket(momentum,[("<0",0),("0-0.5",0.5),("0.5-1",1),("1-2",2),("2+",10**9)]),
-        "acceleration_bucket":_bucket(acceleration,[("<0",0),("0-0.5",0.5),("0.5-1",1),("1+",10**9)]),
-        "volume_bucket":_bucket(volume,[("<1",1),("1-1.5",1.5),("1.5-3",3),("3+",10**9)]),
-        "spread_bucket":_bucket(spread,[("<1",1),("1-2",2),("2-5",5),("5+",10**9)]),
-        "score_bucket":_bucket(score,[("<60",60),("60-70",70),("70-80",80),("80+",10**9)]),
-        "regime":f.get("regime","UNKNOWN"),
-        "mtf":f.get("mtf","UNKNOWN"),
+        "symbol":f.get("symbol","UNKNOWN"),"option_type":f.get("option_type","UNKNOWN"),
+        "move_bucket":_bucket(f.get("move_5m_pct",f.get("move_pct")),[("<1",1),("1-2",2),("2-4",4),("4-8",8),("8+",10**9)]),
+        "momentum_bucket":_bucket(f.get("velocity",f.get("velocity_pct_per_min")),[("<0",0),("0-0.5",0.5),("0.5-1",1),("1-2",2),("2+",10**9)]),
+        "acceleration_bucket":_bucket(f.get("acceleration",f.get("acceleration_pct_per_min2")),[("<0",0),("0-0.5",0.5),("0.5-1",1),("1+",10**9)]),
+        "volume_bucket":_bucket(f.get("volume_ratio"),[("<1",1),("1-1.5",1.5),("1.5-3",3),("3+",10**9)]),
+        "spread_bucket":_bucket(f.get("spread_pct"),[("<1",1),("1-2",2),("2-5",5),("5+",10**9)]),
+        "score_bucket":_bucket(f.get("score"),[("<60",60),("60-70",70),("70-80",80),("80+",10**9)]),
+        "regime":f.get("regime","UNKNOWN"),"mtf":f.get("mtf","UNKNOWN")
     }
 
 
 def pattern_key(features):
     context=_learning_features(features)
-    frozen={k:context[k] for k in sorted(context)}
-    return hashlib.sha256(json.dumps(frozen,sort_keys=True,default=str).encode()).hexdigest()[:24]
+    return hashlib.sha256(json.dumps(context,sort_keys=True,default=str).encode()).hexdigest()[:24]
 
 
 def remember_surge(event,event_key=None,path=DB_PATH):
@@ -105,9 +79,7 @@ def remember_surge(event,event_key=None,path=DB_PATH):
     try:ltp=float(event.get("ltp") or 0)
     except (TypeError,ValueError):ltp=0
     if not key or not instrument or not ts or ltp<=0:return 0
-    raw=_feature_copy(event)
-    context=_learning_features(raw)
-    f={**raw,"learning_context":context,"pattern_key":pattern_key(raw)}
+    raw=_feature_copy(event);context=_learning_features(raw);f={**raw,"learning_context":context,"pattern_key":pattern_key(raw)}
     with _db(path) as db:
         db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(key,str(event.get("symbol") or raw.get("symbol") or ""),str(event.get("option_type") or raw.get("option_type") or ""),instrument,event.get("expiry",raw.get("expiry")),event.get("strike",raw.get("strike")),ts,ltp,float(event.get("score") or raw.get("score") or 0),json.dumps(f,separators=(",",":"),default=str),"UNRESOLVED","live"))
         row=db.execute("SELECT id FROM surge_candidates WHERE event_key=?",(key,)).fetchone();return int(row[0]) if row else 0
@@ -125,8 +97,7 @@ def _apply_quotes(db,quotes):
             age=(now-det)/60.0
             if age>15.0+HORIZON_TOLERANCE_MIN:continue
             out=db.execute("SELECT h1_ltp,h3_ltp,h5_ltp,h10_ltp,h15_ltp,mfe_pct,mae_pct FROM surge_outcomes WHERE candidate_id=?",(cid,)).fetchone()
-            if out is None:
-                out=(None,None,None,None,None,0.0,0.0);db.execute("INSERT OR IGNORE INTO surge_outcomes(candidate_id) VALUES(?)",(cid,))
+            if out is None:out=(None,None,None,None,None,0.0,0.0);db.execute("INSERT OR IGNORE INTO surge_outcomes(candidate_id) VALUES(?)",(cid,))
             vals=list(out);fp=_pct(price,entry);vals[5]=max(float(vals[5] or 0),fp);vals[6]=min(float(vals[6] or 0),fp)
             for i,h in enumerate(HORIZONS):
                 if vals[i] is None and age>=h:vals[i]=price
@@ -163,8 +134,7 @@ def backfill_existing_surge_candidates(source_db="data/memory/tier1_option_moves
             if not r[0] or not r[3] or not r[6] or not r[18]:continue
             try:f=json.loads(r[17]) if r[17] else {}
             except (TypeError,ValueError,json.JSONDecodeError):f={}
-            f.update({"symbol":r[1],"option_type":r[2],"move_1m_pct":r[8],"move_3m_pct":r[9],"move_5m_pct":r[10],"velocity":r[11],"acceleration":r[12],"volume_ratio":r[13],"spread_pct":r[14],"score":r[7]})
-            f["learning_context"]=_learning_features(f);f["pattern_key"]=pattern_key(f)
+            f.update({"symbol":r[1],"option_type":r[2],"move_1m_pct":r[8],"move_3m_pct":r[9],"move_5m_pct":r[10],"velocity":r[11],"acceleration":r[12],"volume_ratio":r[13],"spread_pct":r[14],"score":r[7]});f["learning_context"]=_learning_features(f);f["pattern_key"]=pattern_key(f)
             cur=db.execute("INSERT OR IGNORE INTO surge_candidates(event_key,symbol,option_type,instrument_key,expiry,strike,detection_ts,entry_ltp,score,features_json,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(r[0],r[1],r[2],r[3],r[4],r[5],r[18],float(r[6]),float(r[7] or 0),json.dumps(f,separators=(",",":"),default=str),"UNRESOLVED","historical"));added+=cur.rowcount
         return added
 
@@ -178,30 +148,23 @@ def stats(path=DB_PATH):
 def learning_signal(event,min_samples=10,path=DB_PATH):
     _init(path);raw=_feature_copy(event);pk=pattern_key(raw);context=_learning_features(raw)
     with _db(path) as db:
-        rows=db.execute("SELECT o.label FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND json_extract(c.features_json,'$.pattern_key')=?",(pk,)).fetchall()
-        n=len(rows)
-        # Second-stage generalized match: use the stable broad context rather
-        # than exact raw fields, so small differences in live quote metadata
-        # do not force every pattern back to cold start.
-        if n<min_samples:
-            rows=db.execute("SELECT o.label,c.features_json FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND c.symbol=? AND c.option_type=?",(context["symbol"],context["option_type"])).fetchall()
-            comparable=[]
-            for label,raw_json in rows:
-                try:old=json.loads(raw_json);oldctx=old.get("learning_context") or _learning_features(old)
-                except (TypeError,ValueError,json.JSONDecodeError):continue
-                comparable.append((label,oldctx))
-            if len(comparable)>=min_samples:
-                weights=[]
-                for label,oldctx in comparable:
-                    same=sum(oldctx.get(k)==context.get(k) for k in ("move_bucket","momentum_bucket","acceleration_bucket","volume_bucket","spread_bucket","score_bucket","regime","mtf"))
-                    weights.append((label,0.5+same/8.0))
-                effective=sum(w for _,w in weights)
-                if effective>=min_samples:
-                    wins=sum(w for label,w in weights if label in ("WIN","STRONG_WIN"));strong=sum(w for label,w in weights if label=="STRONG_WIN");false=sum(w for label,w in weights if label=="FALSE_SURGE")
-                    score=(strong+0.5*(wins-strong)-false)/effective
-                    return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,effective/50),2),"samples":round(effective,1),"match":"GENERALIZED"}
-    if n<min_samples:return {"status":"COLD_START","adjustment":0.0,"confidence":0.0,"samples":n,"match":"EXACT"}
-    strong=sum(x=="STRONG_WIN" for x, in rows);wins=sum(x=="WIN" for x, in rows);false=sum(x=="FALSE_SURGE" for x, in rows);score=(strong+0.5*wins-false)/max(1,n);return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,n/50),2),"samples":n,"match":"EXACT"}
+        exact=db.execute("SELECT o.label FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND json_extract(c.features_json,'$.pattern_key')=?",(pk,)).fetchall()
+        exact_n=len(exact)
+        if exact_n>=min_samples:
+            labels=[x[0] for x in exact];strong=labels.count("STRONG_WIN");wins=labels.count("WIN");false=labels.count("FALSE_SURGE");score=(strong+0.5*wins-false)/exact_n
+            return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,exact_n/50),2),"samples":exact_n,"match":"EXACT"}
+        rows=db.execute("SELECT o.label,c.features_json FROM surge_outcomes o JOIN surge_candidates c ON c.id=o.candidate_id WHERE o.label!='UNRESOLVED' AND c.symbol=? AND c.option_type=?",(context["symbol"],context["option_type"])).fetchall()
+    weighted=[]
+    for label,raw_json in rows:
+        try:old=json.loads(raw_json);oldctx=old.get("learning_context") or _learning_features(old)
+        except (TypeError,ValueError,json.JSONDecodeError):continue
+        same=sum(oldctx.get(k)==context.get(k) for k in ("move_bucket","momentum_bucket","acceleration_bucket","volume_bucket","spread_bucket","score_bucket","regime","mtf"))
+        weighted.append((label,0.5+same/8.0))
+    effective=sum(w for _,w in weighted)
+    if effective>=min_samples:
+        strong=sum(w for label,w in weighted if label=="STRONG_WIN");wins=sum(w for label,w in weighted if label=="WIN");false=sum(w for label,w in weighted if label=="FALSE_SURGE");score=(strong+0.5*wins-false)/effective
+        return {"status":"LEARNED","adjustment":round(max(-8,min(8,score*8)),2),"confidence":round(min(1,effective/50),2),"samples":round(effective,1),"match":"GENERALIZED"}
+    return {"status":"COLD_START","adjustment":0.0,"confidence":0.0,"samples":exact_n,"match":"EXACT"}
 
 
 _init()
