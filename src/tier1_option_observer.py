@@ -21,9 +21,21 @@ class Tier1OptionObserver:
   conn=sqlite3.connect(self.db_path);conn.execute("PRAGMA journal_mode=WAL");return conn
  def _init_db(self):
   with self._connect() as db:
-   db.execute("CREATE TABLE IF NOT EXISTS baselines(contract_key TEXT PRIMARY KEY,symbol TEXT NOT NULL,option_type TEXT,expiry TEXT,strike REAL,baseline_ltp REAL NOT NULL,baseline_ts TEXT NOT NULL,last_ltp REAL NOT NULL,last_ts TEXT NOT NULL)");db.execute("CREATE TABLE IF NOT EXISTS move_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,symbol TEXT NOT NULL,option_type TEXT,contract TEXT,expiry TEXT,strike REAL,threshold REAL NOT NULL,baseline_ltp REAL NOT NULL,ltp REAL NOT NULL,move_pct REAL NOT NULL,observed_ts TEXT NOT NULL,features_json TEXT NOT NULL)");db.execute("CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT NOT NULL,observed_ts TEXT NOT NULL,contracts_seen INTEGER NOT NULL,events_count INTEGER NOT NULL DEFAULT 0)");db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol,threshold)");db.execute("CREATE TABLE IF NOT EXISTS early_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,symbol TEXT NOT NULL,option_type TEXT NOT NULL,instrument_key TEXT NOT NULL,expiry TEXT,strike REAL,ltp REAL NOT NULL,score REAL NOT NULL,move_1m_pct REAL,move_3m_pct REAL,move_5m_pct REAL,velocity REAL,acceleration REAL,volume_ratio REAL,spread_pct REAL,reasons_json TEXT NOT NULL,features_json TEXT NOT NULL,observed_ts TEXT NOT NULL,detection_ts TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0)");db.execute("CREATE INDEX IF NOT EXISTS idx_early_events_pending ON early_events(consumed,observed_ts)");db.execute("CREATE TABLE IF NOT EXISTS observer_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL)");existing=db.execute("SELECT value FROM observer_meta WHERE key='surge_events_total'").fetchone()
+   db.execute("CREATE TABLE IF NOT EXISTS baselines(contract_key TEXT PRIMARY KEY,symbol TEXT NOT NULL,option_type TEXT,expiry TEXT,strike REAL,baseline_ltp REAL NOT NULL,baseline_ts TEXT NOT NULL,last_ltp REAL NOT NULL,last_ts TEXT NOT NULL)");db.execute("CREATE TABLE IF NOT EXISTS move_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,symbol TEXT NOT NULL,option_type TEXT,contract TEXT,expiry TEXT,strike REAL,threshold REAL NOT NULL,baseline_ltp REAL NOT NULL,ltp REAL NOT NULL,move_pct REAL NOT NULL,observed_ts TEXT NOT NULL,features_json TEXT NOT NULL)");db.execute("CREATE INDEX IF NOT EXISTS idx_move_symbol_threshold ON move_events(symbol,threshold)");db.execute("CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT NOT NULL,observed_ts TEXT NOT NULL,contracts_seen INTEGER NOT NULL,events_count INTEGER NOT NULL DEFAULT 0)");db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)");db.execute("CREATE TABLE IF NOT EXISTS early_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,symbol TEXT NOT NULL,option_type TEXT NOT NULL,instrument_key TEXT NOT NULL,expiry TEXT,strike REAL,ltp REAL NOT NULL,score REAL NOT NULL,move_1m_pct REAL,move_3m_pct REAL,move_5m_pct REAL,velocity REAL,acceleration REAL,volume_ratio REAL,spread_pct REAL,reasons_json TEXT NOT NULL,features_json TEXT NOT NULL,observed_ts TEXT NOT NULL,detection_ts TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0)");db.execute("CREATE INDEX IF NOT EXISTS idx_early_events_pending ON early_events(consumed,observed_ts)");db.execute("CREATE TABLE IF NOT EXISTS observer_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL)");existing=db.execute("SELECT value FROM observer_meta WHERE key='surge_events_total'").fetchone()
    if existing is None:db.execute("INSERT INTO observer_meta(key,value) VALUES('surge_events_total',?)",(db.execute("SELECT COUNT(*) FROM move_events").fetchone()[0],))
-   db.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(observed_ts)")
+ def _record_cached_quotes(self,symbol,chain):
+  quote_batch=[];observed_ts=datetime.now(timezone.utc).isoformat()
+  for row in chain or []:
+   for option_type in ("CE","PE"):
+    market=self._market(row,option_type);md=market.get("market_data") or {}
+    try:ltp=float(md.get("ltp",0) or 0)
+    except (TypeError,ValueError):continue
+    instrument_key=market.get("instrument_key")
+    if ltp>0 and instrument_key:quote_batch.append((instrument_key,observed_ts,ltp))
+  if quote_batch:
+   try:return record_quotes(quote_batch)
+   except Exception as exc:print(f"[SURGE LEARNING] cached quote resolution failed for {symbol}: {exc}")
+  return 0
  @staticmethod
  def _contract_key(symbol,row,option_type):
   return hashlib.sha256("|".join(str(x or "") for x in (symbol,option_type,row.get("instrument_key"),row.get("expiry"),row.get("strike_price"))).encode()).hexdigest()
@@ -37,8 +49,7 @@ class Tier1OptionObserver:
   snapshot=dict(market);snapshot["observed_ts"]=observed_ts;signal=detect_explosive_move(symbol,option_type,snapshot,list(self._history[key]));self._history[key].append(snapshot);return signal
  def observe(self,symbol,chain,observed_ts=None):
   if symbol not in TIER1_SYMBOLS:raise ValueError(f"Tier-1 observer rejected non-Tier-1 symbol: {symbol}")
-  observed_ts=observed_ts or datetime.now(timezone.utc).isoformat();now_epoch=time.time();events=[];valid_contracts=0
-  quote_batch=[]
+  observed_ts=observed_ts or datetime.now(timezone.utc).isoformat();now_epoch=time.time();events=[];valid_contracts=0;quote_batch=[]
   for row in chain or []:
    for option_type in ("CE","PE"):
     market=self._market(row,option_type);md=market.get("market_data") or {}
@@ -88,7 +99,9 @@ class Tier1OptionObserver:
     if cached and now-cached[0]<CHAIN_REFRESH_TTL_SECONDS:chain=cached[1];source="cache"
     else:chain=client.get_option_chain(symbol);self._chain_cache.__setitem__(symbol,(time.monotonic(),chain)) if chain else None;source="upstox"
     if chain and source=="upstox":events.extend(self.observe(symbol,chain,observed_ts=datetime.now(timezone.utc).isoformat()));print(f"[TIER1 OBSERVER] {symbol}: observation source={source}")
-    elif chain:print(f"[TIER1 OBSERVER] {symbol}: cached snapshot — detector history unchanged")
+    elif chain:
+     self._record_cached_quotes(symbol,chain)
+     print(f"[TIER1 OBSERVER] {symbol}: cached snapshot — outcome quotes recorded")
    except Exception as exc:print(f"[TIER1 OBSERVER] {symbol}: {exc}")
   return events
  def get_pending_early_events(self,limit=10):
