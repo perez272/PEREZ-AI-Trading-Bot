@@ -38,3 +38,41 @@ def test_learning_is_cold_start_until_mature(tmp_path):
     event={"event_key":"E1","symbol":"NIFTY","option_type":"CE","instrument_key":"NSE_FO|1","ltp":100,"detection_ts":"2026-09-11T07:00:00+00:00","features":{"symbol":"NIFTY","option_type":"CE","move_5m_pct":5.0}}
     remember_surge(event,path=db)
     assert learning_signal(event,path=db)["status"]=="COLD_START"
+
+def test_horizons_survive_sparse_polling(tmp_path):
+    from datetime import datetime, timezone, timedelta
+    import sqlite3
+    from src.surge_outcome_learning import remember_surge, record_quotes
+
+    db = tmp_path / "adaptive.sqlite3"
+    base = datetime(2026, 9, 11, 7, 0, tzinfo=timezone.utc)
+
+    event = {
+        "event_key": "sparse-test",
+        "symbol": "NIFTY",
+        "option_type": "CE",
+        "instrument_key": "TEST|1",
+        "detection_ts": base.isoformat(),
+        "ltp": 100.0,
+        "score": 80,
+    }
+    remember_surge(event, "sparse-test", str(db))
+
+    quotes = [
+        ("TEST|1", (base + timedelta(minutes=1, seconds=45)).isoformat(), 102.0),
+        ("TEST|1", (base + timedelta(minutes=3, seconds=45)).isoformat(), 104.0),
+        ("TEST|1", (base + timedelta(minutes=5, seconds=45)).isoformat(), 106.0),
+        ("TEST|1", (base + timedelta(minutes=10, seconds=45)).isoformat(), 108.0),
+        ("TEST|1", (base + timedelta(minutes=15, seconds=15)).isoformat(), 110.0),
+    ]
+
+    record_quotes(quotes, str(db))
+
+    with sqlite3.connect(db) as c:
+        row = c.execute(
+            "SELECT h1_ltp,h3_ltp,h5_ltp,h10_ltp,h15_ltp,label "
+            "FROM surge_outcomes"
+        ).fetchone()
+
+    assert row[:5] == (102.0, 104.0, 106.0, 108.0, 110.0)
+    assert row[5] in ("WIN", "STRONG_WIN")
