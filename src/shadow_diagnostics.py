@@ -12,7 +12,7 @@ def _db(path=DB_PATH):
 
 def _valid_rows(path=DB_PATH):
  with _db(path) as db:
-  return db.execute("""SELECT c.symbol,c.option_type,c.score,c.features_json,r.raw_score,r.learned_score,r.created_ts,o.label,o.entry_ltp,o.h1_ltp,o.h3_ltp,o.h5_ltp,o.h10_ltp,o.h15_ltp,c.detection_ts,o.resolved_ts FROM surge_shadow_rankings r JOIN surge_candidates c ON c.event_key=r.event_key JOIN surge_outcomes o ON o.candidate_id=c.id WHERE o.label!='UNRESOLVED' AND julianday(r.created_ts)>=julianday(c.detection_ts) AND (julianday(r.created_ts)-julianday(c.detection_ts))*86400<=900 AND (o.resolved_ts IS NULL OR julianday(r.created_ts)<=julianday(o.resolved_ts))""").fetchall()
+  return db.execute("""SELECT c.symbol,c.option_type,c.score,c.features_json,r.raw_score,r.learned_score,r.created_ts,o.label,c.entry_ltp,o.h1_ltp,o.h3_ltp,o.h5_ltp,o.h10_ltp,o.h15_ltp,c.detection_ts,o.resolved_ts FROM surge_shadow_rankings r JOIN surge_candidates c ON c.event_key=r.event_key JOIN surge_outcomes o ON o.candidate_id=c.id WHERE o.label!='UNRESOLVED' AND julianday(r.created_ts)>=julianday(c.detection_ts) AND (julianday(r.created_ts)-julianday(c.detection_ts))*86400<=900 AND (o.resolved_ts IS NULL OR julianday(r.created_ts)<=julianday(o.resolved_ts))""").fetchall()
 
 def _bucket(score):
  try:s=float(score)
@@ -29,8 +29,9 @@ def _metrics(rows):
  n=len(rows)
  if not n:return {"samples":0}
  def exp(ix):
-  vals=[_pct(r[ix],r[8]) for r in rows];vals=[v for v in vals if v is not None];return round(sum(vals)/len(vals),3) if vals else None
- return {"samples":n,"raw_expected_pct":exp(4),"learned_expected_pct":exp(5),"lift_pct":round((exp(5) or 0)-(exp(4) or 0),3),"strong_rate":round(sum(r[7]=="STRONG_WIN" for r in rows)/n,3),"win_rate":round(sum(r[7] in ("WIN","STRONG_WIN") for r in rows)/n,3),"false_rate":round(sum(r[7]=="FALSE_SURGE" for r in rows)/n,3),"h1_expected_pct":exp(9),"h3_expected_pct":exp(10),"h5_expected_pct":exp(11),"h10_expected_pct":exp(12),"h15_expected_pct":exp(13)}
+  vals=[_pct(r[ix],r[9]) for r in rows];vals=[v for v in vals if v is not None];return round(sum(vals)/len(vals),3) if vals else None
+ raw=exp(4);learned=exp(5)
+ return {"samples":n,"raw_expected_pct":raw,"learned_expected_pct":learned,"lift_pct":round((learned or 0)-(raw or 0),3),"strong_rate":round(sum(r[7]=="STRONG_WIN" for r in rows)/n,3),"win_rate":round(sum(r[7] in ("WIN","STRONG_WIN") for r in rows)/n,3),"false_rate":round(sum(r[7]=="FALSE_SURGE" for r in rows)/n,3),"h1_expected_pct":exp(10),"h3_expected_pct":exp(11),"h5_expected_pct":exp(12),"h10_expected_pct":exp(13),"h15_expected_pct":exp(14)}
 
 def _group(rows,key):
  groups={}
