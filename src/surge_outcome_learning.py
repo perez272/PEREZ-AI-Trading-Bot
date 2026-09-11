@@ -13,7 +13,7 @@ from pathlib import Path
 DB_PATH=Path("data/memory/adaptive_trade_memory.sqlite3")
 HORIZONS=(1,3,5,10,15)
 HORIZON_TOLERANCE_MIN=0.5
-SHADOW_MAX_DELAY_SEC=60
+SHADOW_MAX_DELAY_SEC=900
 
 
 def _db(path=DB_PATH):
