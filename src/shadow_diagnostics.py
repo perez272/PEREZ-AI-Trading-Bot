@@ -23,15 +23,18 @@ def _bucket(score):
  return "80+"
 
 def _pct(price,entry):
- return (float(price)-float(entry))/float(entry)*100 if entry and float(entry)>0 and price is not None else None
+ try:
+  if price is None or entry is None or float(entry)<=0:return None
+  return (float(price)-float(entry))/float(entry)*100
+ except (TypeError,ValueError):return None
 
 def _metrics(rows):
  n=len(rows)
  if not n:return {"samples":0}
  def exp(ix):
-  vals=[_pct(r[ix],r[9]) for r in rows];vals=[v for v in vals if v is not None];return round(sum(vals)/len(vals),3) if vals else None
+  vals=[_pct(r[ix],r[8]) for r in rows];vals=[v for v in vals if v is not None];return round(sum(vals)/len(vals),3) if vals else None
  raw=exp(4);learned=exp(5)
- return {"samples":n,"raw_expected_pct":raw,"learned_expected_pct":learned,"lift_pct":round((learned or 0)-(raw or 0),3),"strong_rate":round(sum(r[7]=="STRONG_WIN" for r in rows)/n,3),"win_rate":round(sum(r[7] in ("WIN","STRONG_WIN") for r in rows)/n,3),"false_rate":round(sum(r[7]=="FALSE_SURGE" for r in rows)/n,3),"h1_expected_pct":exp(10),"h3_expected_pct":exp(11),"h5_expected_pct":exp(12),"h10_expected_pct":exp(13),"h15_expected_pct":exp(14)}
+ return {"samples":n,"raw_expected_pct":raw,"learned_expected_pct":learned,"lift_pct":round((learned or 0)-(raw or 0),3),"strong_rate":round(sum(r[7]=="STRONG_WIN" for r in rows)/n,3),"win_rate":round(sum(r[7] in ("WIN","STRONG_WIN") for r in rows)/n,3),"false_rate":round(sum(r[7]=="FALSE_SURGE" for r in rows)/n,3),"h1_expected_pct":exp(9),"h3_expected_pct":exp(10),"h5_expected_pct":exp(11),"h10_expected_pct":exp(12),"h15_expected_pct":exp(13)}
 
 def _group(rows,key):
  groups={}
