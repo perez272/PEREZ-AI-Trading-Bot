@@ -34,7 +34,31 @@ def event_proof(event_key):
   try:return max(0.0,(datetime.fromisoformat(b)-datetime.fromisoformat(a)).total_seconds())
   except Exception:return None
  return {'event_key':event_key,'stages':{k:stages.get(k) for k in ('DETECTED','BRIDGE_PICKUP','GATE_EVALUATION','PAPER_ENTRY','MONITOR_START','MONITOR_END','OUTCOME')},'timeline':rows,'detection_to_bridge_s':delta(stages.get('DETECTED',{}).get('ts'),stages.get('BRIDGE_PICKUP',{}).get('ts')),'bridge_to_entry_s':delta(stages.get('BRIDGE_PICKUP',{}).get('ts'),stages.get('PAPER_ENTRY',{}).get('ts')),'entry_to_monitor_s':delta(stages.get('PAPER_ENTRY',{}).get('ts'),stages.get('MONITOR_START',{}).get('ts')),'monitor_to_outcome_s':delta(stages.get('MONITOR_START',{}).get('ts'),stages.get('OUTCOME',{}).get('ts')),'total_to_outcome_s':delta(rows[0].get('ts') if rows else None,rows[-1].get('ts') if rows else None)}
+def timing_proof(rows=None):
+ rows=recent(5000) if rows is None else rows
+ grouped={}
+ for r in rows:
+  grouped.setdefault(r.get('event_key'),[]).append(r)
+ samples=[]
+ for key,items in grouped.items():
+  entry=next((x for x in items if x.get('stage')=='PAPER_ENTRY' and x.get('status') in ('OK','PASS')),None)
+  outcome=next((x for x in items if x.get('stage')=='OUTCOME' and x.get('status') in ('OK','PASS')),None)
+  if not entry or not outcome: continue
+  try: dt=datetime.fromisoformat(entry['ts'])
+  except Exception: continue
+  try: pnl=float((outcome.get('details') or {}).get('pnl'))
+  except Exception: continue
+  samples.append({'event_key':key,'entry_ts':entry['ts'],'symbol':entry.get('symbol'),'option_type':entry.get('option_type'),'contract':entry.get('contract'),'score':entry.get('score'),'pnl':pnl,'minute_of_day':dt.hour*60+dt.minute})
+ buckets={}
+ for s in samples:
+  start=(s['minute_of_day']//30)*30; end=start+30; label=f'{start//60:02d}:{start%60:02d}-{end//60:02d}:{end%60:02d}'
+  b=buckets.setdefault(label,{'window':label,'samples':0,'wins':0,'losses':0,'net_pnl':0.0,'avg_pnl':0.0})
+  b['samples']+=1;b['wins']+=int(s['pnl']>0);b['losses']+=int(s['pnl']<0);b['net_pnl']+=s['pnl']
+ for b in buckets.values():b['net_pnl']=round(b['net_pnl'],2);b['avg_pnl']=round(b['net_pnl']/b['samples'],2) if b['samples'] else 0;b['win_rate_pct']=round(b['wins']/b['samples']*100,1) if b['samples'] else 0
+ n=len(samples);enough=n>=30 and sum(1 for b in buckets.values() if b['samples']>=5)>=3
+ return {'proven':enough,'status':'PROVEN' if enough else 'UNPROVEN','sample_count':n,'minimum_samples':30,'minimum_buckets':3,'bucket_min_samples':5,'buckets':sorted(buckets.values(),key=lambda x:x['window']),'note':'Timing is not a trading rule until at least 30 completed paper trades and 3 separate 30-minute windows each have >=5 completed trades.' if not enough else 'Timing evidence meets the minimum sample threshold; use bucket statistics for review, not automatic strategy changes.','best_window':max(buckets.values(),key=lambda b:b['avg_pnl'])['window'] if enough and buckets else None,'worst_window':min(buckets.values(),key=lambda b:b['avg_pnl'])['window'] if enough and buckets else None}
 def summary():
  rows=recent(2000);sc={};st={}
  for r in rows:sc[r['stage']]=sc.get(r['stage'],0)+1;st[r['status']]=st.get(r['status'],0)+1
- return {'records':len(rows),'stage_counts':sc,'status_counts':st}
+ tp=timing_proof(rows)
+ return {'records':len(rows),'stage_counts':sc,'status_counts':st,'timing_proof':tp}
