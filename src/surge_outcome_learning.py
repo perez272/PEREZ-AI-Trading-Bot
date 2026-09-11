@@ -13,6 +13,7 @@ from pathlib import Path
 DB_PATH=Path("data/memory/adaptive_trade_memory.sqlite3")
 HORIZONS=(1,3,5,10,15)
 HORIZON_TOLERANCE_MIN=0.5
+SHADOW_MAX_DELAY_SEC=60
 
 
 def _db(path=DB_PATH):
@@ -148,10 +149,6 @@ def stats(path=DB_PATH):
 
 
 def _score_from_metrics(win_rate,false_rate,strong_rate,expected_pct):
-    """Convert historical outcome quality into a bounded advisory adjustment.
-    Uses both classification quality and forward 15m expectancy so a pattern
-    cannot look good merely because it has many small wins.
-    """
     quality=(win_rate+0.5*strong_rate-false_rate)*4.0
     expectancy=max(-4.0,min(4.0,float(expected_pct or 0.0)))
     return max(-8.0,min(8.0,quality+expectancy))
@@ -206,21 +203,59 @@ def record_shadow_ranking(event,learned_score,path=DB_PATH):
     return 1
 
 
-def shadow_performance(min_samples=20,path=DB_PATH):
-    """Compare raw-score vs learned-score priority on resolved shadow events."""
-    _init(path)
-    with _db(path) as db:
-        rows=db.execute("SELECT s.raw_score,s.learned_score,o.label,c.entry_ltp,o.h15_ltp FROM surge_shadow_rankings s JOIN surge_candidates c ON c.event_key=s.event_key JOIN surge_outcomes o ON o.candidate_id=c.id WHERE o.label!='UNRESOLVED' AND o.h15_ltp IS NOT NULL AND c.entry_ltp>0").fetchall()
+def _valid_shadow_rows(db):
+    """Return only rankings recorded promptly after detection and before resolution.
+    This prevents delayed catch-up rankings from contaminating the prediction test.
+    """
+    return db.execute("""
+        SELECT s.raw_score,s.learned_score,o.label,c.entry_ltp,o.h15_ltp,
+               c.symbol,c.option_type,c.detection_ts,s.created_ts,o.resolved_ts
+        FROM surge_shadow_rankings s
+        JOIN surge_candidates c ON c.event_key=s.event_key
+        JOIN surge_outcomes o ON o.candidate_id=c.id
+        WHERE o.label!='UNRESOLVED' AND o.h15_ltp IS NOT NULL AND c.entry_ltp>0
+          AND julianday(s.created_ts) >= julianday(c.detection_ts)
+          AND (julianday(s.created_ts)-julianday(c.detection_ts))*86400.0 <= ?
+          AND julianday(s.created_ts) <= julianday(o.resolved_ts)
+    """,(SHADOW_MAX_DELAY_SEC,)).fetchall()
+
+
+def _shadow_metrics(rows):
     n=len(rows)
-    if n<min_samples:return {"status":"WAITING","samples":n,"min_samples":min_samples}
+    if not n:return None
     def ret(r):return _pct(r[4],r[3])
-    ordered_raw=sorted(rows,key=lambda r:r[0],reverse=True);ordered_learned=sorted(rows,key=lambda r:r[1],reverse=True)
     k=max(1,n//4)
-    raw_top=ordered_raw[:k];learned_top=ordered_learned[:k]
+    raw_top=sorted(rows,key=lambda r:r[0],reverse=True)[:k]
+    learned_top=sorted(rows,key=lambda r:r[1],reverse=True)[:k]
     raw_avg=sum(ret(r) for r in raw_top)/k;learned_avg=sum(ret(r) for r in learned_top)/k
     raw_strong=sum(1 for r in raw_top if r[2]=="STRONG_WIN")/k
     learned_strong=sum(1 for r in learned_top if r[2]=="STRONG_WIN")/k
-    return {"status":"READY","samples":n,"top_quartile":k,"raw_top_expected_pct":round(raw_avg,3),"learned_top_expected_pct":round(learned_avg,3),"lift_pct":round(learned_avg-raw_avg,3),"raw_top_strong_rate":round(raw_strong,3),"learned_top_strong_rate":round(learned_strong,3)}
+    raw_false=sum(1 for r in raw_top if r[2]=="FALSE_SURGE")/k
+    learned_false=sum(1 for r in learned_top if r[2]=="FALSE_SURGE")/k
+    return {"samples":n,"top_quartile":k,"raw_top_expected_pct":round(raw_avg,3),"learned_top_expected_pct":round(learned_avg,3),"lift_pct":round(learned_avg-raw_avg,3),"raw_top_strong_rate":round(raw_strong,3),"learned_top_strong_rate":round(learned_strong,3),"raw_top_false_rate":round(raw_false,3),"learned_top_false_rate":round(learned_false,3)}
+
+
+def shadow_performance(min_samples=20,path=DB_PATH):
+    """Compare raw-score vs learned-score priority using only leakage-safe events."""
+    _init(path)
+    with _db(path) as db:rows=_valid_shadow_rows(db)
+    n=len(rows)
+    if n<min_samples:return {"status":"WAITING","samples":n,"min_samples":min_samples,"leakage_safe":True}
+    m=_shadow_metrics(rows);return {"status":"READY","leakage_safe":True,**m}
+
+
+def shadow_breakdown(min_samples=10,path=DB_PATH):
+    """Per-symbol/option shadow diagnostics for detecting where learning helps or hurts."""
+    _init(path)
+    with _db(path) as db:rows=_valid_shadow_rows(db)
+    groups={}
+    for r in rows:groups.setdefault((r[5],r[6]),[]).append(r)
+    out=[]
+    for (symbol,option_type),group in sorted(groups.items()):
+        if len(group)<min_samples:continue
+        m=_shadow_metrics(group)
+        out.append({"symbol":symbol,"option_type":option_type,**m})
+    return out
 
 
 _init()
