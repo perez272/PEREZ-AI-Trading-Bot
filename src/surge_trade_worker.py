@@ -16,7 +16,8 @@ from src.rejection_recorder import record_rejection
 from src.upgrade_config import MAX_TRADES_PER_DAY,ENTRY_START,LAST_ENTRY
 from src.session_clock import IST,is_weekday
 from src.dashboard_telemetry import record_stage
-from src.adaptive_learning import remember_candidate,learning_signal,resolve_outcome,memory_stats
+from src.adaptive_learning import remember_candidate,learning_signal as trade_learning_signal,resolve_outcome,memory_stats
+from src.surge_outcome_learning import learning_signal as surge_learning_signal,remember_surge
 RUNNING=True;POLL_SECONDS=max(1,int(os.getenv('SURGE_TRADE_BRIDGE_INTERVAL_SECONDS','2')));RISK_MANAGER=TradingRiskManager()
 def _stop(*_args):
  global RUNNING;RUNNING=False
@@ -35,23 +36,23 @@ def _process_once():
   record_stage(event_key,'DETECTED','OK',symbol=symbol,option_type=option_type,score=event.get('score'),contract=event.get('contract'),ts_override=event.get('detection_ts'),observed_ts=event.get('observed_ts'))
   record_stage(event_key,'BRIDGE_PICKUP','OK',symbol=symbol,option_type=option_type,score=event.get('score'),contract=event.get('contract'))
   try:
-   remember_candidate(event,event_key)
-   event['learning'] = learning_signal(event)
-   # Apply only mature learned evidence. Bounded +/-8 keeps the existing
-   # signal/gates/risk system in control and avoids cold-start blocking.
-   if event['learning'].get('status') == 'LEARNED':
-    base_score=float(event.get('score',0) or 0)
-    adj=float(event['learning'].get('adjustment',0) or 0)
-    event['score']=round(max(0.0,min(100.0,base_score+adj)),2)
+   remember_candidate(event,event_key);remember_surge(event,event_key)
+   old_learning=trade_learning_signal(event);surge_learning=surge_learning_signal(event)
+   event['learning']=old_learning;event['surge_learning']=surge_learning
+   total_adj=0.0
+   if old_learning.get('status')=='LEARNED':total_adj+=float(old_learning.get('adjustment',0) or 0)
+   if surge_learning.get('status')=='LEARNED':total_adj+=float(surge_learning.get('adjustment',0) or 0)
+   total_adj=max(-8.0,min(8.0,total_adj));event['learning']['combined_adjustment']=round(total_adj,2)
+   base_score=float(event.get('score',0) or 0);event['score']=round(max(0.0,min(100.0,base_score+total_adj)),2)
   except Exception as exc:
-   event['learning'] = {'adjustment':0.0,'status':'UNAVAILABLE','error':str(exc)}
+   event['learning']={'adjustment':0.0,'combined_adjustment':0.0,'status':'UNAVAILABLE','error':str(exc)};event['surge_learning']={'adjustment':0.0,'status':'UNAVAILABLE','error':str(exc)}
   try:trade,result=create_surge_trade(event,capital,RISK_MANAGER)
   except Exception as exc:
    record_stage(event_key,'GATE_EVALUATION','ERROR',symbol=symbol,option_type=option_type,score=event.get('score'),error=str(exc));print(f'[SURGE BRIDGE] evaluation failed for {symbol} {option_type}: {exc}');continue
   gate=result.get('gate',{}) if isinstance(result,dict) else {}
   if isinstance(gate,dict):
-   gate['learning_adjustment']=event.get('learning',{}).get('adjustment',0.0);gate['learning_confidence']=event.get('learning',{}).get('confidence',0.0);gate['learning_samples']=event.get('learning',{}).get('samples',0)
-  record_stage(event_key,'GATE_EVALUATION','PASS' if trade is not None else 'BLOCKED',symbol=symbol,option_type=option_type,score=gate.get('score',event.get('score')),contract=event.get('contract'),reason=result.get('reason') if isinstance(result,dict) else None,gate_reasons=gate.get('reasons',[]),learning=event.get('learning'))
+   gate['learning_adjustment']=event.get('learning',{}).get('combined_adjustment',0.0);gate['learning_confidence']=event.get('learning',{}).get('confidence',0.0);gate['learning_samples']=event.get('learning',{}).get('samples',0);gate['surge_learning_adjustment']=event.get('surge_learning',{}).get('adjustment',0.0);gate['surge_learning_confidence']=event.get('surge_learning',{}).get('confidence',0.0);gate['surge_learning_samples']=event.get('surge_learning',{}).get('samples',0)
+  record_stage(event_key,'GATE_EVALUATION','PASS' if trade is not None else 'BLOCKED',symbol=symbol,option_type=option_type,score=gate.get('score',event.get('score')),contract=event.get('contract'),reason=result.get('reason') if isinstance(result,dict) else None,gate_reasons=gate.get('reasons',[]),learning=event.get('learning'),surge_learning=event.get('surge_learning'))
   if trade is None:
    reason_text=str(result.get('reason') or 'SURGE_REJECTED')
    if reason_text!='EVENT_ALREADY_CLAIMED':
@@ -60,7 +61,7 @@ def _process_once():
     except Exception as exc:print(f'[SURGE BRIDGE] rejection persistence failed: {exc}')
    if result.get('terminal'):observer.mark_early_event_consumed(event_id)
    continue
-  trade['strategy']='SURGE_EARLY_EXPLOSIVE';trade['surge_score']=gate.get('score',event.get('score',0));trade['surge_reasons']=gate.get('reasons',[]);trade['learning']=event.get('learning',{})
+  trade['strategy']='SURGE_EARLY_EXPLOSIVE';trade['surge_score']=gate.get('score',event.get('score',0));trade['surge_reasons']=gate.get('reasons',[]);trade['learning']=event.get('learning',{});trade['surge_learning']=event.get('surge_learning',{})
   record_stage(event_key,'PAPER_ENTRY','PASS',symbol=symbol,option_type=option_type,score=trade.get('surge_score'),contract=trade.get('contract'),quantity=trade.get('quantity'))
   append_audit('SURGE_PAPER_TRADE_CREATED',f"{symbol} {option_type} score={trade['surge_score']}",event_key,'RECORDED');write_heartbeat('surge_paper_trade',symbol=symbol,contract=trade.get('contract'),strategy=trade['strategy']);print(f"[SURGE BRIDGE] PAPER TRADE {trade.get('contract')} score={trade['surge_score']}")
   try:send_entry_alert(trade)
@@ -74,7 +75,7 @@ def _process_once():
   try:resolve_outcome(event_key=event_key,candidate=event,pnl=result_monitor.get('pnl',0),pnl_percent=result_monitor.get('pnl_percent',0),mfe=result_monitor.get('mfe'),mae=result_monitor.get('mae'),exit_reason=result_monitor.get('exit_reason',''))
   except Exception as exc:print(f'[SURGE BRIDGE] learning outcome persistence failed: {exc}')
   record_stage(event_key,'MONITOR_END','OK',symbol=symbol,option_type=option_type,contract=trade.get('contract'),pnl=result_monitor.get('pnl',0),exit_reason=result_monitor.get('exit_reason',''))
-  record_stage(event_key,'OUTCOME','OK',symbol=symbol,option_type=option_type,contract=trade.get('contract'),pnl=result_monitor.get('pnl',0),pnl_percent=result_monitor.get('pnl_percent',0),exit_reason=result_monitor.get('exit_reason',''),learning=memory_stats())
+  record_stage(event_key,'OUTCOME','OK',symbol=symbol,option_type=option_type,contract=trade.get('contract'),pnl=result_monitor.get('pnl',0),pnl_percent=result_monitor.get('pnl_percent',0),exit_reason=result_monitor.get('exit_reason',''),learning=memory_stats(),surge_learning=event.get('surge_learning'))
   observer.mark_early_event_consumed(event_id);append_audit('SURGE_PAPER_TRADE_CLOSED',f"{symbol} {option_type} pnl={result_monitor.get('pnl',0)} reason={result_monitor.get('exit_reason','')}",event_key,'RECORDED');return True
  return False
 def main():
