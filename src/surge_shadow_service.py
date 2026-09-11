@@ -8,6 +8,7 @@ from pathlib import Path
 from src.surge_outcome_learning import learning_signal,record_shadow_ranking
 DB=Path(os.getenv("TIER1_OPTION_MEMORY","data/memory/tier1_option_moves.sqlite3"))
 POLL=max(1,int(os.getenv("SURGE_SHADOW_INTERVAL_SECONDS","2")))
+LOOKBACK_SECONDS=max(30,int(os.getenv("SURGE_SHADOW_LOOKBACK_SECONDS","90")))
 RUNNING=True
 
 def _stop(*_):
@@ -17,7 +18,7 @@ def _scan(limit=200):
  if not DB.exists(): return 0
  try:
   with sqlite3.connect(DB) as db:
-   rows=db.execute("SELECT e.event_key,e.symbol,e.option_type,e.instrument_key,e.expiry,e.strike,e.ltp,e.score,e.move_1m_pct,e.move_3m_pct,e.move_5m_pct,e.velocity,e.acceleration,e.volume_ratio,e.spread_pct,e.features_json,e.observed_ts,e.detection_ts FROM early_events e LEFT JOIN surge_shadow_rankings s ON s.event_key=e.event_key WHERE julianday(e.detection_ts) >= julianday('now','-2 hours') AND s.event_key IS NULL ORDER BY e.id DESC LIMIT ?",(limit,)).fetchall()
+   rows=db.execute("SELECT e.event_key,e.symbol,e.option_type,e.instrument_key,e.expiry,e.strike,e.ltp,e.score,e.move_1m_pct,e.move_3m_pct,e.move_5m_pct,e.velocity,e.acceleration,e.volume_ratio,e.spread_pct,e.features_json,e.observed_ts,e.detection_ts FROM early_events e LEFT JOIN surge_shadow_rankings s ON s.event_key=e.event_key WHERE julianday(e.detection_ts) >= julianday('now',?) AND s.event_key IS NULL ORDER BY e.id ASC LIMIT ?",(f'-{LOOKBACK_SECONDS} seconds',limit)).fetchall()
  except Exception:
   return 0
  done=0
