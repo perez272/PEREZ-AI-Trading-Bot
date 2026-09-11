@@ -23,6 +23,19 @@ def _stop(*_args):
  global RUNNING;RUNNING=False
 def _in_entry_session():
  now=datetime.now(IST);return is_weekday(now) and ENTRY_START<=now.time()<=LAST_ENTRY
+def _rank_event(event):
+ """Rank pending events using learned quality without changing safety gates."""
+ base=float(event.get('score',0) or 0)
+ try:
+  old=trade_learning_signal(event);surge=surge_learning_signal(event)
+  adj=0.0
+  if old.get('status')=='LEARNED':adj+=float(old.get('adjustment',0) or 0)
+  if surge.get('status')=='LEARNED':adj+=float(surge.get('adjustment',0) or 0)
+  expected=float(surge.get('expected_return_pct',0) or 0)
+  expected=max(-4.0,min(4.0,expected))
+  return base+max(-8.0,min(8.0,adj))+expected
+ except Exception:
+  return base
 def _process_once():
  if not entries_allowed() or not _in_entry_session():return False
  try:client=get_client();capital=get_available_capital(client,paper_mode=True);allowed,_reason,_summary=can_open_new_trade(MAX_TRADES_PER_DAY,None,capital)
@@ -30,7 +43,7 @@ def _process_once():
  if not allowed:return False
  observer=get_tier1_option_observer();events=observer.get_pending_early_events(limit=5)
  if not events:return False
- events.sort(key=lambda e:float(e.get('score',0) or 0),reverse=True)
+ events.sort(key=_rank_event,reverse=True)
  for event in events:
   event_id=int(event['id']);symbol=str(event.get('symbol') or '');option_type=str(event.get('option_type') or '').upper();event_key=str(event.get('event_key') or '')
   record_stage(event_key,'DETECTED','OK',symbol=symbol,option_type=option_type,score=event.get('score'),contract=event.get('contract'),ts_override=event.get('detection_ts'),observed_ts=event.get('observed_ts'))
