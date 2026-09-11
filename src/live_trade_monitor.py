@@ -88,7 +88,8 @@ def run_monitor(
                 # lifecycle tests. Production defaults to persist_outcome=True.
                 if persist_outcome:
                                 trade_id = trade.get("trade_id")
-                                if trade_id:
+                                risk_identity = trade.get("lineage_id") or trade_id
+                                if risk_identity:
                                     risk_manager = TradingRiskManager()
 
                                     try:
@@ -106,11 +107,11 @@ def run_monitor(
                                     )
 
                                     if stop_loss_trigger:
-                                        _, sl_reason = risk_manager.record_stop_loss(trade_id)
+                                        _, sl_reason = risk_manager.record_stop_loss(risk_identity)
                                         print(f"RISK MANAGER: SL update | {sl_reason}")
 
                                     risk_manager.record_trade_result(
-                                        trade_id,
+                                        risk_identity,
                                         pnl,
                                         stop_loss=stop_loss_trigger,
                                     )

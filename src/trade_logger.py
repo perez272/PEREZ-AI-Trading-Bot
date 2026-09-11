@@ -50,6 +50,13 @@ def log_closed_trade(trade, result, path="data/trades.csv"):
         "pnl_percent": result["pnl_percent"],
         "exit_reason": result["exit_reason"],
     }
+    trade_id = record.get("trade_id", "")
+    if trade_id and output.exists() and output.stat().st_size > 0:
+        with output.open(newline="", encoding="utf-8") as file:
+            for existing in csv.DictReader(file):
+                if existing.get("trade_id", "") == trade_id:
+                    return existing
+
     with output.open("a", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDS, extrasaction="ignore")
         if output.stat().st_size == 0:
