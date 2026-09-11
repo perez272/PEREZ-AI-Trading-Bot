@@ -15,6 +15,8 @@ def test_log_closed_trade_is_idempotent(tmp_path):
         "exchange": "NFO",
         "entry": 100.0,
         "original_quantity": 30,
+        "quantity": 30,
+        "remaining_quantity": 0,
         "exit_quantity": 30,
         "remaining_quantity": 30,
         "lots": 1,
@@ -22,7 +24,9 @@ def test_log_closed_trade_is_idempotent(tmp_path):
     }
 
     result = {
-        "exit_price": 105.0,
+        "time": "2026-09-11 12:00:00",
+        "entry": 100.0,
+        "current": 105.0,
         "realized_pnl": 150.0,
         "unrealized_pnl": 0.0,
         "pnl": 150.0,
