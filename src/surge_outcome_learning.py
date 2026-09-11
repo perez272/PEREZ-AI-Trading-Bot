@@ -7,7 +7,7 @@ Advisory only: never changes risk or order controls.
 """
 from __future__ import annotations
 import hashlib,json,sqlite3
-from datetime import datetime
+from datetime import datetime,timezone
 from pathlib import Path
 
 DB_PATH=Path("data/memory/adaptive_trade_memory.sqlite3")
@@ -34,8 +34,10 @@ def _init(path=DB_PATH):
     with _db(path) as db:
         db.execute("CREATE TABLE IF NOT EXISTS surge_candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,symbol TEXT NOT NULL,option_type TEXT NOT NULL,instrument_key TEXT NOT NULL,expiry TEXT,strike REAL,detection_ts TEXT NOT NULL,entry_ltp REAL NOT NULL,score REAL,features_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'UNRESOLVED',source TEXT NOT NULL DEFAULT 'live')")
         db.execute("CREATE TABLE IF NOT EXISTS surge_outcomes(candidate_id INTEGER PRIMARY KEY,h1_ltp REAL,h3_ltp REAL,h5_ltp REAL,h10_ltp REAL,h15_ltp REAL,mfe_pct REAL NOT NULL DEFAULT 0,mae_pct REAL NOT NULL DEFAULT 0,continuation_pct REAL,reversal_pct REAL,label TEXT NOT NULL DEFAULT 'UNRESOLVED',resolved_ts TEXT,FOREIGN KEY(candidate_id) REFERENCES surge_candidates(id))")
+        db.execute("CREATE TABLE IF NOT EXISTS surge_shadow_rankings(event_key TEXT PRIMARY KEY,raw_score REAL NOT NULL,learned_score REAL NOT NULL,created_ts TEXT NOT NULL)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_surge_candidates_instrument_ts ON surge_candidates(instrument_key,detection_ts)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_surge_candidates_status ON surge_candidates(status)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_shadow_rank_learned ON surge_shadow_rankings(learned_score)")
 
 
 def _feature_copy(event):
@@ -191,6 +193,34 @@ def learning_signal(event,min_samples=10,path=DB_PATH):
         adj=_score_from_metrics(wins,false,strong,expected)
         return {"status":"LEARNED","adjustment":round(adj,2),"confidence":round(min(1,effective/50),2),"samples":round(effective,1),"match":"GENERALIZED","win_rate":round(wins,3),"strong_rate":round(strong,3),"false_surge_rate":round(false,3),"expected_return_pct":round(expected,3)}
     return {"status":"COLD_START","adjustment":0.0,"confidence":0.0,"samples":exact_n,"match":"EXACT","win_rate":0.0,"strong_rate":0.0,"false_surge_rate":0.0,"expected_return_pct":0.0}
+
+
+def record_shadow_ranking(event,learned_score,path=DB_PATH):
+    """Persist ranking evidence only; never affects entry/gate decisions."""
+    key=str(event.get("event_key") or "")
+    if not key:return 0
+    try:raw=float(event.get("score",0) or 0);learned=float(learned_score)
+    except (TypeError,ValueError):return 0
+    with _db(path) as db:
+        db.execute("INSERT OR REPLACE INTO surge_shadow_rankings(event_key,raw_score,learned_score,created_ts) VALUES(?,?,?,?)",(key,raw,learned,datetime.now(timezone.utc).isoformat()))
+    return 1
+
+
+def shadow_performance(min_samples=20,path=DB_PATH):
+    """Compare raw-score vs learned-score priority on resolved shadow events."""
+    _init(path)
+    with _db(path) as db:
+        rows=db.execute("SELECT s.raw_score,s.learned_score,o.label,c.entry_ltp,o.h15_ltp FROM surge_shadow_rankings s JOIN surge_candidates c ON c.event_key=s.event_key JOIN surge_outcomes o ON o.candidate_id=c.id WHERE o.label!='UNRESOLVED' AND o.h15_ltp IS NOT NULL AND c.entry_ltp>0").fetchall()
+    n=len(rows)
+    if n<min_samples:return {"status":"WAITING","samples":n,"min_samples":min_samples}
+    def ret(r):return _pct(r[4],r[3])
+    ordered_raw=sorted(rows,key=lambda r:r[0],reverse=True);ordered_learned=sorted(rows,key=lambda r:r[1],reverse=True)
+    k=max(1,n//4)
+    raw_top=ordered_raw[:k];learned_top=ordered_learned[:k]
+    raw_avg=sum(ret(r) for r in raw_top)/k;learned_avg=sum(ret(r) for r in learned_top)/k
+    raw_strong=sum(1 for r in raw_top if r[2]=="STRONG_WIN")/k
+    learned_strong=sum(1 for r in learned_top if r[2]=="STRONG_WIN")/k
+    return {"status":"READY","samples":n,"top_quartile":k,"raw_top_expected_pct":round(raw_avg,3),"learned_top_expected_pct":round(learned_avg,3),"lift_pct":round(learned_avg-raw_avg,3),"raw_top_strong_rate":round(raw_strong,3),"learned_top_strong_rate":round(learned_strong,3)}
 
 
 _init()
