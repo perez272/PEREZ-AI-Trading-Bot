@@ -8,15 +8,11 @@ from datetime import datetime,timezone
 from pathlib import Path
 from src.alternative_market_data import get_upstox_client
 from src.explosive_move_detector import ExplosiveMoveSignal,detect_explosive_move
-from src.surge_outcome_learning import backfill_existing_surge_candidates,remember_surge,record_quotes
+from src.surge_outcome_learning import remember_surge,record_quotes
 TIER1_SYMBOLS=("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTYNXT50");MOVE_THRESHOLDS=(5.0,10.0,15.0,20.0,30.0,40.0,50.0,75.0,100.0);MEMORY_PATH=Path(os.getenv("TIER1_OPTION_MEMORY","data/memory/tier1_option_moves.sqlite3"));BASELINE_TTL_SECONDS=int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS","900"));CHAIN_REFRESH_TTL_SECONDS=int(os.getenv("TIER1_OPTION_CHAIN_REFRESH_TTL_SECONDS","15"));MAX_MEMORY_ROWS=int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS","50000"));HISTORY_POINTS=30
 class Tier1OptionObserver:
  def __init__(self,db_path:Path=MEMORY_PATH):
   self.db_path=Path(db_path);self.db_path.parent.mkdir(parents=True,exist_ok=True);self._history=defaultdict(lambda:deque(maxlen=HISTORY_POINTS));self._chain_cache={};self._init_db()
-  try:
-   added=backfill_existing_surge_candidates(self.db_path)
-   if added:print(f"[SURGE LEARNING] imported {added} historical surge candidates (outcomes intentionally unresolved)")
-  except Exception as exc:print(f"[SURGE LEARNING] historical import skipped safely: {exc}")
  def _connect(self):
   conn=sqlite3.connect(self.db_path);conn.execute("PRAGMA journal_mode=WAL");return conn
  def _init_db(self):

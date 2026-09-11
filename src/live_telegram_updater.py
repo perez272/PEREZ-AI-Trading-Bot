@@ -252,7 +252,7 @@ def _learning_message(learning, heartbeat, now, hostname):
         f"Learning lift: {overall.get('lift_pct')}pp\n"
         f"H1/H3/H5/H10/H15: {overall.get('h1_expected_pct')}% / {overall.get('h3_expected_pct')}% / {overall.get('h5_expected_pct')}% / {overall.get('h10_expected_pct')}% / {overall.get('h15_expected_pct')}%\n"
         f"Learned top WIN: {overall.get('learned_top_win_rate')} | STRONG: {overall.get('learned_top_strong_rate')} | FALSE: {overall.get('learned_top_false_rate')}\n"
-        f"Shadow engine: {shadow.get('status')} | samples={shadow.get('samples')} | lift={shadow.get('lift_pct')}pp\n"
+        f"Shadow engine: {shadow.get('status')} | samples={diagnostics.get('total_valid', 0)} | lift={overall.get('lift_pct')}pp\n"
         "⚠️ Learning is advisory only; it cannot bypass score, option, market-data, or risk gates."
     )
     return (
@@ -295,7 +295,19 @@ def send_status():
     learning = get_learning_status()
     heartbeat = _read_heartbeat()
     message = _learning_message(learning, heartbeat, now, hostname)
-    telegram("sendMessage", {"chat_id": CHAT_ID, "text": message})
+    # Telegram sendMessage allows max 4096 characters.
+    # Split long detailed learning/status messages safely.
+    chunks = []
+    while len(message) > 3900:
+        cut = message.rfind("\n", 0, 3900)
+        if cut < 1000:
+            cut = 3900
+        chunks.append(message[:cut])
+        message = message[cut:].lstrip("\n")
+    if message:
+        chunks.append(message)
+    for chunk in chunks:
+        telegram("sendMessage", {"chat_id": CHAT_ID, "text": chunk})
 
 
 def main():
