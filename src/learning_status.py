@@ -30,6 +30,25 @@ def _canonical_learning_counts() -> tuple[int, int, int]:
         return 0, 0, 0
 
 
+def _canonical_outcome_stats() -> tuple[int, int, float, float]:
+    """Return canonical closed-trade learning evidence from SQLite."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            row = db.execute(
+                """SELECT COUNT(*),
+                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END),
+                          COALESCE(SUM(pnl), 0)
+                   FROM outcomes"""
+            ).fetchone()
+        closed = int(row[0] or 0)
+        wins = int(row[1] or 0)
+        pnl = round(float(row[2] or 0.0), 2)
+        rate = round((wins / closed * 100.0) if closed else 0.0, 2)
+        return closed, wins, rate, pnl
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return 0, 0, 0.0, 0.0
+
+
 def _load() -> dict[str, Any]:
     try:
         if STATUS_PATH.exists():
@@ -111,15 +130,17 @@ def get_learning_status() -> dict[str, Any]:
     observer_stats = observer.stats()
     data = _load()
     risk = daily_summary()
-    wins, win_rate = _historical_trade_stats()
     observations = int(observer_stats.get("observations", 0) or 0)
     last_observation = _persisted_observation_timestamp(observer, observations)
     canonical_rejections, canonical_lessons, canonical_outcomes = _canonical_learning_counts()
+    canonical_closed, canonical_wins, canonical_win_rate, canonical_pnl = _canonical_outcome_stats()
     return {
-        "completed_paper_trades": risk["closed_trades"],
-        "wins": wins,
-        "learned_win_rate": win_rate,
-        "learned_pnl": risk["pnl"],
+        "completed_paper_trades": canonical_closed,
+        "wins": canonical_wins,
+        "learned_win_rate": canonical_win_rate,
+        "learned_pnl": canonical_pnl,
+        "daily_closed_trades": risk["closed_trades"],
+        "daily_pnl": risk["pnl"],
         "observations": observations,
         "rejections": canonical_rejections,
         "lessons_events": canonical_lessons,
