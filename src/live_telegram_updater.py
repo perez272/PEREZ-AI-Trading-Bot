@@ -11,6 +11,8 @@ import requests
 from dotenv import load_dotenv
 
 from src.learning_status import get_learning_status
+from src.shadow_diagnostics import report as shadow_diagnostics_report
+from src.surge_outcome_learning import shadow_performance
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
@@ -233,6 +235,26 @@ def _scan_message(heartbeat):
 def _learning_message(learning, heartbeat, now, hostname):
     events = learning.get("last_events", [])
     last_observation = learning.get("last_observation") or "None persisted yet"
+    try:
+        shadow = shadow_performance()
+    except Exception as exc:
+        shadow = {"status":"UNAVAILABLE","error":str(exc)}
+    try:
+        diagnostics = shadow_diagnostics_report()
+    except Exception as exc:
+        diagnostics = {"status":"UNAVAILABLE","error":str(exc)}
+    overall = diagnostics.get("overall", {}) if isinstance(diagnostics, dict) else {}
+    learning_detail = (
+        "📊 SHADOW LEARNING\n"
+        f"Valid causal samples: {diagnostics.get('total_valid', 0)}\n"
+        f"Raw top expected: {overall.get('raw_top_expected_pct')}%\n"
+        f"Learned top expected: {overall.get('learned_top_expected_pct')}%\n"
+        f"Learning lift: {overall.get('lift_pct')}pp\n"
+        f"H1/H3/H5/H10/H15: {overall.get('h1_expected_pct')}% / {overall.get('h3_expected_pct')}% / {overall.get('h5_expected_pct')}% / {overall.get('h10_expected_pct')}% / {overall.get('h15_expected_pct')}%\n"
+        f"Learned top WIN: {overall.get('learned_top_win_rate')} | STRONG: {overall.get('learned_top_strong_rate')} | FALSE: {overall.get('learned_top_false_rate')}\n"
+        f"Shadow engine: {shadow.get('status')} | samples={shadow.get('samples')} | lift={shadow.get('lift_pct')}pp\n"
+        "⚠️ Learning is advisory only; it cannot bypass score, option, market-data, or risk gates."
+    )
     return (
         "🤖 PEREZ AI — DEEP MARKET + LEARNING STATUS\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -254,6 +276,7 @@ def _learning_message(learning, heartbeat, now, hostname):
         f"Option surge events (lifetime): {learning['option_surge_events_total']}\n"
         f"Outcome learning: {learning['outcome_learning']}\n"
         f"Pattern learning: {learning['pattern_learning']}\n"
+        f"{learning_detail}\n"
         f"Last observation: {last_observation}\n\n"
         "🔎 RECENT PERSISTED EVIDENCE\n"
         f"{_event_details(events)}\n\n"

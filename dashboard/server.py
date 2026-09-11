@@ -8,6 +8,8 @@ CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option
 from src.dashboard_control import append_audit,get_state,recent_audit,set_controls
 from src.dashboard_telemetry import recent as telemetry_recent,event_proof,summary as telemetry_summary
 from src.dashboard_strategy_lab import build_lab
+from src.shadow_diagnostics import report as shadow_diagnostics_report
+from src.surge_outcome_learning import shadow_performance
 
 def q(db,sql,args=(),default=None):
     try:
@@ -33,7 +35,11 @@ def learning(outcomes,rejections,audit):
     for a in audit:
         k=str(a.get('action') or '')
         if k not in {'STOP_NEW_TRADES','RESUME_NEW_TRADES','PAUSE_OBSERVER','RESUME_OBSERVER','EMERGENCY_SAFE_MODE','RESUME_SAFE_MODE','RUN_HEALTH_AUDIT'}:manual[k]=manual.get(k,0)+1
-    return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual}
+    try:shadow=shadow_performance()
+    except Exception as exc:shadow={'status':'UNAVAILABLE','error':str(exc)}
+    try:diagnostics=shadow_diagnostics_report()
+    except Exception as exc:diagnostics={'status':'UNAVAILABLE','error':str(exc)}
+    return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
 def state():
     services={n:svc(n) for n in ('perez-ai.service','perez-telegram-updater.service','perez-tier1-option-observer.service','perez-surge-trade-bridge.service','perez-dashboard.service')}
     disk=shutil.disk_usage(ROOT); early_raw=q(TIER1,'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 40'); move_raw=q(TIER1,'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 40'); out_raw=q(CORE,'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 30'); rej_raw=q(CORE,'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 30'); audit=recent_audit(80); tel=telemetry_recent(180)

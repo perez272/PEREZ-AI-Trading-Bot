@@ -31,10 +31,41 @@ def _pct(price,entry):
 def _metrics(rows):
  n=len(rows)
  if not n:return {"samples":0}
- def exp(ix):
-  vals=[_pct(r[ix],r[8]) for r in rows];vals=[v for v in vals if v is not None];return round(sum(vals)/len(vals),3) if vals else None
- raw=exp(4);learned=exp(5)
- return {"samples":n,"raw_expected_pct":raw,"learned_expected_pct":learned,"lift_pct":round((learned or 0)-(raw or 0),3),"strong_rate":round(sum(r[7]=="STRONG_WIN" for r in rows)/n,3),"win_rate":round(sum(r[7] in ("WIN","STRONG_WIN") for r in rows)/n,3),"false_rate":round(sum(r[7]=="FALSE_SURGE" for r in rows)/n,3),"h1_expected_pct":exp(9),"h3_expected_pct":exp(10),"h5_expected_pct":exp(11),"h10_expected_pct":exp(12),"h15_expected_pct":exp(13)}
+ def ret(r,ix):
+  return _pct(r[ix],r[8])
+ def avg(ix):
+  vals=[ret(r,ix) for r in rows if ret(r,ix) is not None]
+  return round(sum(vals)/len(vals),3) if vals else None
+ def top(metric_ix):
+  ordered=sorted(rows,key=lambda r:float(r[metric_ix] or 0),reverse=True)
+  k=max(1,(n+3)//4)
+  selected=ordered[:k]
+  vals=[ret(r,13) for r in selected if ret(r,13) is not None]
+  expected=round(sum(vals)/len(vals),3) if vals else None
+  strong=round(sum(r[7]=="STRONG_WIN" for r in selected)/len(selected),3)
+  win=round(sum(r[7] in ("WIN","STRONG_WIN") for r in selected)/len(selected),3)
+  false=round(sum(r[7]=="FALSE_SURGE" for r in selected)/len(selected),3)
+  return k,expected,strong,win,false
+ k,raw,raw_strong,raw_win,raw_false=top(4)
+ _,learned,learned_strong,learned_win,learned_false=top(5)
+ return {
+  "samples":n,
+  "top_quartile":k,
+  "raw_top_expected_pct":raw,
+  "learned_top_expected_pct":learned,
+  "lift_pct":round((learned or 0)-(raw or 0),3),
+  "raw_top_strong_rate":raw_strong,
+  "learned_top_strong_rate":learned_strong,
+  "raw_top_win_rate":raw_win,
+  "learned_top_win_rate":learned_win,
+  "raw_top_false_rate":raw_false,
+  "learned_top_false_rate":learned_false,
+  "h1_expected_pct":avg(9),
+  "h3_expected_pct":avg(10),
+  "h5_expected_pct":avg(11),
+  "h10_expected_pct":avg(12),
+  "h15_expected_pct":avg(13)
+}
 
 def _group(rows,key):
  groups={}
