@@ -17,7 +17,7 @@ def _scan(limit=200):
  if not DB.exists(): return 0
  try:
   with sqlite3.connect(DB) as db:
-   rows=db.execute("SELECT event_key,symbol,option_type,instrument_key,expiry,strike,ltp,score,move_1m_pct,move_3m_pct,move_5m_pct,velocity,acceleration,volume_ratio,spread_pct,features_json,observed_ts,detection_ts FROM early_events WHERE detection_ts >= datetime('now','-2 hours') ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
+   rows=db.execute("SELECT e.event_key,e.symbol,e.option_type,e.instrument_key,e.expiry,e.strike,e.ltp,e.score,e.move_1m_pct,e.move_3m_pct,e.move_5m_pct,e.velocity,e.acceleration,e.volume_ratio,e.spread_pct,e.features_json,e.observed_ts,e.detection_ts FROM early_events e LEFT JOIN surge_shadow_rankings s ON s.event_key=e.event_key WHERE julianday(e.detection_ts) >= julianday('now','-2 hours') AND s.event_key IS NULL ORDER BY e.id DESC LIMIT ?",(limit,)).fetchall()
  except Exception:
   return 0
  done=0
