@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
-CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'; PROLIVE=ROOT/'dashboard/pro_live.js'; APPJS=ROOT/'dashboard/app.js'; LABJS=ROOT/'dashboard/strategy_lab.js'; SW=ROOT/'dashboard/sw.js'; MANIFEST=ROOT/'dashboard/manifest.webmanifest'; ICON=ROOT/'dashboard/app-icon.svg'
+CORE=ROOT/'data/memory/perez_ai_memory.db'; TIER1=ROOT/'data/memory/tier1_option_moves.sqlite3'; INDEX=ROOT/'dashboard/index.html'; ADVANCED=ROOT/'dashboard/advanced.js'; PROLIVE=ROOT/'dashboard/pro_live.js'; APPJS=ROOT/'dashboard/app.js'; LABJS=ROOT/'dashboard/strategy_lab.js'; LEARNJS=ROOT/'dashboard/learning.js'; SW=ROOT/'dashboard/sw.js'; MANIFEST=ROOT/'dashboard/manifest.webmanifest'; ICON=ROOT/'dashboard/app-icon.svg'
 from src.dashboard_control import append_audit,get_state,recent_audit,set_controls
 from src.dashboard_telemetry import recent as telemetry_recent,event_proof,summary as telemetry_summary
 from src.dashboard_strategy_lab import build_lab
@@ -62,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
             try:self._send(200,'application/json; charset=utf-8',json.dumps(build_lab(),default=str))
             except Exception as exc:self._send(200,'application/json; charset=utf-8',json.dumps({'status':'UNAVAILABLE','safety':'OBSERVATION_ONLY','error':str(exc)}))
             return
-        assets={'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/strategy_lab.js':(LABJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
+        assets={'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/strategy_lab.js':(LABJS,'application/javascript; charset=utf-8'),'/learning.js':(LEARNJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
         if path in assets:
             try:p,ctype=assets[path];self._send(200,ctype,p.read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
@@ -73,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
                 head='<link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="PEREZ-AI"><link rel="icon" href="/app-icon.svg">'
                 if '/manifest.webmanifest' not in html:html=html.replace(marker,head+marker)
                 marker='</body>'
-                for src in ('/advanced.js','/pro_live.js','/app.js','/strategy_lab.js'):
+                for src in ('/advanced.js','/pro_live.js','/app.js','/strategy_lab.js','/learning.js'):
                     if src not in html:html=html.replace(marker,f'<script src="{src}"></script>'+marker)
                 self._send(200,'text/html; charset=utf-8',html)
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'index error: {exc}')
