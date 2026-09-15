@@ -75,8 +75,8 @@ def _bucket(v: Any, cuts: tuple[float, ...]) -> str:
 
 def _regime(candidate: dict[str, Any]) -> str:
     trend = _num(candidate.get("trend_score"))
-    momentum = _num(candidate.get("momentum_score"))
-    mtf = str(candidate.get("mtf_direction") or candidate.get("underlying_signal") or "").upper()
+    momentum = _num(candidate.get("momentum_score"), _num(candidate.get("velocity")))
+    mtf = str(candidate.get("mtf_direction") or candidate.get("underlying_signal") or candidate.get("mtf") or "").upper()
     if trend >= 10 and momentum >= 7 and mtf in {"BUY", "BULLISH", "CE", "CALL", "LONG"}:
         return "TREND_UP"
     if trend >= 10 and momentum >= 7 and mtf in {"SELL", "BEARISH", "PE", "PUT", "SHORT"}:
@@ -94,14 +94,34 @@ def pattern_features(candidate: dict[str, Any]) -> dict[str, Any]:
         "symbol": str(candidate.get("symbol") or candidate.get("underlying") or "").upper(),
         "option_type": str(candidate.get("option_type") or candidate.get("right") or "").upper(),
         "regime": _regime(candidate),
-        "move_bucket": _bucket(candidate.get("percent_change"), (1, 2, 3, 5, 8, 12)),
-        "momentum_bucket": _bucket(candidate.get("momentum_score"), (2, 5, 7, 9)),
+        "move_bucket": _bucket(
+            candidate.get("percent_change")
+            if candidate.get("percent_change") is not None
+            else candidate.get("move_5m_pct", candidate.get("move_pct")),
+            (1, 2, 3, 5, 8, 12),
+        ),
+        "momentum_bucket": _bucket(
+            candidate.get("momentum_score")
+            if candidate.get("momentum_score") is not None
+            else candidate.get("velocity"),
+            (2, 5, 7, 9),
+        ),
         "trend_bucket": _bucket(candidate.get("trend_score"), (4, 8, 12)),
         "volume_bucket": _bucket(candidate.get("volume_ratio"), (0.75, 1.0, 1.5, 2.0, 3.0)),
         "oi_bucket": _bucket(candidate.get("oi_change_pct"), (-10, 0, 5, 10, 20)),
-        "spread_bucket": _bucket(candidate.get("spread_pct"), (0.25, 0.5, 1.0, 1.5, 2.5)),
-        "mtf": str(candidate.get("mtf_direction") or "").upper(),
-        "source": str(candidate.get("data_source") or "").lower(),
+        "spread_bucket": _bucket(
+            candidate.get("spread_pct")
+            if candidate.get("spread_pct") is not None
+            else (
+                ((float(candidate.get("ask")) - float(candidate.get("bid"))) / float(candidate.get("ltp")) * 100.0)
+                if candidate.get("ask") is not None and candidate.get("bid") is not None
+                and candidate.get("ltp") is not None and float(candidate.get("ltp") or 0) > 0
+                else None
+            ),
+            (0.25, 0.5, 1.0, 1.5, 2.5),
+        ),
+        "mtf": str(candidate.get("mtf_direction") or candidate.get("mtf") or "").upper(),
+        "source": str(candidate.get("data_source") or candidate.get("source") or "").lower(),
     }
 
 
