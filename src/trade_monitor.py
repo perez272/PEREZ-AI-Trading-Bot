@@ -1,3 +1,4 @@
+from src.active_position_guard import release_contract
 from datetime import datetime
 
 
@@ -71,10 +72,12 @@ def monitor_trade(trade, current_price):
 
     status = "RUNNING"
     exit_reason = ""
+    exit_price = None
 
     if current_price >= target2 and remaining > 0:
         status = "TARGET 2 HIT"
         exit_reason = "TARGET_2"
+        exit_price = current_price
         trade["realized_pnl"] = round(realized + (current_price - entry) * remaining, 2)
         trade["remaining_quantity"] = 0
         remaining = 0
@@ -84,6 +87,7 @@ def monitor_trade(trade, current_price):
         pnl_percent = round((pnl / initial_exposure) * 100, 2)
     elif current_price <= stop_loss:
         status = "STOP LOSS HIT"
+        exit_price = stop_loss
         if trade.get("partial_booked", False):
             exit_reason = "TRAILING_STOP"
         elif pnl > 0:
@@ -93,9 +97,21 @@ def monitor_trade(trade, current_price):
         else:
             exit_reason = "STOP_LOSS"
 
-    return {
+
+        # Paper stop execution uses the configured protective stop price.
+        trade["realized_pnl"] = round(
+            realized + (exit_price - entry) * remaining, 2
+        )
+        trade["remaining_quantity"] = 0
+        remaining = 0
+        realized = trade["realized_pnl"]
+        unrealized = 0.0
+        pnl = realized
+        pnl_percent = round((pnl / initial_exposure) * 100, 2)
+    result = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "contract": trade["contract"], "entry": entry, "current": current_price,
+        "exit_price": exit_price if status != "RUNNING" else None,
         "quantity": remaining, "original_quantity": original_quantity,
         "remaining_quantity": remaining, "stop_loss": stop_loss, "target": target2,
         "high_watermark": high_watermark, "low_watermark": low_watermark,
@@ -104,3 +120,6 @@ def monitor_trade(trade, current_price):
         "pnl_percent": pnl_percent, "status": status, "exit_reason": exit_reason,
         "target1_hit": bool(trade.get("partial_booked")), "closed": status != "RUNNING",
     }
+    if result["closed"]:
+        release_contract(trade["contract"], trade.get("trade_id"))
+    return result

@@ -38,7 +38,7 @@ def log_closed_trade(trade, result, path="data/trades.csv"):
         "contract": trade["contract"],
         "exchange": trade.get("exchange", ""),
         "entry": result["entry"],
-        "exit": result["current"],
+        "exit": result.get("exit_price", result["current"]),
         "original_quantity": result.get("original_quantity", trade.get("quantity", "")),
         "exit_quantity": result.get("quantity", ""),
         "remaining_quantity": result.get("remaining_quantity", 0),

@@ -128,6 +128,25 @@ def record_closed_outcome(
     pnl_percent = num(result.get("pnl_percent"))
     exit_reason = str(result.get("exit_reason") or "")
 
+    # Canonical P/L integrity audit. Account for partial booking.
+    exit_price = num(result.get("exit_price", result.get("current")))
+    entry_price = num(trade.get("entry"))
+    remaining_qty = num(
+        result.get("remaining_quantity", result.get("quantity"))
+    )
+    realized_pnl = num(result.get("realized_pnl", trade.get("realized_pnl")))
+    calculated_pnl = round(
+        realized_pnl + ((exit_price - entry_price) * remaining_qty),
+        2,
+    ) if entry_price > 0 and exit_price > 0 else None
+    features["exit_price"] = exit_price
+    features["calculated_pnl"] = calculated_pnl
+    features["pnl_delta"] = (
+        round(pnl - calculated_pnl, 2)
+        if calculated_pnl is not None else None
+    )
+    features["pnl_integrity_checked"] = calculated_pnl is not None
+
     conn = _connect()
 
     try:

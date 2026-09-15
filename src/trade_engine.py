@@ -2,6 +2,7 @@ import os
 from src.affordable_options import find_affordable_contract
 from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.alternative_market_data import get_upstox_client
+from src.active_position_guard import claim_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
 STOP_LOSS_PCT = 0.02
@@ -62,7 +63,7 @@ def resolve_option_contract(symbol, spot, signal):
     return affordable
 
 
-def create_trade(symbol, spot, signal, capital, resolved_contract=None):
+def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning_candidate=None):
     """Create a PAPER trade from one validated option contract.
 
     If ``resolved_contract`` is supplied, it is reused exactly so the option
@@ -102,7 +103,7 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
     target1 = round(entry * (1 + TARGET1_PCT), 2)
     target2 = round(entry * (1 + TARGET2_PCT), 2)
 
-    return {
+    trade = {
         "symbol": symbol, "signal": signal, "contract": resolved["contract"], "exchange": resolved["exchange"],
         "token": resolved["token"], "expiry": resolved["expiry"], "strike": resolved["strike"], "entry": entry,
         "quantity": quantity, "original_quantity": quantity, "remaining_quantity": quantity, "lots": lots,
@@ -112,3 +113,18 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None):
         "realized_pnl": 0.0, "status": "PAPER TRADE ACTIVE", "live_orders": False,
         "data_source": resolved.get("data_source", "unknown"),
     }
+    if learning_candidate:
+        trade["learning_candidate"] = dict(learning_candidate)
+    if os.getenv("PAPER_MODE", "false").strip().lower() != "true":
+        return {"status": "NO TRADE", "reason": "PAPER_MODE is not enabled"}
+    if os.getenv("ORDERS_ENABLED", "false").strip().lower() != "false":
+        return {"status": "NO TRADE", "reason": "ORDERS_ENABLED is not false"}
+    import uuid
+    trade["trade_id"] = str(uuid.uuid4())
+    claimed, reason = claim_contract(
+        trade["contract"], trade["symbol"], trade["trade_id"]
+    )
+    if not claimed:
+        return {"status": "NO TRADE",
+                "reason": f"ACTIVE POSITION GUARD: {reason}"}
+    return trade

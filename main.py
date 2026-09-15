@@ -430,7 +430,11 @@ def main():
 
                 write_heartbeat("creating_trade", symbol=symbol, capital=capital, strategy=candidate.get("strategy", "CORE"))
                 try:
-                    trade = create_trade(symbol, candidate["close"], candidate["signal"], capital, resolved_contract=contract_probe)
+                    trade = create_trade(
+                        symbol, candidate["close"], candidate["signal"], capital,
+                        resolved_contract=contract_probe,
+                        learning_candidate=candidate,
+                    )
                 except Exception as exc:
                     print(f"TRADE CREATION FAILED for {symbol}: {exc}")
                     record_cycle(rejections=1)
@@ -441,7 +445,7 @@ def main():
                     continue
 
                 import uuid
-                trade_id = str(uuid.uuid4())
+                trade_id = trade.get("trade_id") or str(uuid.uuid4())
                 lineage_id = trade.get("lineage_id") or trade_id
                 trade["trade_id"] = trade_id
                 trade["lineage_id"] = lineage_id

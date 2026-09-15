@@ -65,9 +65,9 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         from src.dashboard_control import entries_allowed
         if not entries_allowed():
             return False, "Dashboard stop: new entries disabled", daily_summary()
-    except Exception:
-        # Control-plane read failure must not silently block the core engine.
-        pass
+    except Exception as exc:
+        # Control-plane failure is unsafe: fail closed.
+        return False, f"Dashboard control unavailable: {exc}", daily_summary()
 
     if not is_entry_window():
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()

@@ -86,6 +86,17 @@ def run_monitor(
 
                 # Production risk bookkeeping is skipped for isolated
                 # lifecycle tests. Production defaults to persist_outcome=True.
+                if persist_outcome and trade.get("learning_candidate"):
+                    try:
+                        from src.adaptive_learning import remember_candidate, resolve_outcome
+                        candidate = dict(trade["learning_candidate"])
+                        event_key = "trade:" + str(trade.get("trade_id", ""))
+                        remember_candidate(candidate, event_key)
+                        resolved = resolve_outcome(event_key=event_key, candidate=candidate, pnl=result.get("pnl", 0.0), pnl_percent=result.get("pnl_percent", 0.0), mfe=result.get("mfe"), mae=result.get("mae"), exit_reason=result.get("exit_reason", ""))
+                        print("ADAPTIVE LEARNING:", "RESOLVED" if resolved else "NOT_RESOLVED", event_key)
+                    except Exception as exc:
+                        print("ADAPTIVE LEARNING ERROR:", exc)
+
                 if persist_outcome:
                                 trade_id = trade.get("trade_id")
                                 risk_identity = trade.get("lineage_id") or trade_id

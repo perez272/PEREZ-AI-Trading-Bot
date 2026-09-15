@@ -10,6 +10,7 @@ from typing import Any
 from src.alternative_market_data import get_upstox_client
 from src.surge_trade_gate import SurgeEvidence, validate_surge
 from src.trade_engine import create_trade
+from src.active_position_guard import release_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
 
 
@@ -211,6 +212,8 @@ def create_surge_trade(
     )
 
     if trade.get("status") != "PAPER TRADE ACTIVE":
+        if trade.get("contract"):
+            release_contract(trade["contract"], trade.get("trade_id"))
         result["eligible"] = False
         result["terminal"] = True
         result["reason"] = trade.get("reason", trade.get("status", "CREATE_TRADE_FAILED"))
@@ -219,7 +222,7 @@ def create_surge_trade(
 
     import uuid
 
-    trade_id = str(uuid.uuid4())
+    trade_id = trade.get("trade_id") or str(uuid.uuid4())
     lineage_id = trade.get("lineage_id") or trade_id
     trade["trade_id"] = trade_id
     trade["lineage_id"] = lineage_id
@@ -233,6 +236,7 @@ def create_surge_trade(
 
     allowed, reason = risk_manager.can_open_trade(trade_id, lineage_id=lineage_id)
     if not allowed:
+        release_contract(trade["contract"], trade.get("trade_id"))
         _release_event(event_id)
         result["eligible"] = False
         result["terminal"] = False
