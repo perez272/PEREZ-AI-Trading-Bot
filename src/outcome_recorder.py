@@ -119,7 +119,7 @@ def record_closed_outcome(
     score = num(
         trade.get(
             "underlying_score",
-            trade.get("score", 0.0),
+            trade.get("surge_score", trade.get("score", 0.0)),
         )
     )
 
