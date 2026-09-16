@@ -1,5 +1,5 @@
 from src.active_position_guard import release_contract
-from datetime import datetime
+from src.paper_trade_lifecycle import now_utc
 
 
 def monitor_trade(trade, current_price):
@@ -26,8 +26,6 @@ def monitor_trade(trade, current_price):
     target2 = float(trade["target2"])
     trail_pct = float(trade.get("trailing_stop_pct", 15.0))
 
-    # Persistent excursion tracking: MFE is the best favorable move seen;
-    # MAE is the worst adverse move seen. Percentages are entry-relative.
     high_watermark = max(float(trade.get("high_watermark", entry)), current_price)
     low_watermark = min(float(trade.get("low_watermark", entry)), current_price)
     trade["high_watermark"] = round(high_watermark, 2)
@@ -63,7 +61,6 @@ def monitor_trade(trade, current_price):
         stop_loss = max(stop_loss, trailing_stop)
 
     trade["stop_loss"] = round(stop_loss, 2)
-
     unrealized = round((current_price - entry) * remaining, 2)
     realized = round(float(trade.get("realized_pnl", 0.0)), 2)
     pnl = round(realized + unrealized, 2)
@@ -96,24 +93,21 @@ def monitor_trade(trade, current_price):
             exit_reason = "BREAKEVEN_STOP"
         else:
             exit_reason = "STOP_LOSS"
-
-
-        # Paper stop execution uses the configured protective stop price.
-        trade["realized_pnl"] = round(
-            realized + (exit_price - entry) * remaining, 2
-        )
+        trade["realized_pnl"] = round(realized + (exit_price - entry) * remaining, 2)
         trade["remaining_quantity"] = 0
         remaining = 0
         realized = trade["realized_pnl"]
         unrealized = 0.0
         pnl = realized
         pnl_percent = round((pnl / initial_exposure) * 100, 2)
+
     result = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": now_utc(),
         "contract": trade["contract"], "entry": entry, "current": current_price,
         "exit_price": exit_price if status != "RUNNING" else None,
         "quantity": remaining, "original_quantity": original_quantity,
         "remaining_quantity": remaining, "stop_loss": stop_loss, "target": target2,
+        "target1": target1, "target2": target2,
         "high_watermark": high_watermark, "low_watermark": low_watermark,
         "trailing_stop_pct": trail_pct, "mfe": mfe, "mae": mae,
         "realized_pnl": realized, "unrealized_pnl": unrealized, "pnl": pnl,
