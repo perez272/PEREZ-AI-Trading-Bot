@@ -48,6 +48,7 @@ def calculate_surge_score(e: SurgeEvidence) -> dict[str, Any]:
         "liquidity": 5.0 if e.volume > 0 and e.oi > 0 else 0.0,
         "iv": 2.0 if e.iv > 0 else 0.0,
         "spread": 3.0 if e.spread_pct <= MAX_SPREAD_PCT else 0.0,
+        "low_volume_penalty": -10.0 if 0.0 < e.volume_ratio < 1.1 else 0.0,
     }
     score = min(100.0, max(0.0, sum(components.values())))
     return {"score": round(score, 2), "components": components}
