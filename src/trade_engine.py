@@ -4,6 +4,7 @@ from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.alternative_market_data import get_upstox_client
 from src.active_position_guard import claim_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
+from src.paper_trade_lifecycle import now_utc, record_event
 
 STOP_LOSS_PCT = 0.02
 TARGET1_PCT = 0.05
@@ -24,7 +25,7 @@ def resolve_option_contract(symbol, spot, signal):
         if fallback and fallback.get("status") == "CONTRACT VALID":
             fallback["max_premium"] = OPTION_MAX_PREMIUM
             fallback["affordability_score"] = fallback.get("affordability_score", 0)
-            print(f"[TRADE ENGINE] Upstox provider selected {fallback.get("contract", "UNKNOWN")} LTP=Rs {float(fallback.get("ltp", 0) or 0):.2f}")
+            print(f'[TRADE ENGINE] Upstox provider selected {fallback.get("contract", "UNKNOWN")} LTP=Rs {float(fallback.get("ltp", 0) or 0):.2f}')
             return fallback
         if provider == "upstox":
             return {"status": "NO AFFORDABLE OPTION", "reason": "Upstox could not resolve a valid affordable option"}
@@ -40,17 +41,13 @@ def resolve_option_contract(symbol, spot, signal):
             "data_source": "angel_one_option_chain",
         }
 
-        # Preserve the full live quote for the downstream options gate.
-        # Contract selection itself remains unchanged.
         try:
             from src.live_option_price import get_option_quote
-
             full_quote = get_option_quote(
                 affordable["exchange"],
                 affordable["symbol"],
                 affordable["token"],
             )
-
             if isinstance(full_quote, dict) and float(full_quote.get("ltp", 0) or 0) > 0:
                 result["live_option_quote"] = full_quote
                 result["ltp"] = float(full_quote["ltp"])
@@ -58,7 +55,6 @@ def resolve_option_contract(symbol, spot, signal):
             print(f"[TRADE ENGINE] Angel full option quote enrichment failed: {exc}")
 
         return result
-
 
     return affordable
 
@@ -112,9 +108,20 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
         "stop_loss": stop_loss, "target1": target1, "target2": target2, "target": target2, "partial_booked": False,
         "realized_pnl": 0.0, "status": "PAPER TRADE ACTIVE", "live_orders": False,
         "data_source": resolved.get("data_source", "unknown"),
+        "detected_at": "",
+        "opened_at": "",
+        "target1_at": "",
+        "closed_at": "",
     }
     if learning_candidate:
         trade["learning_candidate"] = dict(learning_candidate)
+        trade["detected_at"] = str(
+            learning_candidate.get("detection_ts")
+            or learning_candidate.get("detected_at")
+            or learning_candidate.get("observed_ts")
+            or learning_candidate.get("ts")
+            or ""
+        )
     if os.getenv("PAPER_MODE", "false").strip().lower() != "true":
         return {"status": "NO TRADE", "reason": "PAPER_MODE is not enabled"}
     if os.getenv("ORDERS_ENABLED", "false").strip().lower() != "false":
@@ -127,4 +134,18 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
     if not claimed:
         return {"status": "NO TRADE",
                 "reason": f"ACTIVE POSITION GUARD: {reason}"}
+
+    trade["opened_at"] = now_utc()
+    record_event(
+        trade,
+        "OPEN",
+        ts=trade["opened_at"],
+        entry=entry,
+        quantity=quantity,
+        investment=investment,
+        stop_loss=stop_loss,
+        target1=target1,
+        target2=target2,
+        detected_at=trade.get("detected_at") or None,
+    )
     return trade
