@@ -79,7 +79,8 @@ def test_stop_loss_closes_position(tmp_path):
     assert result["closed"] is True
     assert result["exit_reason"] == "STOP_LOSS"
     assert result["status"] == "STOP LOSS HIT"
-    assert result["remaining_quantity"] == 10
+    assert result["remaining_quantity"] == 0
+    assert result["quantity"] == 0
     assert result["pnl"] == -20.0
     assert result["pnl_percent"] == -2.0
     assert Path(log_file).exists()

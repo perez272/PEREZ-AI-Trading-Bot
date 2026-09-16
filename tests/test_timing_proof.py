@@ -3,7 +3,9 @@ from src.dashboard_telemetry import timing_proof
 
 def _event(i, minute, pnl):
     key=f'E{i}'
-    ts=f'2026-09-11T09:{minute:02d}:00+05:30'
+    hour=9+minute//60
+    minute_of_hour=minute%60
+    ts=f'2026-09-11T{hour:02d}:{minute_of_hour:02d}:00+05:30'
     return [
         {'event_key':key,'stage':'PAPER_ENTRY','status':'OK','ts':ts,'symbol':'NIFTY','option_type':'CE','contract':'TEST','score':70,'details':{}},
         {'event_key':key,'stage':'OUTCOME','status':'OK','ts':ts,'symbol':'NIFTY','option_type':'CE','contract':'TEST','score':70,'details':{'pnl':pnl}},
