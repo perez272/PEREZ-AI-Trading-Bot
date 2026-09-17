@@ -18,6 +18,7 @@ from src.session_clock import IST,is_weekday
 from src.dashboard_telemetry import record_stage
 from src.adaptive_learning import remember_candidate,learning_signal as trade_learning_signal,resolve_outcome,memory_stats
 from src.surge_outcome_learning import learning_signal as surge_learning_signal,remember_surge,record_shadow_ranking
+from src.surge_confirmation import confirm as surge_confirm
 RUNNING=True;POLL_SECONDS=max(1,int(os.getenv('SURGE_TRADE_BRIDGE_INTERVAL_SECONDS','2')));RISK_MANAGER=TradingRiskManager()
 def _stop(*_args):
  global RUNNING;RUNNING=False
@@ -61,6 +62,24 @@ def _process_once():
    record_shadow_ranking({**event,'score':base_score},shadow_score)
   except Exception as exc:
    event['learning']={'adjustment':0.0,'combined_adjustment':0.0,'status':'UNAVAILABLE','error':str(exc)};event['surge_learning']={'adjustment':0.0,'status':'UNAVAILABLE','error':str(exc)}
+  try:
+   confirmation_input=dict(event)
+   if isinstance(event.get('features'),dict): confirmation_input.update(event['features'])
+   confirmation=surge_confirm(confirmation_input)
+   event['confirmation']=confirmation
+   record_stage(event_key,'CONFIRMATION','PASS' if confirmation.get('confirmed') else 'BLOCKED',symbol=symbol,option_type=option_type,score=event.get('score'),confirmation=confirmation)
+   if not confirmation.get('confirmed'):
+    reason_text='CONFIRMATION_BLOCKED'
+    print(f'[SURGE BRIDGE] {symbol} {option_type} confirmation blocked: points={confirmation.get("points")} reasons={confirmation.get("reasons")}')
+    try:
+     record_rejection(symbol=symbol,score=event.get('score'),reason=f'SURGE:{reason_text}',features={'event':event,'confirmation':confirmation})
+    except Exception as exc: print(f'[SURGE BRIDGE] confirmation rejection persistence failed: {exc}')
+    observer.mark_early_event_consumed(event_id)
+    continue
+  except Exception as exc:
+   record_stage(event_key,'CONFIRMATION','ERROR',symbol=symbol,option_type=option_type,error=str(exc))
+   print(f'[SURGE BRIDGE] confirmation failed safely for {symbol} {option_type}: {exc}')
+   continue
   try:trade,result=create_surge_trade(event,capital,RISK_MANAGER)
   except Exception as exc:
    record_stage(event_key,'GATE_EVALUATION','ERROR',symbol=symbol,option_type=option_type,score=event.get('score'),error=str(exc));print(f'[SURGE BRIDGE] evaluation failed for {symbol} {option_type}: {exc}');continue
