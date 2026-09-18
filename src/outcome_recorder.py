@@ -64,7 +64,28 @@ def record_closed_outcome(trade: dict[str, Any], result: dict[str, Any]) -> bool
         except (TypeError, ValueError):
             return default
 
+    # Preserve the exact SURGE event that produced this trade so canonical
+    # P&L outcomes can be learned against the original signal pattern.
+    candidate = trade.get("learning_candidate")
+    if not isinstance(candidate, dict):
+        candidate = {}
     features = {
+        "event_key": candidate.get("event_key") or trade.get("event_key"),
+        "surge_score": trade.get("surge_score", candidate.get("score")),
+        "surge_reasons": trade.get("surge_reasons", candidate.get("reasons")),
+        "surge_move_1m_pct": trade.get("surge_move_1m_pct", candidate.get("move_1m_pct")),
+        "surge_move_3m_pct": trade.get("surge_move_3m_pct", candidate.get("move_3m_pct")),
+        "surge_move_5m_pct": trade.get("surge_move_5m_pct", candidate.get("move_5m_pct")),
+        "surge_velocity": candidate.get("velocity"),
+        "surge_acceleration": candidate.get("acceleration"),
+        "surge_volume_ratio": candidate.get("volume_ratio"),
+        "surge_spread_pct": candidate.get("spread_pct"),
+        "surge_m15_trend": candidate.get("m15_trend"),
+        "surge_h1_trend": candidate.get("h1_trend"),
+        "surge_mtf_aligned": candidate.get("mtf_aligned"),
+        "surge_underlying_direction": candidate.get("underlying_direction"),
+        "surge_learning": trade.get("surge_learning"),
+        "learning": trade.get("learning"),
         "underlying_score": trade.get("underlying_score"),
         "options_score": trade.get("options_score"),
         "momentum_score": trade.get("momentum_score"),
