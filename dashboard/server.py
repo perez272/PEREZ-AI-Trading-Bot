@@ -86,6 +86,11 @@ class Handler(BaseHTTPRequestHandler):
             try:p,ctype=assets[path];self._send(200,ctype,p.read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
             return
+        if path=='/trades.html':
+            try:
+                self._send(200,'text/html; charset=utf-8', (ROOT/'dashboard/trades.html').read_text(encoding='utf-8'))
+            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'trades page error: {exc}')
+            return
         if path in ('/','/index.html'):
             try:
                 html=INDEX.read_text(encoding='utf-8'); marker='</head>'
