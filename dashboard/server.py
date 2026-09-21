@@ -61,13 +61,21 @@ def active_paper_trades():
         except Exception:
             pass
 
+    def has_levels(e):
+        return any(e.get(k) not in (None,'') for k in
+                   ('entry','stop_loss','target1','target2','quantity','investment'))
+
     by_id={}
     by_contract={}
     for e in events:
         tid=str(e.get('trade_id') or '')
         contract=str(e.get('contract') or '')
-        if tid: by_id[tid]=e
-        if contract: by_contract[contract]=e
+        if tid:
+            if tid not in by_id or (has_levels(e) and not has_levels(by_id[tid])):
+                by_id[tid]=e
+        if contract:
+            if contract not in by_contract or (has_levels(e) and not has_levels(by_contract[contract])):
+                by_contract[contract]=e
 
     def first(*vals):
         for v in vals:
