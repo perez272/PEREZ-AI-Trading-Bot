@@ -41,22 +41,59 @@ def learning(outcomes,rejections,audit):
     except Exception as exc:diagnostics={'status':'UNAVAILABLE','error':str(exc)}
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
 def active_paper_trades():
-    """Read-only dashboard view of currently claimed paper contracts."""
-    rows=q(ROOT/'data/runtime/active_positions.sqlite3', 'SELECT contract,symbol,trade_id,claimed_at FROM active_positions ORDER BY claimed_at')
-    opens={}
+    """Read-only dashboard view of currently claimed paper contracts.
+    Recovers trade levels from active-position columns or lifecycle events,
+    including older events whose trade_id does not match the active claim.
+    """
+    rows=q(ROOT/'data/runtime/active_positions.sqlite3',
+           'SELECT * FROM active_positions ORDER BY claimed_at')
+    events=[]
     log=ROOT/'data/paper_trade_lifecycle.jsonl'
     if log.exists():
         try:
             for line in log.read_text(encoding='utf-8').splitlines():
                 try:
-                    e=json.loads(line); tid=str(e.get('trade_id') or '')
-                    if tid and e.get('event')=='OPEN': opens[tid]=e
-                except Exception: pass
-        except Exception: pass
+                    e=json.loads(line)
+                    if e.get('event') in ('OPEN','ENTRY','DETECTED'):
+                        events.append(e)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    by_id={}
+    by_contract={}
+    for e in events:
+        tid=str(e.get('trade_id') or '')
+        contract=str(e.get('contract') or '')
+        if tid: by_id[tid]=e
+        if contract: by_contract[contract]=e
+
+    def first(*vals):
+        for v in vals:
+            if v not in (None,''):
+                return v
+        return None
+
     result=[]
     for r in rows:
-        o=opens.get(str(r.get('trade_id') or ''),{})
-        result.append({'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':r.get('contract'),'opened_at':o.get('ts_ist') or r.get('claimed_at'),'entry':o.get('entry'),'quantity':o.get('quantity'),'investment':o.get('investment'),'stop_loss':o.get('stop_loss'),'target1':o.get('target1'),'target2':o.get('target2'),'status':'PAPER TRADE ACTIVE','live_orders':False})
+        tid=str(r.get('trade_id') or '')
+        contract=str(r.get('contract') or '')
+        o=by_id.get(tid) or by_contract.get(contract) or {}
+        entry=first(r.get('entry'),r.get('ltp'),r.get('entry_price'),o.get('entry'))
+        sl=first(r.get('stop_loss'),r.get('initial_stop_loss'),o.get('stop_loss'))
+        t1=first(r.get('target1'),r.get('target_1'),o.get('target1'))
+        t2=first(r.get('target2'),r.get('target_2'),o.get('target2'))
+        qty=first(r.get('quantity'),r.get('qty'),o.get('quantity'))
+        inv=first(r.get('investment'),r.get('capital_used'),o.get('investment'))
+        opened=first(r.get('opened_at'),o.get('ts_ist'),r.get('claimed_at'))
+        result.append({
+            'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':contract,
+            'opened_at':opened,'entry':entry,'quantity':qty,'investment':inv,
+            'stop_loss':sl,'target1':t1,'target2':t2,
+            'levels_source':'active_position' if any(r.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2')) else ('lifecycle' if o else 'unavailable'),
+            'status':'PAPER TRADE ACTIVE','live_orders':False
+        })
     return result
 
 def state():
