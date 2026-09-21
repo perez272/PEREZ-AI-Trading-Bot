@@ -10,6 +10,7 @@ from src.dashboard_telemetry import recent as telemetry_recent,event_proof,summa
 from src.dashboard_strategy_lab import build_lab
 from src.shadow_diagnostics import report as shadow_diagnostics_report
 from src.surge_outcome_learning import shadow_performance
+from src.alternative_market_data import get_upstox_client
 
 def q(db,sql,args=(),default=None):
     try:
@@ -78,7 +79,26 @@ def active_paper_trades():
     for r in rows:
         tid=str(r.get('trade_id') or ''); contract=str(r.get('contract') or ''); o=by_id.get(tid) or by_contract.get(contract) or {}
         entry=first(r.get('entry'),r.get('ltp'),r.get('entry_price'),o.get('entry')); sl=first(r.get('stop_loss'),r.get('initial_stop_loss'),o.get('stop_loss')); t1=first(r.get('target1'),r.get('target_1'),o.get('target1')); t2=first(r.get('target2'),r.get('target_2'),o.get('target2')); qty=first(r.get('quantity'),r.get('qty'),o.get('quantity')); inv=first(r.get('investment'),r.get('capital_used'),o.get('investment')); opened=first(r.get('opened_at'),o.get('ts_ist'),r.get('claimed_at'))
-        result.append({'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':contract,'opened_at':opened,'entry':entry,'quantity':qty,'investment':inv,'stop_loss':sl,'target1':t1,'target2':t2,'current_ltp':first(r.get('current_ltp'),r.get('ltp'),r.get('last_price'),r.get('mark_price'),o.get('current_ltp'),o.get('ltp')),'current_pnl':first(r.get('current_pnl'),r.get('unrealized_pnl'),r.get('pnl'),o.get('current_pnl'),o.get('unrealized_pnl')),'score':first(r.get('score'),o.get('score'),o.get('surge_score')),'levels_source':'active_position' if any(r.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2')) else ('lifecycle' if o else 'unavailable'),'status':'PAPER TRADE ACTIVE','live_orders':False})
+        live_ltp=None
+        live_pnl=None
+        try:
+            qclient=get_upstox_client()
+            quote=qclient.get_full_quote(contract)
+            if isinstance(quote,dict):
+                for key in ('last_price','last_traded_price','ltp'):
+                    if quote.get(key) is not None:
+                        live_ltp=float(quote[key])
+                        break
+            if live_ltp is not None and entry is not None and qty is not None:
+                e=float(entry); qv=float(qty)
+                side=str(r.get('signal') or o.get('signal') or '').upper()
+                if 'SELL' in side:
+                    live_pnl=round((e-live_ltp)*qv,2)
+                else:
+                    live_pnl=round((live_ltp-e)*qv,2)
+        except Exception:
+            pass
+        result.append({'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':contract,'opened_at':opened,'entry':entry,'quantity':qty,'investment':inv,'stop_loss':sl,'target1':t1,'target2':t2,'current_ltp':live_ltp if live_ltp is not None else first(r.get('current_ltp'),r.get('ltp'),r.get('last_price'),r.get('mark_price'),o.get('current_ltp'),o.get('ltp')),'current_pnl':live_pnl if live_pnl is not None else first(r.get('current_pnl'),r.get('unrealized_pnl'),r.get('pnl'),o.get('current_pnl'),o.get('unrealized_pnl')),'score':first(r.get('score'),o.get('score'),o.get('surge_score')),'levels_source':'active_position' if any(r.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2')) else ('lifecycle' if o else 'unavailable'),'status':'PAPER TRADE ACTIVE','live_orders':False})
     return result
 def state():
     services={n:svc(n) for n in ('perez-ai.service','perez-telegram-updater.service','perez-tier1-option-observer.service','perez-surge-trade-bridge.service','perez-dashboard.service')}
