@@ -176,8 +176,10 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
     trade["lineage_id"] = lineage_id
     trade["strategy"] = "SURGE_EARLY_EXPLOSIVE"
     trade["detected_at"] = str(event.get("detection_ts") or event.get("observed_ts") or trade.get("detected_at") or "")
-    trade["surge_score"] = result["gate"]["score"]
-    trade["surge_reasons"] = result["gate"]["reasons"]
+    # Preserve original SURGE signal evidence for canonical P&L learning.
+    trade["event_key"] = event.get("event_key")
+    trade["surge_score"] = event.get("score", result["gate"]["score"])
+    trade["surge_reasons"] = event.get("reasons", result["gate"]["reasons"])
     trade["surge_move_1m_pct"] = result["evidence"].move_1m_pct
     trade["surge_move_3m_pct"] = result["evidence"].move_3m_pct
     trade["surge_move_5m_pct"] = result["evidence"].move_5m_pct

@@ -50,8 +50,15 @@ def monitor_trade(trade, current_price):
             print(f">>> Remaining Qty: {remaining}")
             print(f">>> Realized P/L: {trade['realized_pnl']}")
 
-    # Fixed initial stop: never move to breakeven or trail.
-    trade["stop_loss"] = round(initial_stop, 2)
+    # High-watermark trailing stop: preserve the initial stop as the floor.
+    trailing_pct = max(0.0, float(trade.get("trailing_stop_pct", 0.0) or 0.0))
+    trailing_stop = (
+        high_watermark * (1.0 - trailing_pct / 100.0)
+        if trailing_pct > 0
+        else initial_stop
+    )
+    stop_loss = max(initial_stop, trailing_stop)
+    trade["stop_loss"] = round(stop_loss, 2)
     unrealized = round((current_price - entry) * remaining, 2)
     realized = round(float(trade.get("realized_pnl", 0.0)), 2)
     pnl = round(realized + unrealized, 2)
@@ -75,7 +82,7 @@ def monitor_trade(trade, current_price):
         pnl_percent = round((pnl / initial_exposure) * 100, 2)
     elif current_price <= stop_loss:
         status = "STOP LOSS HIT"
-        exit_reason = "STOP_LOSS"
+        exit_reason = "TRAILING_STOP" if stop_loss > initial_stop else "STOP_LOSS"
         exit_price = stop_loss
         trade["realized_pnl"] = round(realized + (exit_price - entry) * remaining, 2)
         trade["remaining_quantity"] = 0
@@ -93,7 +100,7 @@ def monitor_trade(trade, current_price):
         "remaining_quantity": remaining, "stop_loss": stop_loss, "target": target2,
         "target1": target1, "target2": target2,
         "high_watermark": high_watermark, "low_watermark": low_watermark,
-        "trailing_stop_pct": 0.0, "mfe": mfe, "mae": mae,
+        "trailing_stop_pct": trailing_pct, "mfe": mfe, "mae": mae,
         "realized_pnl": realized, "unrealized_pnl": unrealized, "pnl": pnl,
         "pnl_percent": pnl_percent, "status": status, "exit_reason": exit_reason,
         "target1_hit": bool(trade.get("partial_booked")), "closed": status != "RUNNING",
