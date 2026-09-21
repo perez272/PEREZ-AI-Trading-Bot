@@ -41,11 +41,8 @@ def learning(outcomes,rejections,audit):
     except Exception as exc:diagnostics={'status':'UNAVAILABLE','error':str(exc)}
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
 def performance(outcomes, start_capital=50000.0):
-    ordered=list(reversed(outcomes))
-    pnls=[float(x.get('pnl') or 0) for x in ordered]
-    total=sum(pnls)
-    wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]
-    gross_win=sum(wins); gross_loss=abs(sum(losses))
+    ordered=list(reversed(outcomes)); pnls=[float(x.get('pnl') or 0) for x in ordered]; total=sum(pnls)
+    wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]; gross_win=sum(wins); gross_loss=abs(sum(losses))
     peak=start_capital; max_dd=0.0; curve=[start_capital]
     for p in pnls:
         eq=curve[-1]+p; peak=max(peak,eq); max_dd=min(max_dd,eq-peak); curve.append(eq)
@@ -53,92 +50,41 @@ def performance(outcomes, start_capital=50000.0):
     today_pnl=sum(float(x.get('pnl') or 0) for x in outcomes if str(x.get('ts') or '').startswith(today))
     return {'start_capital':start_capital,'equity':round(start_capital+total,2),'total_pnl':round(total,2),'total_pnl_pct':round(total/start_capital*100,2),'today_pnl':round(today_pnl,2),'drawdown':round(max_dd,2),'win_rate_pct':round(len(wins)/len(pnls)*100,1) if pnls else 0.0,'profit_factor':round(gross_win/gross_loss,2) if gross_loss else None,'avg_win':round(gross_win/len(wins),2) if wins else 0.0,'avg_loss':round(sum(losses)/len(losses),2) if losses else 0.0,'closed_trades':len(pnls),'gross_profit':round(gross_win,2),'gross_loss':round(gross_loss,2),'equity_curve':[round(x,2) for x in curve]}
 def active_paper_trades():
-    """Read-only dashboard view of currently live paper claims.
-    active_positions is the authority for current claims; closed outcome
-    records are excluded so stale claims cannot be rendered as active.
-    Lifecycle events are used only to enrich an active claim with levels.
-    """
-    rows=q(ROOT/'data/runtime/active_positions.sqlite3',
-           'SELECT * FROM active_positions ORDER BY claimed_at')
-
-    # Reconcile dashboard claims against recorded closed outcomes. This is
-    # read-only and does not alter the trading engine or risk controls.
-    closed=q(CORE,
-            'SELECT trade_id,contract FROM outcomes '
-            'WHERE trade_id IS NOT NULL AND trade_id != ""')
-    closed_ids={str(x.get('trade_id')) for x in closed if x.get('trade_id')}
-    closed_contracts={str(x.get('contract')) for x in closed if x.get('contract')}
-    rows=[r for r in rows
-          if str(r.get('trade_id') or '') not in closed_ids
-          and str(r.get('contract') or '') not in closed_contracts]
-
-    events=[]
-    log=ROOT/'data/paper_trade_lifecycle.jsonl'
+    """Read-only live view. active_positions is authoritative; lifecycle only enriches it."""
+    rows=q(ROOT/'data/runtime/active_positions.sqlite3','SELECT * FROM active_positions ORDER BY claimed_at')
+    closed=q(CORE,'SELECT trade_id,contract FROM outcomes WHERE trade_id IS NOT NULL AND trade_id != ""')
+    closed_ids={str(x.get('trade_id')) for x in closed if x.get('trade_id')}; closed_contracts={str(x.get('contract')) for x in closed if x.get('contract')}
+    rows=[r for r in rows if str(r.get('trade_id') or '') not in closed_ids and str(r.get('contract') or '') not in closed_contracts]
+    events=[]; log=ROOT/'data/paper_trade_lifecycle.jsonl'
     if log.exists():
         try:
             for line in log.read_text(encoding='utf-8').splitlines():
                 try:
                     e=json.loads(line)
-                    if e.get('event') in ('OPEN','ENTRY','DETECTED'):
-                        events.append(e)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def has_levels(e):
-        return any(e.get(k) not in (None,'') for k in
-                   ('entry','stop_loss','target1','target2','quantity','investment'))
-
-    by_id={}
-    by_contract={}
+                    if e.get('event') in ('OPEN','ENTRY','DETECTED'): events.append(e)
+                except Exception: pass
+        except Exception: pass
+    def has_levels(e): return any(e.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2','quantity','investment'))
+    by_id={}; by_contract={}
     for e in events:
-        tid=str(e.get('trade_id') or '')
-        contract=str(e.get('contract') or '')
-        if tid:
-            if tid not in by_id or (has_levels(e) and not has_levels(by_id[tid])):
-                by_id[tid]=e
-        if contract:
-            if contract not in by_contract or (has_levels(e) and not has_levels(by_contract[contract])):
-                by_contract[contract]=e
-
+        tid=str(e.get('trade_id') or ''); contract=str(e.get('contract') or '')
+        if tid and (tid not in by_id or (has_levels(e) and not has_levels(by_id[tid]))): by_id[tid]=e
+        if contract and (contract not in by_contract or (has_levels(e) and not has_levels(by_contract[contract]))): by_contract[contract]=e
     def first(*vals):
         for v in vals:
-            if v not in (None,''):
-                return v
+            if v not in (None,''): return v
         return None
-
     result=[]
     for r in rows:
-        tid=str(r.get('trade_id') or '')
-        contract=str(r.get('contract') or '')
-        o=by_id.get(tid) or by_contract.get(contract) or {}
-        entry=first(r.get('entry'),r.get('ltp'),r.get('entry_price'),o.get('entry'))
-        sl=first(r.get('stop_loss'),r.get('initial_stop_loss'),o.get('stop_loss'))
-        t1=first(r.get('target1'),r.get('target_1'),o.get('target1'))
-        t2=first(r.get('target2'),r.get('target_2'),o.get('target2'))
-        qty=first(r.get('quantity'),r.get('qty'),o.get('quantity'))
-        inv=first(r.get('investment'),r.get('capital_used'),o.get('investment'))
-        opened=first(r.get('opened_at'),o.get('ts_ist'),r.get('claimed_at'))
-        result.append({
-            'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':contract,
-            'opened_at':opened,'entry':entry,'quantity':qty,'investment':inv,
-            'stop_loss':sl,'target1':t1,'target2':t2,
-            'levels_source':'active_position' if any(r.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2')) else ('lifecycle' if o else 'unavailable'),
-            'status':'PAPER TRADE ACTIVE','live_orders':False
-        })
+        tid=str(r.get('trade_id') or ''); contract=str(r.get('contract') or ''); o=by_id.get(tid) or by_contract.get(contract) or {}
+        entry=first(r.get('entry'),r.get('ltp'),r.get('entry_price'),o.get('entry')); sl=first(r.get('stop_loss'),r.get('initial_stop_loss'),o.get('stop_loss')); t1=first(r.get('target1'),r.get('target_1'),o.get('target1')); t2=first(r.get('target2'),r.get('target_2'),o.get('target2')); qty=first(r.get('quantity'),r.get('qty'),o.get('quantity')); inv=first(r.get('investment'),r.get('capital_used'),o.get('investment')); opened=first(r.get('opened_at'),o.get('ts_ist'),r.get('claimed_at'))
+        result.append({'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':contract,'opened_at':opened,'entry':entry,'quantity':qty,'investment':inv,'stop_loss':sl,'target1':t1,'target2':t2,'levels_source':'active_position' if any(r.get(k) not in (None,'') for k in ('entry','stop_loss','target1','target2')) else ('lifecycle' if o else 'unavailable'),'status':'PAPER TRADE ACTIVE','live_orders':False})
     return result
-
 def state():
     services={n:svc(n) for n in ('perez-ai.service','perez-telegram-updater.service','perez-tier1-option-observer.service','perez-surge-trade-bridge.service','perez-dashboard.service')}
     disk=shutil.disk_usage(ROOT); early_raw=q(TIER1,'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 40'); move_raw=q(TIER1,'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 40'); out_raw=q(CORE,'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 1000'); rej_raw=q(CORE,'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 30'); audit=recent_audit(80); tel=telemetry_recent(180)
-    early=pick(early_raw,['id','symbol','option_type','instrument_key','expiry','strike','ltp','score','move_1m_pct','move_3m_pct','move_5m_pct','velocity','acceleration','volume_ratio','spread_pct','observed_ts','detection_ts','consumed','event_key'])
-    moves=pick(move_raw,['id','symbol','option_type','strike','window_minutes','change_pct','end_ltp','observed_ts'])
-    outcomes=pick(out_raw,['id','ts','symbol','contract','signal','score','pnl','pnl_percent','exit_reason'])
-    rejections=pick(rej_raw,['id','ts','symbol','score','options_score','reason'])
-    latest=early[0] if early else None; proof=event_proof(latest.get('event_key')) if latest and latest.get('event_key') else {}
-    tel_summary=telemetry_summary()
-    perf=performance(out_raw)
+    early=pick(early_raw,['id','symbol','option_type','instrument_key','expiry','strike','ltp','score','move_1m_pct','move_3m_pct','move_5m_pct','velocity','acceleration','volume_ratio','spread_pct','observed_ts','detection_ts','consumed','event_key']); moves=pick(move_raw,['id','symbol','option_type','strike','window_minutes','change_pct','end_ltp','observed_ts']); outcomes=pick(out_raw,['id','ts','symbol','contract','signal','score','pnl','pnl_percent','exit_reason']); rejections=pick(rej_raw,['id','ts','symbol','score','options_score','reason'])
+    latest=early[0] if early else None; proof=event_proof(latest.get('event_key')) if latest and latest.get('event_key') else {}; tel_summary=telemetry_summary(); perf=performance(out_raw)
     return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'active_paper_trades':active_paper_trades(),'performance':perf,'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
 class Handler(BaseHTTPRequestHandler):
     def _send(self,status,ctype,body):
@@ -158,14 +104,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
             return
         if path=='/trades.html':
-            try:
-                self._send(200,'text/html; charset=utf-8', (ROOT/'dashboard/trades.html').read_text(encoding='utf-8'))
+            try:self._send(200,'text/html; charset=utf-8',(ROOT/'dashboard/trades.html').read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'trades page error: {exc}')
             return
         if path in ('/','/index.html'):
             try:
-                html=INDEX.read_text(encoding='utf-8'); marker='</head>'
-                head='<link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="PEREZ-AI"><link rel="icon" href="/app-icon.svg">'
+                html=INDEX.read_text(encoding='utf-8'); marker='</head>'; head='<link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="PEREZ-AI"><link rel="icon" href="/app-icon.svg">'
                 if '/manifest.webmanifest' not in html:html=html.replace(marker,head+marker)
                 marker='</body>'
                 for src in ('/advanced.js','/pro_live.js','/app.js','/strategy_lab.js','/learning.js'):
