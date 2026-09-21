@@ -40,16 +40,35 @@ def learning(outcomes,rejections,audit):
     try:diagnostics=shadow_diagnostics_report()
     except Exception as exc:diagnostics={'status':'UNAVAILABLE','error':str(exc)}
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
+def active_paper_trades():
+    """Read-only dashboard view of currently claimed paper contracts."""
+    rows=q(ROOT/'data/runtime/active_positions.sqlite3', 'SELECT contract,symbol,trade_id,claimed_at FROM active_positions ORDER BY claimed_at')
+    opens={}
+    log=ROOT/'data/paper_trade_lifecycle.jsonl'
+    if log.exists():
+        try:
+            for line in log.read_text(encoding='utf-8').splitlines():
+                try:
+                    e=json.loads(line); tid=str(e.get('trade_id') or '')
+                    if tid and e.get('event')=='OPEN': opens[tid]=e
+                except Exception: pass
+        except Exception: pass
+    result=[]
+    for r in rows:
+        o=opens.get(str(r.get('trade_id') or ''),{})
+        result.append({'trade_id':r.get('trade_id'),'symbol':r.get('symbol'),'contract':r.get('contract'),'opened_at':o.get('ts_ist') or r.get('claimed_at'),'entry':o.get('entry'),'quantity':o.get('quantity'),'investment':o.get('investment'),'stop_loss':o.get('stop_loss'),'target1':o.get('target1'),'target2':o.get('target2'),'status':'PAPER TRADE ACTIVE','live_orders':False})
+    return result
+
 def state():
     services={n:svc(n) for n in ('perez-ai.service','perez-telegram-updater.service','perez-tier1-option-observer.service','perez-surge-trade-bridge.service','perez-dashboard.service')}
-    disk=shutil.disk_usage(ROOT); early_raw=q(TIER1,'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 40'); move_raw=q(TIER1,'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 40'); out_raw=q(CORE,'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 30'); rej_raw=q(CORE,'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 30'); audit=recent_audit(80); tel=telemetry_recent(180)
+    disk=shutil.disk_usage(ROOT); early_raw=q(TIER1,'SELECT * FROM early_events ORDER BY rowid DESC LIMIT 40'); move_raw=q(TIER1,'SELECT * FROM move_events ORDER BY rowid DESC LIMIT 40'); out_raw=q(CORE,'SELECT * FROM outcomes ORDER BY rowid DESC LIMIT 1000'); rej_raw=q(CORE,'SELECT * FROM rejections ORDER BY rowid DESC LIMIT 30'); audit=recent_audit(80); tel=telemetry_recent(180)
     early=pick(early_raw,['id','symbol','option_type','instrument_key','expiry','strike','ltp','score','move_1m_pct','move_3m_pct','move_5m_pct','velocity','acceleration','volume_ratio','spread_pct','observed_ts','detection_ts','consumed','event_key'])
     moves=pick(move_raw,['id','symbol','option_type','strike','window_minutes','change_pct','end_ltp','observed_ts'])
     outcomes=pick(out_raw,['id','ts','symbol','contract','signal','score','pnl','pnl_percent','exit_reason'])
     rejections=pick(rej_raw,['id','ts','symbol','score','options_score','reason'])
     latest=early[0] if early else None; proof=event_proof(latest.get('event_key')) if latest and latest.get('event_key') else {}
     tel_summary=telemetry_summary()
-    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
+    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'active_paper_trades':active_paper_trades(),'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
 class Handler(BaseHTTPRequestHandler):
     def _send(self,status,ctype,body):
         data=body.encode('utf-8') if isinstance(body,str) else body; self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
