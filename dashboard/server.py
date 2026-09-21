@@ -40,6 +40,18 @@ def learning(outcomes,rejections,audit):
     try:diagnostics=shadow_diagnostics_report()
     except Exception as exc:diagnostics={'status':'UNAVAILABLE','error':str(exc)}
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
+def performance(outcomes, start_capital=50000.0):
+    ordered=list(reversed(outcomes))
+    pnls=[float(x.get('pnl') or 0) for x in ordered]
+    total=sum(pnls)
+    wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]
+    gross_win=sum(wins); gross_loss=abs(sum(losses))
+    peak=start_capital; max_dd=0.0; curve=[start_capital]
+    for p in pnls:
+        eq=curve[-1]+p; peak=max(peak,eq); max_dd=min(max_dd,eq-peak); curve.append(eq)
+    today=time.strftime('%Y-%m-%d')
+    today_pnl=sum(float(x.get('pnl') or 0) for x in outcomes if str(x.get('ts') or '').startswith(today))
+    return {'start_capital':start_capital,'equity':round(start_capital+total,2),'total_pnl':round(total,2),'total_pnl_pct':round(total/start_capital*100,2),'today_pnl':round(today_pnl,2),'drawdown':round(max_dd,2),'win_rate_pct':round(len(wins)/len(pnls)*100,1) if pnls else 0.0,'profit_factor':round(gross_win/gross_loss,2) if gross_loss else None,'avg_win':round(gross_win/len(wins),2) if wins else 0.0,'avg_loss':round(sum(losses)/len(losses),2) if losses else 0.0,'closed_trades':len(pnls),'gross_profit':round(gross_win,2),'gross_loss':round(gross_loss,2),'equity_curve':[round(x,2) for x in curve]}
 def active_paper_trades():
     """Read-only dashboard view of currently claimed paper contracts.
     Recovers trade levels from active-position columns or lifecycle events,
@@ -113,7 +125,8 @@ def state():
     rejections=pick(rej_raw,['id','ts','symbol','score','options_score','reason'])
     latest=early[0] if early else None; proof=event_proof(latest.get('event_key')) if latest and latest.get('event_key') else {}
     tel_summary=telemetry_summary()
-    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'active_paper_trades':active_paper_trades(),'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
+    perf=performance(out_raw)
+    return {'time':time.strftime('%Y-%m-%d %H:%M:%S IST'),'services':services,'mode':{'paper_mode':env('PAPER_MODE'),'orders_enabled':env('ORDERS_ENABLED'),'provider':env('MARKET_DATA_PROVIDER'),'upstox_enabled':env('UPSTOX_ENABLED')},'resources':{'disk_used_pct':round(disk.used/disk.total*100,1),'disk_free_gb':round(disk.free/1e9,2)},'controls':get_state(),'active_paper_trades':active_paper_trades(),'performance':perf,'counts':{'core':{'observations':count(CORE,'observations'),'outcomes':count(CORE,'outcomes'),'rejections':count(CORE,'rejections'),'lessons':count(CORE,'lessons')},'tier1':{'observations':count(TIER1,'observations'),'move_events':count(TIER1,'move_events'),'early_events':count(TIER1,'early_events')},'telemetry':tel_summary},'latest':{'early_event':latest,'outcome':outcomes[0] if outcomes else None,'proof':proof},'recent':{'outcomes':outcomes,'rejections':rejections,'early_events':early,'move_events':moves,'telemetry':tel},'learning':learning(outcomes,rejections,audit),'audit':audit}
 class Handler(BaseHTTPRequestHandler):
     def _send(self,status,ctype,body):
         data=body.encode('utf-8') if isinstance(body,str) else body; self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
