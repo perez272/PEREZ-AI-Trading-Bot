@@ -97,6 +97,15 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     expiry = str(event.get("expiry") or "").strip()
     strike = _num(event.get("strike"))
     features = _features(event)
+    detector_score = _num(event.get("score"))
+    volume_ratio = _num(event.get("volume_ratio"), 999.0)
+    if detector_score >= 65.0 and volume_ratio < 0.20:
+        return {
+            "eligible": False,
+            "terminal": True,
+            "reason": "LEARNED_LOW_VOLUME_GUARD",
+            "reasons": ["LEARNED_LOW_VOLUME_GUARD"],
+        }
     if _event_age(event) > MAX_EVENT_AGE_SECONDS:
         return {"eligible": False, "terminal": True, "reason": "STALE_EARLY_EVENT", "reasons": ["STALE_EARLY_EVENT"]}
     client = get_upstox_client()
