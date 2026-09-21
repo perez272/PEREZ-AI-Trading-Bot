@@ -53,12 +53,25 @@ def performance(outcomes, start_capital=50000.0):
     today_pnl=sum(float(x.get('pnl') or 0) for x in outcomes if str(x.get('ts') or '').startswith(today))
     return {'start_capital':start_capital,'equity':round(start_capital+total,2),'total_pnl':round(total,2),'total_pnl_pct':round(total/start_capital*100,2),'today_pnl':round(today_pnl,2),'drawdown':round(max_dd,2),'win_rate_pct':round(len(wins)/len(pnls)*100,1) if pnls else 0.0,'profit_factor':round(gross_win/gross_loss,2) if gross_loss else None,'avg_win':round(gross_win/len(wins),2) if wins else 0.0,'avg_loss':round(sum(losses)/len(losses),2) if losses else 0.0,'closed_trades':len(pnls),'gross_profit':round(gross_win,2),'gross_loss':round(gross_loss,2),'equity_curve':[round(x,2) for x in curve]}
 def active_paper_trades():
-    """Read-only dashboard view of currently claimed paper contracts.
-    Recovers trade levels from active-position columns or lifecycle events,
-    including older events whose trade_id does not match the active claim.
+    """Read-only dashboard view of currently live paper claims.
+    active_positions is the authority for current claims; closed outcome
+    records are excluded so stale claims cannot be rendered as active.
+    Lifecycle events are used only to enrich an active claim with levels.
     """
     rows=q(ROOT/'data/runtime/active_positions.sqlite3',
            'SELECT * FROM active_positions ORDER BY claimed_at')
+
+    # Reconcile dashboard claims against recorded closed outcomes. This is
+    # read-only and does not alter the trading engine or risk controls.
+    closed=q(CORE,
+            'SELECT trade_id,contract FROM outcomes '
+            'WHERE trade_id IS NOT NULL AND trade_id != ""')
+    closed_ids={str(x.get('trade_id')) for x in closed if x.get('trade_id')}
+    closed_contracts={str(x.get('contract')) for x in closed if x.get('contract')}
+    rows=[r for r in rows
+          if str(r.get('trade_id') or '') not in closed_ids
+          and str(r.get('contract') or '') not in closed_contracts]
+
     events=[]
     log=ROOT/'data/paper_trade_lifecycle.jsonl'
     if log.exists():
