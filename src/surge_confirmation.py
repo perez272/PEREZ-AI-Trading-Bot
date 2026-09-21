@@ -1,5 +1,6 @@
 """Data-driven surge confirmation. Shadow/backtest safe; does not alter risk limits."""
 from __future__ import annotations
+import os
 
 def confirm(event):
     f = event or {}
@@ -48,13 +49,25 @@ def confirm(event):
         points += 1
         reasons.append("SCORE_SUPPORT")
 
-    # Require continuation and execution quality.
-    confirmed = (
-        points >= 6
-        and m3 >= 3.0
-        and m5 >= 3.0
-        and spread <= 2.84
+    # In paper-only learning mode, retain the confirmation evidence but allow
+    # the event through so the bot can collect broader outcome data. Normal
+    # production mode keeps the original confirmation gate unchanged.
+    learning_mode = (
+        os.getenv("PAPER_LEARNING_MODE", "false").lower() == "true"
+        and os.getenv("PAPER_MODE", "false").lower() == "true"
+        and os.getenv("ORDERS_ENABLED", "false").lower() != "true"
     )
+    confirmed = (
+        learning_mode
+        or (
+            points >= 6
+            and m3 >= 3.0
+            and m5 >= 3.0
+            and spread <= 2.84
+        )
+    )
+    if learning_mode:
+        reasons.append("PAPER_LEARNING_MODE_BYPASS")
 
     return {
         "confirmed": confirmed,
