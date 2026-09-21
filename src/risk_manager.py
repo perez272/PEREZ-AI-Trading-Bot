@@ -2,6 +2,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import os
 
 from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_DAILY_DRAWDOWN_PCT
 from src.trading_risk_manager import TradingRiskManager
@@ -55,6 +56,15 @@ def daily_summary(path="data/trades.csv", current=None):
     return summary
 
 
+def _paper_learning_mode():
+    """Allow broader paper-only sampling without weakening per-trade protection."""
+    return (
+        os.getenv("PAPER_LEARNING_MODE", "false").lower() == "true"
+        and os.getenv("PAPER_MODE", "false").lower() == "true"
+        and os.getenv("ORDERS_ENABLED", "false").lower() != "true"
+    )
+
+
 def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     """Apply risk gates using the current available capital.
 
@@ -73,7 +83,8 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
-    if summary["closed_trades"] >= max_trades:
+    learning_mode = _paper_learning_mode()
+    if not learning_mode and summary["closed_trades"] >= max_trades:
         return False, f"Daily trade limit reached ({max_trades})", summary
 
     dynamic_limit = abs(float(capital)) * MAX_DAILY_DRAWDOWN_PCT / 100.0
@@ -81,12 +92,12 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     if daily_loss_limit <= 0:
         return False, "No valid available capital for risk checks", summary
 
-    if summary["pnl"] <= -daily_loss_limit:
+    if not learning_mode and summary["pnl"] <= -daily_loss_limit:
         return False, f"Daily loss limit reached (2% of capital = Rs {daily_loss_limit:.2f})", summary
-    if capital > 0 and summary["pnl"] <= -dynamic_limit:
+    if not learning_mode and capital > 0 and summary["pnl"] <= -dynamic_limit:
         return False, f"Daily drawdown limit reached ({MAX_DAILY_DRAWDOWN_PCT:.1f}%)", summary
     if TRADING_RISK_MANAGER.is_circuit_breaker_active():
         remaining = TRADING_RISK_MANAGER.circuit_breaker_remaining()
         minutes = max(1, int((remaining + 59) // 60))
         return False, f"Timed circuit breaker active ({minutes} min remaining)", summary
-    return True, "Risk checks passed", summary
+    return True, "PAPER_LEARNING_MODE: daily entry/loss limits bypassed" if learning_mode else "Risk checks passed", summary
