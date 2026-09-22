@@ -98,6 +98,6 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, f"Daily drawdown limit reached ({MAX_DAILY_DRAWDOWN_PCT:.1f}%)", summary
     if TRADING_RISK_MANAGER.is_circuit_breaker_active():
         remaining = TRADING_RISK_MANAGER.circuit_breaker_remaining()
-        minutes = max(1, int((remaining + 59) // 60))
+        minutes = max(1, int(remaining.total_seconds() + 59) // 60)
         return False, f"Timed circuit breaker active ({minutes} min remaining)", summary
     return True, "PAPER_LEARNING_MODE: daily entry/loss limits bypassed" if learning_mode else "Risk checks passed", summary

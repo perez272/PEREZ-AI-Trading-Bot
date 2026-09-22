@@ -20,6 +20,7 @@ from src.index_momentum_strategy import select_index_momentum_candidate, build_d
 from src.tier1_option_observer import observe_tier1_option_chains
 from src.tier1_option_observer import get_tier1_option_observer
 from src.surge_trade_bridge import create_surge_trade
+from src.paper_position_recovery import recover_paper_positions
 from src.learning_status import record_cycle
 from src.rejection_recorder import record_rejection
 from src.upgrade_config import (
@@ -286,6 +287,10 @@ def _observe_market_evidence():
 def main():
     lock = acquire_single_instance()
     write_heartbeat("starting")
+    try:
+        recover_paper_positions()
+    except Exception as exc:
+        print(f"[RECOVERY] startup recovery failed — scanner continues: {exc}")
     try:
         wait_for_0915_ist()
         print("=" * 72)
