@@ -15,13 +15,13 @@ from src.micro_account_controls import (
 
 def test_build_strike_sequence_ce_starts_itm_then_moves_otm():
     assert build_strike_sequence("NIFTY", 25000, "CE", itm_depth=1) == [
-        24950, 25000, 25050, 25100, 25150, 25200
+        24950, 25000, 25050, 25100, 25150
     ]
 
 
 def test_build_strike_sequence_pe_starts_itm_then_moves_otm():
     assert build_strike_sequence("NIFTY", 25000, "PE", itm_depth=1) == [
-        25050, 25000, 24950, 24900, 24850, 24800
+        25050, 25000, 24950, 24900, 24850
     ]
 
 
@@ -44,7 +44,7 @@ def test_select_affordable_strike_uses_live_ltp_and_4800_cap():
 def test_select_affordable_strike_returns_none_after_three_otm():
     contracts = {
         strike: {"symbol": str(strike), "token": str(strike), "lotsize": 25}
-        for strike in [24950, 25000, 25050, 25100, 25150, 25200]
+        for strike in [24950, 25000, 25050, 25100, 25150]
     }
     result = select_affordable_strike(
         "NIFTY", 25000, "CE", contracts, lambda _: 200.0
