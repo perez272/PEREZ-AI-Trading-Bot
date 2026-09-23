@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import os
+import json
 
 from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_DAILY_DRAWDOWN_PCT
 from src.trading_risk_manager import TradingRiskManager
@@ -32,7 +33,7 @@ def daily_summary(path="data/trades.csv", current=None):
     current = current or now_ist()
     today = current.strftime("%Y-%m-%d")
     output = Path(path)
-    summary = {"closed_trades": 0, "pnl": 0.0, "consecutive_losses": 0, "worst_loss": 0.0}
+    summary = {"closed_trades": 0, "trades_taken_today": 0, "pnl": 0.0, "consecutive_losses": 0, "worst_loss": 0.0}
     if not output.exists():
         return summary
 
@@ -47,6 +48,23 @@ def daily_summary(path="data/trades.csv", current=None):
                 rows.append(row)
 
     summary["closed_trades"] = len(rows)
+    # Count immutable OPEN lifecycle events so open trades consume today's limit.
+    lifecycle = Path("data/paper_trade_lifecycle.jsonl")
+    if lifecycle.exists():
+        try:
+            with lifecycle.open(encoding="utf-8") as file:
+                for line in file:
+                    try:
+                        event = json.loads(line)
+                        if event.get("event") != "OPEN":
+                            continue
+                        ts = event.get("ts_ist") or event.get("ts_utc") or ""
+                        if str(ts).startswith(today):
+                            summary["trades_taken_today"] += 1
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+        except OSError:
+            pass
     summary["pnl"] = round(sum(row["_pnl"] for row in rows), 2)
     summary["worst_loss"] = round(min((row["_pnl"] for row in rows), default=0.0), 2)
     for row in reversed(rows):
@@ -86,7 +104,7 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     summary = daily_summary()
     # Micro-account frequency protection is hard and cannot be bypassed by
     # PAPER_LEARNING_MODE.
-    if not daily_trade_limit_allows(summary["closed_trades"], max_daily_trades=min(int(max_trades), 2)):
+    if not daily_trade_limit_allows(summary["trades_taken_today"], max_daily_trades=min(int(max_trades), 2)):
         return False, "MAX_DAILY_TRADES_HIT", summary
     learning_mode = _paper_learning_mode()
 
