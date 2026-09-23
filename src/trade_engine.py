@@ -4,6 +4,7 @@ from src.live_option_price import get_option_ltp, get_option_ltp_batch
 from src.alternative_market_data import get_upstox_client
 from src.active_position_guard import claim_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
+from src.dynamic_strike_selector import select_target_strike
 from src.paper_trade_lifecycle import now_utc, record_event
 
 STOP_LOSS_PCT = 0.02
@@ -18,11 +19,13 @@ def resolve_option_contract(symbol, spot, signal):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
     option_type = "CE" if signal == "BUY CE" else "PE"
     provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
+    target_strike = select_target_strike(symbol, float(spot), option_type, itm_depth=1)
     upstox = get_upstox_client()
     if provider == "upstox" or (provider == "auto" and upstox.available()):
-        fallback = upstox.resolve_affordable_option(symbol, float(spot), option_type, OPTION_MAX_PREMIUM)
+        fallback = upstox.resolve_affordable_option(\n            symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike\n        )
         if fallback and fallback.get("status") == "CONTRACT VALID":
             fallback["max_premium"] = OPTION_MAX_PREMIUM
+            fallback["target_strike"] = target_strike
             fallback["affordability_score"] = fallback.get("affordability_score", 0)
             print(f'[TRADE ENGINE] Upstox provider selected {fallback.get("contract", "UNKNOWN")} LTP=Rs {float(fallback.get("ltp", 0) or 0):.2f}')
             return fallback
