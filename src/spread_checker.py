@@ -73,7 +73,10 @@ def check_upstox_spread(
         )
         return False
     try:
-        quote = client.get_full_quote(str(instrument_key))
+        getter = getattr(client, "get_full_market_quote", None) or getattr(client, "get_full_quote", None)
+        if getter is None:
+            raise AttributeError("Upstox client has no full market quote method")
+        quote = getter(str(instrument_key))
     except Exception as exc:
         (logger or LOGGER).warning(
             "TRADE_BLOCKED_SPREAD instrument_key=%s reason=QUOTE_ERROR error=%s",
