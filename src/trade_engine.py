@@ -132,9 +132,8 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
     if ltp > OPTION_MAX_PREMIUM:
         return {"status": "PRICE_CHANGED", "reason": f"Option premium Rs {ltp:.2f} exceeds cap Rs {OPTION_MAX_PREMIUM:.2f}"}
     deployable_capital = min(float(capital), MAX_ENTRY_CAPITAL_INR)
-    lots = int(deployable_capital // (ltp * lot_size))
-    if lots < 1:
-        return {"status": "LOW CAPITAL", "reason": f"One lot needs Rs {ltp * lot_size:.2f}"}
+    # Micro-account mode is strictly one-lot option buying.
+    lots = 1
     quantity = lots * lot_size
     investment = round(quantity * ltp, 2)
     entry = float(ltp)
