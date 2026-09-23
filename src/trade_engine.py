@@ -5,6 +5,7 @@ from src.alternative_market_data import get_upstox_client
 from src.active_position_guard import claim_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
 from src.dynamic_strike_selector import select_target_strike
+from src.spread_checker import check_upstox_spread
 from src.paper_trade_lifecycle import now_utc, record_event
 
 STOP_LOSS_PCT = 0.02
@@ -30,6 +31,8 @@ def resolve_option_contract(symbol, spot, signal):
             symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike
         )
         if fallback and fallback.get("status") == "CONTRACT VALID":
+            if not check_upstox_spread(upstox, str(fallback.get("token", ""))):
+                return {"status": "NO TRADE", "reason": "TRADE_BLOCKED_SPREAD", "data_source": "upstox_option_chain"}
             fallback["max_premium"] = OPTION_MAX_PREMIUM
             fallback["target_strike"] = target_strike
             fallback["affordability_score"] = fallback.get("affordability_score", 0)
