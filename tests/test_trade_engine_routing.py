@@ -36,9 +36,14 @@ class FakeUpstox:
         self.result = result
         self.calls = 0
         self.preferred_strikes = []
+        self.quote_calls = []
 
     def available(self):
         return self._available
+
+    def get_full_quote(self, instrument_key):
+        self.quote_calls.append(instrument_key)
+        return {"depth": {"buy": [{"price": 100.0}], "sell": [{"price": 100.3}]}}
 
     def resolve_affordable_option(self, *args, preferred_strike=None):
         self.calls += 1
@@ -63,6 +68,7 @@ def test_upstox_mode_uses_upstox_only(monkeypatch):
     assert result["data_source"] == "upstox_option_chain"
     assert upstox.calls == 1
     assert upstox.preferred_strikes == [23750.0]
+    assert upstox.quote_calls == ["NSE_FO|TEST"]
     assert angel_calls == []
 
 
