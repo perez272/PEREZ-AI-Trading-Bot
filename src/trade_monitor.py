@@ -25,6 +25,8 @@ def monitor_trade(trade, current_price):
     trade.setdefault("realized_pnl", 0.0)
 
     initial_stop = float(trade.get("initial_stop_loss", trade["stop_loss"]))
+    if trade.get("time_stop_breakeven"):
+        initial_stop = max(initial_stop, entry)
     stop_loss = initial_stop
     target1 = float(trade["target1"])
     target2 = float(trade["target2"])
