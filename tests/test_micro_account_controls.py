@@ -115,7 +115,7 @@ def test_create_trade_is_strictly_one_lot(monkeypatch):
 
 def test_daily_summary_counts_open_lifecycle_entries(monkeypatch, tmp_path):
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
     import src.risk_manager as risk
 
     trades = tmp_path / "trades.csv"
@@ -129,6 +129,6 @@ def test_daily_summary_counts_open_lifecycle_entries(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    current = risk.IST.fromutc(datetime(2026, 9, 23, 6, 30))
+    current = datetime(2026, 9, 23, 6, 30, tzinfo=timezone.utc).astimezone(risk.IST)
     summary = risk.daily_summary(trades, current=current)
     assert summary["trades_taken_today"] == 2
