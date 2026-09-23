@@ -10,7 +10,7 @@ def _upstox_result():
         "ltp": 64.75,
         "token": "NSE_FO|TEST",
         "exchange": "NFO",
-        "lotsize": 75,
+        "lotsize": 25,
         "affordability_score": 90,
         "data_source": "upstox_option_chain",
     }
@@ -25,7 +25,7 @@ def _angel_result():
         "ltp": 64.75,
         "token": "ANGEL-TEST",
         "exchange": "NFO",
-        "lotsize": 75,
+        "lotsize": 25,
         "affordability_score": 80,
     }
 
@@ -108,7 +108,7 @@ def test_auto_falls_back_to_angel_when_upstox_fails(monkeypatch):
 
     assert result["status"] == "CONTRACT VALID"
     assert result["data_source"] == "angel_one_option_chain"
-    assert upstox.calls == 1
+    assert upstox.calls == 5
     assert len(angel_calls) == 1
 
 
