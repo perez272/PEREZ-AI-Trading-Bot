@@ -7,6 +7,15 @@ from src.upgrade_config import OPTION_MAX_PREMIUM
 from src.dynamic_strike_selector import select_target_strike
 from src.spread_checker import check_upstox_spread
 from src.paper_trade_lifecycle import now_utc, record_event
+from src.micro_account_controls import (
+    MAX_ENTRY_CAPITAL_INR,
+    MAX_RISK_PER_TRADE_INR,
+    build_strike_sequence,
+    calculate_rupee_stop_loss,
+)
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 STOP_LOSS_PCT = 0.02
 TARGET1_PCT = 0.05
@@ -27,17 +36,49 @@ def resolve_option_contract(symbol, spot, signal):
             target_strike = select_target_strike(symbol, float(spot), option_type, itm_depth=1)
         except ValueError:
             target_strike = None
-        fallback = upstox.resolve_affordable_option(
-            symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike
-        )
+        fallback = None
+        # Micro-account selection: start ATM/1-strike ITM, then move OTM,
+        # stopping after three OTM strikes and Rs 4,800 deployable capital.
+        try:
+            strike_sequence = build_strike_sequence(symbol, float(spot), option_type, itm_depth=1)
+        except ValueError:
+            strike_sequence = [target_strike] if target_strike is not None else []
+        for candidate_strike in strike_sequence:
+            candidate = upstox.resolve_affordable_option(
+                symbol, float(spot), option_type, OPTION_MAX_PREMIUM,
+                preferred_strike=candidate_strike,
+            )
+            if not candidate or candidate.get("status") != "CONTRACT VALID":
+                continue
+            try:
+                required_capital = float(candidate.get("ltp", 0) or 0) * int(candidate.get("lotsize", 0) or 0)
+            except (TypeError, ValueError):
+                required_capital = float("inf")
+            if required_capital <= MAX_ENTRY_CAPITAL_INR:
+                fallback = candidate
+                break
         if fallback and fallback.get("status") == "CONTRACT VALID":
-            if not check_upstox_spread(upstox, str(fallback.get("token", ""))):
-                return {"status": "NO TRADE", "reason": "TRADE_BLOCKED_SPREAD", "data_source": "upstox_option_chain"}
+            if not check_upstox_spread(
+                upstox, str(fallback.get("token", "")), max_spread_pct=1.0
+            ):
+                LOGGER.warning(
+                    "SPREAD_TOO_WIDE symbol=%s contract=%s",
+                    symbol, fallback.get("contract", ""),
+                )
+                return {"status": "NO TRADE", "reason": "SPREAD_TOO_WIDE", "data_source": "upstox_option_chain"}
             fallback["max_premium"] = OPTION_MAX_PREMIUM
             fallback["target_strike"] = target_strike
             fallback["affordability_score"] = fallback.get("affordability_score", 0)
+            fallback["required_capital"] = round(
+                float(fallback.get("ltp", 0) or 0) * int(fallback.get("lotsize", 0) or 0), 2
+            )
             print(f'[TRADE ENGINE] Upstox provider selected {fallback.get("contract", "UNKNOWN")} LTP=Rs {float(fallback.get("ltp", 0) or 0):.2f}')
             return fallback
+        LOGGER.warning(
+            "INSUFFICIENT_CAPITAL_FOR_SETUP symbol=%s option_type=%s max_entry_capital=%.2f",
+            symbol, option_type, MAX_ENTRY_CAPITAL_INR,
+        )
+        return {"status": "NO TRADE", "reason": "INSUFFICIENT_CAPITAL_FOR_SETUP", "data_source": "upstox_option_chain"}
         if provider == "upstox":
             return {"status": "NO AFFORDABLE OPTION", "reason": "Upstox could not resolve a valid affordable option"}
     affordable = find_affordable_contract(
@@ -81,23 +122,32 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
     ltp = float(resolved["ltp"])
     if lot_size < 1 or ltp <= 0:
         return {"status": "INVALID CONTRACT", "reason": "Invalid lot size or LTP"}
+    required_capital = round(ltp * lot_size, 2)
+    if required_capital > MAX_ENTRY_CAPITAL_INR:
+        LOGGER.warning(
+            "INSUFFICIENT_CAPITAL_FOR_SETUP symbol=%s contract=%s required_capital=%.2f max_entry_capital=%.2f",
+            symbol, resolved.get("contract", ""), required_capital, MAX_ENTRY_CAPITAL_INR,
+        )
+        return {"status": "NO TRADE", "reason": "INSUFFICIENT_CAPITAL_FOR_SETUP"}
     if ltp > OPTION_MAX_PREMIUM:
         return {"status": "PRICE_CHANGED", "reason": f"Option premium Rs {ltp:.2f} exceeds cap Rs {OPTION_MAX_PREMIUM:.2f}"}
-    deployable_capital = float(capital) * MAX_CAPITAL_UTILIZATION
+    deployable_capital = min(float(capital), 5000.0) * MAX_CAPITAL_UTILIZATION
     lots = int(deployable_capital // (ltp * lot_size))
     if lots < 1:
         return {"status": "LOW CAPITAL", "reason": f"One lot needs Rs {ltp * lot_size:.2f}"}
     quantity = lots * lot_size
     investment = round(quantity * ltp, 2)
     entry = float(ltp)
-    stop_loss = round(entry * (1 - STOP_LOSS_PCT), 2)
+    rupee_risk = calculate_rupee_stop_loss(entry, lot_size, MAX_RISK_PER_TRADE_INR)
+    stop_loss = rupee_risk["stop_loss"]
     target1 = round(entry * (1 + TARGET1_PCT), 2)
     target2 = round(entry * (1 + TARGET2_PCT), 2)
     trade = {
         "symbol": symbol, "signal": signal, "contract": resolved["contract"], "exchange": resolved["exchange"],
         "token": resolved["token"], "expiry": resolved["expiry"], "strike": resolved["strike"], "entry": entry,
         "quantity": quantity, "original_quantity": quantity, "remaining_quantity": quantity, "lots": lots,
-        "investment": investment, "capital_available": round(float(capital), 2),
+        "investment": investment, "required_capital": required_capital,
+        "capital_available": round(min(float(capital), 5000.0), 2),
         "capital_utilization_pct": round(investment / float(capital) * 100.0, 2), "initial_stop_loss": stop_loss,
         "stop_loss": stop_loss, "target1": target1, "target2": target2, "target": target2, "partial_booked": False,
         "realized_pnl": 0.0, "status": "PAPER TRADE ACTIVE", "live_orders": False,
