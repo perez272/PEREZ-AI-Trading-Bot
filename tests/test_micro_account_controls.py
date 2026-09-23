@@ -86,3 +86,49 @@ def test_daily_trade_limit_blocks_at_two(caplog):
 
 def test_daily_trade_limit_allows_below_two():
     assert daily_trade_limit_allows(1) is True
+
+
+def test_create_trade_is_strictly_one_lot(monkeypatch):
+    import src.trade_engine as engine
+
+    monkeypatch.setenv("PAPER_MODE", "true")
+    monkeypatch.setenv("ORDERS_ENABLED", "false")
+    monkeypatch.setattr(engine, "claim_contract", lambda *args: (True, "claimed"))
+    monkeypatch.setattr(engine, "record_event", lambda *args, **kwargs: "ts")
+
+    resolved = {
+        "status": "CONTRACT VALID",
+        "option_type": "CE",
+        "contract": "NIFTY 25000 CE",
+        "exchange": "NFO",
+        "token": "test-token",
+        "expiry": "29 SEP 26",
+        "strike": 25000,
+        "lotsize": 25,
+        "ltp": 50.0,
+    }
+    result = engine.create_trade("NIFTY", 25000, "BUY CE", 5000, resolved_contract=resolved)
+    assert result["lots"] == 1
+    assert result["quantity"] == 25
+    assert result["investment"] == 1250.0
+
+
+def test_daily_summary_counts_open_lifecycle_entries(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime
+    import src.risk_manager as risk
+
+    trades = tmp_path / "trades.csv"
+    trades.write_text("closed_at,pnl\n", encoding="utf-8")
+    lifecycle = tmp_path / "data" / "paper_trade_lifecycle.jsonl"
+    lifecycle.parent.mkdir(parents=True)
+    lifecycle.write_text(
+        json.dumps({"event": "OPEN", "ts_ist": "2026-09-23T10:00:00+05:30"}) + "\n"
+        + json.dumps({"event": "OPEN", "ts_ist": "2026-09-23T11:00:00+05:30"}) + "\n"
+        + json.dumps({"event": "CLOSE", "ts_ist": "2026-09-23T11:30:00+05:30"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    current = risk.IST.fromutc(datetime(2026, 9, 23, 6, 30))
+    summary = risk.daily_summary(trades, current=current)
+    assert summary["trades_taken_today"] == 2
