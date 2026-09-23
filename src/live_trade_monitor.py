@@ -141,6 +141,7 @@ def run_monitor(
                 result["pnl_percent"] = round(realized / initial_exposure * 100.0, 2)
                 result["closed"] = True
                 trade["remaining_quantity"] = 0
+                release_contract(trade["contract"], trade.get("trade_id"))
 
             print("-" * 60)
             print("Trade ID :", trade.get("trade_id", ""))
