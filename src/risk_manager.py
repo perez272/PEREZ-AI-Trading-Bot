@@ -6,6 +6,7 @@ import os
 
 from src.upgrade_config import ENTRY_START, LAST_ENTRY, FORCED_EXIT_TIME, MAX_DAILY_DRAWDOWN_PCT
 from src.trading_risk_manager import TradingRiskManager
+from src.micro_account_controls import daily_trade_limit_allows
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -83,9 +84,11 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
+    # Micro-account frequency protection is hard and cannot be bypassed by
+    # PAPER_LEARNING_MODE.
+    if not daily_trade_limit_allows(summary["closed_trades"], max_daily_trades=min(int(max_trades), 2)):
+        return False, "MAX_DAILY_TRADES_HIT", summary
     learning_mode = _paper_learning_mode()
-    if not learning_mode and summary["closed_trades"] >= max_trades:
-        return False, f"Daily trade limit reached ({max_trades})", summary
 
     dynamic_limit = abs(float(capital)) * MAX_DAILY_DRAWDOWN_PCT / 100.0
     daily_loss_limit = dynamic_limit if max_daily_loss is None else min(abs(float(max_daily_loss)), dynamic_limit)
