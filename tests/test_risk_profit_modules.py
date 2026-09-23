@@ -111,3 +111,19 @@ def test_time_stop_does_nothing_if_t1_already_reached():
         entry_price=100.0,
         target1_reached=True,
     ) == NO_ACTION
+
+
+def test_upstox_spread_checker_uses_full_quote():
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_full_quote(self, instrument_key):
+            self.calls.append(instrument_key)
+            return {"depth": {"buy": [{"price": 100.0}], "sell": [{"price": 100.3}]}}
+
+    from src.spread_checker import check_upstox_spread
+
+    client = Client()
+    assert check_upstox_spread(client, "NSE_FO|TEST") is True
+    assert client.calls == ["NSE_FO|TEST"]
