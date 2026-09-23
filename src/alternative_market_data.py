@@ -501,7 +501,7 @@ class UpstoxMarketData:
             }
         return None
 
-    def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float) -> dict[str, Any] | None:
+    def resolve_affordable_option(self, symbol: str, spot: float, option_type: str, max_premium: float, preferred_strike: float | None = None) -> dict[str, Any] | None:
         chain = self.get_option_chain(symbol)
         if not chain or option_type not in {"CE", "PE"}:
             return None
@@ -523,7 +523,7 @@ class UpstoxMarketData:
                 spread_pct = ((ask - bid) / ltp * 100.0) if bid > 0 and ask >= bid else 999.0
                 if spread_pct > 5.0:
                     continue
-                candidates.append((abs(strike - float(spot)), -volume, -oi, spread_pct, row, option, ltp, greeks))
+                reference_strike = float(preferred_strike) if preferred_strike is not None else float(spot)\n                candidates.append((abs(strike - reference_strike), -volume, -oi, spread_pct, row, option, ltp, greeks))
             except (TypeError, ValueError):
                 continue
         if not candidates:
