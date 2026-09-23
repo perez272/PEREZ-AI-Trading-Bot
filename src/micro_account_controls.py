@@ -56,15 +56,10 @@ def build_strike_sequence(symbol: str, spot: float, option_type: str, itm_depth:
     if initial != atm:
         sequence.append(float(atm))
 
-    # After ATM, move outward on the OTM side, up to 3 strikes OTM.
+    # Three OTM candidates: this is the maximum permitted downgrade depth.
     for depth in range(1, 4):
-        strike = atm + step * depth if option_type == "PE" else atm + step * depth
-        if option_type == "CE":
-            strike = atm + step * depth
+        strike = atm + step * depth if option_type == "CE" else atm - step * depth
         sequence.append(float(strike))
-    # For PE, OTM is below ATM.
-    if option_type == "PE":
-        sequence = sequence[:2] + [float(atm - step * depth) for depth in range(1, 4)]
     return sequence
 
 
@@ -93,13 +88,14 @@ def select_affordable_strike(
     for strike in sequence:
         contract = contracts_by_strike.get(strike)
         if contract is None:
-            # Tolerate integer/float key differences from instrument masters.
             contract = contracts_by_strike.get(float(strike))
         if contract is None:
             continue
-        lot_size = _lot_size(symbol, contract)
+        # Pass the actual candidate strike to live-price adapters/callbacks.
+        priced_contract = {**dict(contract), "strike": float(strike)}
+        lot_size = _lot_size(symbol, priced_contract)
         try:
-            ltp = float(ltp_getter(contract))
+            ltp = float(ltp_getter(priced_contract))
         except (TypeError, ValueError, Exception) as exc:
             LOGGER.warning(
                 "INSUFFICIENT_CAPITAL_FOR_SETUP symbol=%s strike=%s reason=LTP_UNAVAILABLE error=%s",
@@ -112,8 +108,7 @@ def select_affordable_strike(
         required = round(ltp * lot_size, 2)
         if required <= max_capital:
             return {
-                **dict(contract),
-                "strike": float(strike),
+                **priced_contract,
                 "lotsize": lot_size,
                 "ltp": ltp,
                 "required_capital": required,
