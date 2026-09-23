@@ -19,9 +19,13 @@ def resolve_option_contract(symbol, spot, signal):
         return {"status": "NO TRADE", "reason": "No valid CE/PE signal"}
     option_type = "CE" if signal == "BUY CE" else "PE"
     provider = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower() or "auto"
-    target_strike = select_target_strike(symbol, float(spot), option_type, itm_depth=1)
     upstox = get_upstox_client()
+    target_strike = None
     if provider == "upstox" or (provider == "auto" and upstox.available()):
+        try:
+            target_strike = select_target_strike(symbol, float(spot), option_type, itm_depth=1)
+        except ValueError:
+            target_strike = None
         fallback = upstox.resolve_affordable_option(\n            symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike\n        )
         if fallback and fallback.get("status") == "CONTRACT VALID":
             fallback["max_premium"] = OPTION_MAX_PREMIUM
