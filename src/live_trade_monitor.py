@@ -20,6 +20,7 @@ def run_monitor(
     from src.trade_monitor import monitor_trade
     from src.production_guard import write_heartbeat
     from src.paper_trade_lifecycle import now_utc, record_event, elapsed_seconds
+    from src.time_stop import evaluate_time_stop, TRAIL_TO_BREAKEVEN, TIME_STOP_EXIT
 
     print("=" * 60)
     print("PEREZ AI LIVE PAPER-TRADE MONITOR")
@@ -54,6 +55,55 @@ def run_monitor(
             consecutive_errors = 0
             was_partial = bool(trade.get("partial_booked"))
             result = monitor_trade(trade, ltp)
+
+            # TimeStop is evaluated after normal target/SL handling so it
+            # cannot override a legitimate same-tick target or stop event.
+            if not result.get("closed"):
+                time_stop_action = evaluate_time_stop(
+                    trade.get("opened_at"),
+                    result.get("time") or now_utc(),
+                    float(trade.get("target1", 0) or 0),
+                    float(ltp),
+                    float(trade.get("entry", 0) or 0),
+                    target1_reached=bool(result.get("target1_hit")),
+                )
+                if time_stop_action == TRAIL_TO_BREAKEVEN and not trade.get("time_stop_breakeven"):
+                    trade["time_stop_breakeven"] = True
+                    record_event(
+                        trade,
+                        "TRAIL_TO_BREAKEVEN",
+                        ts=now_utc(),
+                        price=float(ltp),
+                        hold_duration_minutes=15,
+                    )
+                elif time_stop_action == TIME_STOP_EXIT:
+                    exit_price = float(ltp)
+                    remaining_qty = int(result.get("remaining_quantity", result.get("quantity", 0)) or 0)
+                    entry_price = float(trade["entry"])
+                    realized = float(result.get("realized_pnl", 0.0) or 0.0)
+                    realized = round(realized + (exit_price - entry_price) * remaining_qty, 2)
+                    initial_exposure = max(
+                        entry_price * int(result.get("original_quantity", trade.get("quantity", 1)) or 1),
+                        1.0,
+                    )
+                    result["status"] = "TIME STOP EXIT"
+                    result["exit_reason"] = "TIME_STOP_EXIT"
+                    result["exit_price"] = exit_price
+                    result["remaining_quantity"] = 0
+                    result["quantity"] = 0
+                    result["realized_pnl"] = realized
+                    result["unrealized_pnl"] = 0.0
+                    result["pnl"] = realized
+                    result["pnl_percent"] = round(realized / initial_exposure * 100.0, 2)
+                    result["closed"] = True
+                    trade["remaining_quantity"] = 0
+                    record_event(
+                        trade,
+                        "TIME_STOP_EXIT",
+                        ts=now_utc(),
+                        exit_price=exit_price,
+                        pnl=realized,
+                    )
 
             # monitor_trade owns normal SL/target exits. Capture the T1 event
             # once, immediately after the state transition.
