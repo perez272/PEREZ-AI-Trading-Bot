@@ -35,13 +35,13 @@ def monitor_trade(trade, current_price, current_date=None):
     target2 = float(trade["target2"])
 
     hybrid_exit_action = None
-    hybrid_enabled = bool(trade.get("hybrid_exit_enabled") or trade.get("index_name"))
+    index_name = str(trade.get("index_name") or trade.get("symbol") or "").strip().upper()
+    hybrid_enabled = bool(trade.get("hybrid_exit_enabled") or index_name in {"NIFTY", "SENSEX"})
     if hybrid_enabled:
         if current_date is None:
             from datetime import timezone
             from zoneinfo import ZoneInfo
             current_date = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
-        index_name = trade.get("index_name", trade.get("symbol", ""))
         position_state = {
             "entry_price": entry,
             "hard_sl_price": float(trade.get("hard_sl_price", initial_stop)),
@@ -57,6 +57,8 @@ def monitor_trade(trade, current_price, current_date=None):
         trade["hybrid_exit_regime"] = (
             "EXPIRY" if is_expiry_day(index_name, current_date) else "NORMAL"
         )
+        if trade["hybrid_exit_regime"] == "EXPIRY":
+            stop_loss = float(trade["trailing_sl_price"])
 
     high_watermark = max(float(trade.get("high_watermark", entry)), current_price)
     low_watermark = min(float(trade.get("low_watermark", entry)), current_price)
