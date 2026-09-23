@@ -88,7 +88,14 @@ def monitor_trade(trade, current_price, current_date=None):
         if trailing_pct > 0
         else initial_stop
     )
-    stop_loss = max(initial_stop, trailing_stop)
+    if hybrid_enabled:
+        stop_loss = (
+            float(trade["trailing_sl_price"])
+            if trade.get("hybrid_exit_regime") == "EXPIRY"
+            else float(trade.get("hard_sl_price", initial_stop))
+        )
+    else:
+        stop_loss = max(initial_stop, trailing_stop)
     trade["stop_loss"] = round(stop_loss, 2)
     unrealized = round((current_price - entry) * remaining, 2)
     realized = round(float(trade.get("realized_pnl", 0.0)), 2)
@@ -114,7 +121,7 @@ def monitor_trade(trade, current_price, current_date=None):
         exit_price = (
             current_price
             if hybrid_exit_action == "EXIT_TARGET"
-            else hard_sl if hybrid_exit_action == "EXIT_STOP_LOSS"
+            else float(trade.get("hard_sl_price", initial_stop)) if hybrid_exit_action == "EXIT_STOP_LOSS"
             else float(trade["trailing_sl_price"])
         )
         trade["realized_pnl"] = round(
