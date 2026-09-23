@@ -35,12 +35,14 @@ class FakeUpstox:
         self._available = available
         self.result = result
         self.calls = 0
+        self.preferred_strikes = []
 
     def available(self):
         return self._available
 
-    def resolve_affordable_option(self, *args):
+    def resolve_affordable_option(self, *args, preferred_strike=None):
         self.calls += 1
+        self.preferred_strikes.append(preferred_strike)
         return self.result
 
 
@@ -60,6 +62,7 @@ def test_upstox_mode_uses_upstox_only(monkeypatch):
 
     assert result["data_source"] == "upstox_option_chain"
     assert upstox.calls == 1
+    assert upstox.preferred_strikes == [23600.0]
     assert angel_calls == []
 
 
