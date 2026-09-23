@@ -81,6 +81,21 @@ def _claim_event(event_id: int) -> bool:
         return cur.rowcount == 1
 
 
+def _underlying_move_5m_pct(client: Any, symbol: str) -> float | None:
+    """Return the latest 5-minute underlying index move from 1-minute candles."""
+    candles = client.get_candles(symbol, interval_minutes=1)
+    if not candles or len(candles) < 2:
+        return None
+    try:
+        latest = float(candles[-1][4])
+        prior = float(candles[-6][4]) if len(candles) >= 6 else float(candles[0][4])
+        if latest <= 0 or prior <= 0:
+            return None
+        return (latest - prior) / prior * 100.0
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _release_event(event_id: int) -> None:
     try:
         with sqlite3.connect(TIER1_DB, timeout=5) as db:
@@ -133,10 +148,22 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
         spread_pct=spread_pct, slippage_pct=slippage_pct, detector_score=_num(event.get("score")),
     )
     gate = validate_surge(evidence, OPTION_MAX_PREMIUM)
+    underlying_move_5m_pct = _underlying_move_5m_pct(client, symbol)
+    if underlying_move_5m_pct is not None:
+        aligned = (
+            option_type == "CE" and underlying_move_5m_pct > 0
+        ) or (
+            option_type == "PE" and underlying_move_5m_pct < 0
+        )
+        if not aligned:
+            gate["eligible"] = False
+            gate["reasons"].append("UNDERLYING_NOT_CONFIRMED")
+            gate["decision"] = "NO TRADE"
     return {
         "eligible": bool(gate["eligible"]), "terminal": True,
         "reason": ", ".join(gate["reasons"]) or "SURGE_GATE_PASSED", "reasons": gate["reasons"],
         "gate": gate, "contract": contract, "quote": quote, "ltp": ltp, "evidence": evidence,
+        "underlying_move_5m_pct": underlying_move_5m_pct,
     }
 
 
