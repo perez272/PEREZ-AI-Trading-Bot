@@ -133,8 +133,8 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     quote = client.get_full_quote(instrument_key)
     if not quote:
         return {"eligible": False, "terminal": False, "reason": "FRESH_OPTION_QUOTE_UNAVAILABLE", "reasons": ["FRESH_OPTION_QUOTE_UNAVAILABLE"]}
-    if not is_spread_safe(quote):
-        return {"eligible": False, "terminal": True, "reason": "TRADE_BLOCKED_SPREAD", "reasons": ["TRADE_BLOCKED_SPREAD"], "quote": quote}
+    if not is_spread_safe(quote, max_spread_pct=1.0):
+        return {"eligible": False, "terminal": True, "reason": "SPREAD_TOO_WIDE", "reasons": ["SPREAD_TOO_WIDE"], "quote": quote}
     ltp = _quote_value(quote, "last_price", "last_traded_price", "ltp")
     volume = _quote_value(quote, "volume", "tradeVolume")
     oi = _quote_value(quote, "oi", "opnInterest")
@@ -183,7 +183,7 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
     symbol = str(event.get("symbol") or "").upper().strip()
     option_type = str(event.get("option_type") or "").upper().strip()
     signal = "BUY CE" if option_type == "CE" else "BUY PE"
-    allowed, reason, summary = __import__("src.risk_manager", fromlist=["can_open_new_trade"]).can_open_new_trade(3, None, capital)
+    allowed, reason, summary = __import__("src.risk_manager", fromlist=["can_open_new_trade"]).can_open_new_trade(2, None, capital)
     if not allowed:
         _release_event(event_id)
         result["eligible"] = False
