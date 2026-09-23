@@ -78,8 +78,8 @@ def resolve_option_contract(symbol, spot, signal):
             "INSUFFICIENT_CAPITAL_FOR_SETUP symbol=%s option_type=%s max_entry_capital=%.2f",
             symbol, option_type, MAX_ENTRY_CAPITAL_INR,
         )
-        return {"status": "NO TRADE", "reason": "INSUFFICIENT_CAPITAL_FOR_SETUP", "data_source": "upstox_option_chain"}
         if provider == "upstox":
+            return {"status": "NO TRADE", "reason": "INSUFFICIENT_CAPITAL_FOR_SETUP", "data_source": "upstox_option_chain"}
             return {"status": "NO AFFORDABLE OPTION", "reason": "Upstox could not resolve a valid affordable option"}
     affordable = find_affordable_contract(
         symbol, spot, option_type, get_option_ltp, OPTION_MAX_PREMIUM, batch_ltp_getter=get_option_ltp_batch
@@ -131,7 +131,7 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
         return {"status": "NO TRADE", "reason": "INSUFFICIENT_CAPITAL_FOR_SETUP"}
     if ltp > OPTION_MAX_PREMIUM:
         return {"status": "PRICE_CHANGED", "reason": f"Option premium Rs {ltp:.2f} exceeds cap Rs {OPTION_MAX_PREMIUM:.2f}"}
-    deployable_capital = min(float(capital), 5000.0) * MAX_CAPITAL_UTILIZATION
+    deployable_capital = min(float(capital), MAX_ENTRY_CAPITAL_INR)
     lots = int(deployable_capital // (ltp * lot_size))
     if lots < 1:
         return {"status": "LOW CAPITAL", "reason": f"One lot needs Rs {ltp * lot_size:.2f}"}
