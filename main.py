@@ -11,6 +11,7 @@ from src.capital_manager import get_available_capital
 from src.risk_manager import can_open_new_trade
 from src.telegram_alert import send_entry_alert
 from src.trade_engine import create_trade, resolve_option_contract
+from src.micro_account_controls import MICRO_ACCOUNT_CAPITAL
 from src.trading_risk_manager import TradingRiskManager
 
 TRADING_RISK_MANAGER = TradingRiskManager()
@@ -309,7 +310,10 @@ def main():
             wait_for_entry_window()
             write_heartbeat("capital_check")
             try:
-                capital = get_available_capital(get_client(), paper_mode=PAPER_MODE)
+                capital = min(
+                    float(get_available_capital(get_client(), paper_mode=PAPER_MODE)),
+                    MICRO_ACCOUNT_CAPITAL,
+                )
             except Exception as exc:
                 write_heartbeat("capital_error", error=str(exc))
                 print(f"CAPITAL CHECK FAILED — no scan/trade allowed: {exc}")
@@ -470,7 +474,9 @@ def main():
 
                 if momentum_strategy:
                     exits = build_dynamic_exits(live_ltp, candidate.get("atr", 0), live_ltp)
-                    trade.update({"initial_stop_loss": exits["stop_loss"], "stop_loss": exits["stop_loss"], "target1": exits["target1"], "target2": exits["target2"], "target": exits["target2"], "strategy": "INDEX_MOMENTUM_SCALP", "momentum_score": candidate.get("momentum_score", 0), "momentum_reasons": candidate.get("momentum_reasons", [])})
+                    # Targets may remain strategy-driven, but the hard rupee stop
+                    # from create_trade is never widened or replaced.
+                    trade.update({"target1": exits["target1"], "target2": exits["target2"], "target": exits["target2"], "strategy": "INDEX_MOMENTUM_SCALP", "momentum_score": candidate.get("momentum_score", 0), "momentum_reasons": candidate.get("momentum_reasons", [])})
 
                 trade.update({"options_score": options_result.get("options_score", 0), "fundamental_admitted": admission_reason == "FUNDAMENTALLY_ADMITTED", "underlying_score": candidate.get("score", 0), "option_live_ltp_at_gate": live_ltp, "mtf_direction": mtf_direction})
                 print(f"PAPER TRADE: {trade['contract']} | strategy={trade.get('strategy', 'CORE')} | quantity={trade['quantity']} | investment=Rs {trade['investment']:.2f}")
