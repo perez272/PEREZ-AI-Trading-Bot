@@ -84,6 +84,9 @@ def validate_surge(e: SurgeEvidence, max_premium: float) -> dict[str, Any]:
         reasons.append("INSUFFICIENT_ACCELERATION")
     if e.move_5m_pct <= 0:
         reasons.append("NO_POSITIVE_5M_MOVE")
+    # Narrow evidence-backed overextension guard.
+    if e.detector_score >= 90.0 and e.move_5m_pct >= 6.0:
+        reasons.append("OVEREXTENDED_SURGE")
 
     scoring = calculate_surge_score(e)
 
