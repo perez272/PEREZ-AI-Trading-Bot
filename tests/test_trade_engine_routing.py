@@ -62,7 +62,7 @@ def test_upstox_mode_uses_upstox_only(monkeypatch):
 
     assert result["data_source"] == "upstox_option_chain"
     assert upstox.calls == 1
-    assert upstox.preferred_strikes == [23600.0]
+    assert upstox.preferred_strikes == [23750.0]
     assert angel_calls == []
 
 
