@@ -14,7 +14,7 @@ from src.time_stop import (
 
 
 def test_dynamic_strike_ce_one_itm():
-    assert select_target_strike("NIFTY", 25123.0, "CE", itm_depth=1) == 25100.0
+    assert select_target_strike("NIFTY", 25123.0, "CE", itm_depth=1) == 25050.0
 
 
 def test_dynamic_strike_pe_one_itm():
