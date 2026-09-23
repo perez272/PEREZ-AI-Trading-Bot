@@ -50,3 +50,9 @@ def test_slippage_above_limit_rejected():
     result = validate_surge(evidence(slippage_pct=1.01), 150.0)
     assert result["eligible"] is False
     assert "HIGH_SLIPPAGE" in result["reasons"]
+
+
+def test_overextended_high_score_surge_rejected():
+    result = validate_surge(evidence(detector_score=90.0, move_5m_pct=6.0), 150.0)
+    assert result["eligible"] is False
+    assert "OVEREXTENDED_SURGE" in result["reasons"]
