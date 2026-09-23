@@ -21,6 +21,7 @@ def run_monitor(
     from src.production_guard import write_heartbeat
     from src.paper_trade_lifecycle import now_utc, record_event, elapsed_seconds
     from src.time_stop import evaluate_time_stop, TRAIL_TO_BREAKEVEN, TIME_STOP_EXIT
+    from src.active_position_guard import release_contract
 
     print("=" * 60)
     print("PEREZ AI LIVE PAPER-TRADE MONITOR")
@@ -58,7 +59,7 @@ def run_monitor(
 
             # TimeStop is evaluated after normal target/SL handling so it
             # cannot override a legitimate same-tick target or stop event.
-            if not result.get("closed"):
+            if not result.get("closed") and trade.get("opened_at"):
                 time_stop_action = evaluate_time_stop(
                     trade.get("opened_at"),
                     result.get("time") or now_utc(),
@@ -97,6 +98,7 @@ def run_monitor(
                     result["pnl_percent"] = round(realized / initial_exposure * 100.0, 2)
                     result["closed"] = True
                     trade["remaining_quantity"] = 0
+                    release_contract(trade["contract"], trade.get("trade_id"))
                     record_event(
                         trade,
                         "TIME_STOP_EXIT",
