@@ -13,6 +13,7 @@ from src.trade_engine import create_trade
 from src.active_position_guard import release_contract
 from src.upgrade_config import OPTION_MAX_PREMIUM
 from src.paper_trade_lifecycle import record_event
+from src.spread_checker import is_spread_safe
 
 MAX_EVENT_AGE_SECONDS = 60.0
 TIER1_DB = Path(os.getenv("TIER1_OPTION_MEMORY", "data/memory/tier1_option_moves.sqlite3"))
@@ -132,6 +133,8 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     quote = client.get_full_quote(instrument_key)
     if not quote:
         return {"eligible": False, "terminal": False, "reason": "FRESH_OPTION_QUOTE_UNAVAILABLE", "reasons": ["FRESH_OPTION_QUOTE_UNAVAILABLE"]}
+    if not is_spread_safe(quote):
+        return {"eligible": False, "terminal": True, "reason": "TRADE_BLOCKED_SPREAD", "reasons": ["TRADE_BLOCKED_SPREAD"], "quote": quote}
     ltp = _quote_value(quote, "last_price", "last_traded_price", "ltp")
     volume = _quote_value(quote, "volume", "tradeVolume")
     oi = _quote_value(quote, "oi", "opnInterest")
