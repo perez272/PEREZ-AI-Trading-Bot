@@ -523,7 +523,10 @@ class UpstoxMarketData:
                 spread_pct = ((ask - bid) / ltp * 100.0) if bid > 0 and ask >= bid else 999.0
                 if spread_pct > 5.0:
                     continue
-                reference_strike = float(preferred_strike) if preferred_strike is not None else float(spot)\n                candidates.append((abs(strike - reference_strike), -volume, -oi, spread_pct, row, option, ltp, greeks))
+                reference_strike = float(preferred_strike) if preferred_strike is not None else float(spot)
+                if preferred_strike is not None and abs(strike - reference_strike) > 1e-9:
+                    continue
+                candidates.append((abs(strike - reference_strike), -volume, -oi, spread_pct, row, option, ltp, greeks))
             except (TypeError, ValueError):
                 continue
         if not candidates:
