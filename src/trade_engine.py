@@ -26,7 +26,9 @@ def resolve_option_contract(symbol, spot, signal):
             target_strike = select_target_strike(symbol, float(spot), option_type, itm_depth=1)
         except ValueError:
             target_strike = None
-        fallback = upstox.resolve_affordable_option(\n            symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike\n        )
+        fallback = upstox.resolve_affordable_option(
+            symbol, float(spot), option_type, OPTION_MAX_PREMIUM, preferred_strike=target_strike
+        )
         if fallback and fallback.get("status") == "CONTRACT VALID":
             fallback["max_premium"] = OPTION_MAX_PREMIUM
             fallback["target_strike"] = target_strike
