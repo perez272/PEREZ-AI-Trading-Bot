@@ -395,7 +395,7 @@ class UpstoxMarketData:
         data = payload.get("data") if payload else None
         return data if isinstance(data, list) else None
 
-    def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
+    def get_full_market_quote(self, instrument_key: str) -> dict[str, Any] | None:
         if not self.available() or not instrument_key or "|" not in instrument_key:
             return None
         payload = self._get(f"{UPSTOX_V2_BASE_URL}/market-quote/quotes", {"instrument_key": instrument_key})
@@ -404,6 +404,10 @@ class UpstoxMarketData:
             return None
         quote = next(iter(data.values()))
         return quote if isinstance(quote, dict) else None
+
+    # Backward-compatible name used by existing callers.
+    def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
+        return self.get_full_market_quote(instrument_key)
 
     def get_snapshot(self, symbol: str) -> dict[str, Any]:
         """Return a compact validated Upstox market snapshot for integrity checks."""
