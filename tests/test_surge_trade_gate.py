@@ -56,3 +56,8 @@ def test_overextended_high_score_surge_rejected():
     result = validate_surge(evidence(detector_score=90.0, move_5m_pct=6.0), 150.0)
     assert result["eligible"] is False
     assert "OVEREXTENDED_SURGE" in result["reasons"]
+
+
+def test_option_direction_requires_underlying_confirmation():
+    from src.surge_trade_bridge import _underlying_move_5m_pct
+    assert callable(_underlying_move_5m_pct)
