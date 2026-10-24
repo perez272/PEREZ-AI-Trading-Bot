@@ -59,7 +59,10 @@ def run_monitor(
 
             # TimeStop is evaluated after normal target/SL handling so it
             # cannot override a legitimate same-tick target or stop event.
-            if not result.get("closed") and trade.get("opened_at"):
+            # Expiry-day positions are governed by the expiry hard/trailing stop,
+            # not the generic 15-minute time stop. Market-close protection below
+            # remains active for all positions.
+            if not result.get("closed") and trade.get("opened_at") and not result.get("expiry_day", False):
                 time_stop_action = evaluate_time_stop(
                     trade.get("opened_at"),
                     result.get("time") or now_utc(),
