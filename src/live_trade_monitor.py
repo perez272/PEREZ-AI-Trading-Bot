@@ -211,7 +211,7 @@ def run_monitor(
                 if persist_outcome:
                     trade_id = trade.get("trade_id")
                     risk_identity = trade.get("lineage_id") or trade_id
-                    if risk_identity:
+                    if risk_identity and trade_id:
                         risk_manager = TradingRiskManager()
                         try:
                             pnl = float(result.get("pnl", 0.0) or 0.0)
@@ -219,12 +219,11 @@ def run_monitor(
                             pnl = 0.0
                         exit_reason = str(result.get("exit_reason", "")).upper()
                         stop_loss_trigger = pnl < 0.0 and exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
-                        result_id = str(trade_id) if trade_id else None
                         applied = risk_manager.record_trade_result(
                             risk_identity,
                             pnl,
                             stop_loss=stop_loss_trigger,
-                            result_id=result_id,
+                            result_id=str(trade_id),
                         )
                         if stop_loss_trigger and applied:
                             print("RISK MANAGER: SL lineage update applied once")
@@ -232,6 +231,8 @@ def run_monitor(
                             print(f"RISK MANAGER: duplicate result ignored | trade_id={trade_id}")
                         rs = risk_manager.status()
                         print(f"RISK MANAGER: loss_streak={rs['consecutive_losses']} | breaker={rs['circuit_breaker_active']}")
+                    else:
+                        print("RISK MANAGER ERROR: missing trade_id or risk identity; result not applied")
                 else:
                     print("RISK MANAGER: SKIPPED (isolated lifecycle test)")
                 if notify:
