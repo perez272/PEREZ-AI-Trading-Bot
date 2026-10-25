@@ -99,3 +99,43 @@ def test_win_resets_consecutive_losses(tmp_path):
 
     assert rm.status()["consecutive_losses"] == 0
     assert rm.status()["circuit_breaker_active"] is False
+
+
+def test_duplicate_loss_result_counts_once(tmp_path):
+    rm = manager(tmp_path)
+    rm.register_entry("LINEAGE-1", 100)
+
+    assert rm.record_trade_result("LINEAGE-1", -10, result_id="TRADE-1") is True
+    assert rm.record_trade_result("LINEAGE-1", -10, result_id="TRADE-1") is False
+    assert rm.status()["consecutive_losses"] == 1
+
+
+def test_duplicate_old_win_cannot_reset_newer_loss(tmp_path):
+    rm = manager(tmp_path)
+    rm.record_trade_result("LINEAGE-1", 20, result_id="TRADE-WIN")
+    rm.record_trade_result("LINEAGE-2", -10, result_id="TRADE-LOSS")
+
+    assert rm.record_trade_result("LINEAGE-1", 20, result_id="TRADE-WIN") is False
+    assert rm.status()["consecutive_losses"] == 1
+
+
+def test_result_deduplication_survives_reload(tmp_path):
+    rm = manager(tmp_path)
+    rm.record_trade_result("LINEAGE-1", -10, result_id="TRADE-1")
+
+    reloaded = manager(tmp_path)
+    assert reloaded.record_trade_result("LINEAGE-1", -10, result_id="TRADE-1") is False
+    assert reloaded.status()["consecutive_losses"] == 1
+
+
+def test_distinct_trades_in_same_lineage_count_separately(tmp_path):
+    rm = manager(tmp_path)
+    rm.register_entry("LINEAGE-1", 100)
+
+    assert rm.record_trade_result("LINEAGE-1", -10, stop_loss=True, result_id="TRADE-1") is True
+    rm.register_entry("TRADE-2", 100, lineage_id="LINEAGE-1")
+    assert rm.record_trade_result("LINEAGE-1", -10, stop_loss=True, result_id="TRADE-2") is True
+
+    assert rm.status()["consecutive_losses"] == 2
+    assert rm.positions["LINEAGE-1"].sl_triggers == 2
+    assert rm.positions["LINEAGE-1"].active is False
