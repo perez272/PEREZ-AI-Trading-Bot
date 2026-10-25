@@ -64,6 +64,7 @@ class TradingRiskManager:
         self._lock = RLock()
         self.positions = {}
         self.global_state = GlobalRiskState()
+        self.processed_result_ids = set()
 
         self._load_state()
 
@@ -79,6 +80,7 @@ class TradingRiskManager:
             "positions": {
                 k: asdict(v) for k, v in self.positions.items()
             },
+            "processed_result_ids": sorted(self.processed_result_ids),
         }
 
         tmp = self.state_file.with_suffix(".tmp")
@@ -102,6 +104,10 @@ class TradingRiskManager:
                 for trade_id, data
                 in raw.get("positions", {}).items()
             }
+            self.processed_result_ids = set(
+                str(result_id)
+                for result_id in raw.get("processed_result_ids", [])
+            )
 
         except Exception as exc:
             raise RuntimeError(
@@ -355,36 +361,47 @@ class TradingRiskManager:
     # Global consecutive-loss tracker
     # ------------------------------------------------------------
 
-    def record_trade_result(self, trade_id, pnl, stop_loss=False):
+    def record_trade_result(
+        self, trade_id, pnl, stop_loss=False, result_id=None
+    ):
+        """Record a closed result once using its unique closed-trade ID."""
         with self._lock:
-            now = utc_now()
+            if result_id:
+                result_id = str(result_id)
+                if result_id in self.processed_result_ids:
+                    return False
+                self.processed_result_ids.add(result_id)
 
+            now = utc_now()
             position = self.positions.get(trade_id)
 
             if position:
-                # SL lineage state is managed by record_stop_loss().
-                # Other completed trades close their lineage here.
-                if not stop_loss:
+                if stop_loss and result_id:
+                    # Update SL lineage and global counters in one save.
+                    position.sl_triggers += 1
+                    if position.sl_triggers >= self.max_sl_triggers_per_lineage:
+                        position.active = False
+                elif not stop_loss:
                     position.active = False
                 position.last_update_at = now.isoformat()
 
             if pnl >= 0:
                 self.global_state.consecutive_losses = 0
                 self.global_state.last_failure_trade_id = None
-
             else:
                 self.global_state.consecutive_losses += 1
                 self.global_state.last_failure_trade_id = trade_id
 
-                if (
-                    self.global_state.consecutive_losses
-                    >= self.max_consecutive_losses
-                ):
-                    self._activate_circuit_breaker(trade_id)
-                    return
-
             self.global_state.updated_at = now.isoformat()
-            self._save_state()
+            if (
+                pnl < 0
+                and self.global_state.consecutive_losses
+                >= self.max_consecutive_losses
+            ):
+                self._activate_circuit_breaker(trade_id)
+            else:
+                self._save_state()
+            return True
 
     # ------------------------------------------------------------
     # Diagnostics
