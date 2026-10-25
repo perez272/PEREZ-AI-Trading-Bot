@@ -123,6 +123,10 @@ class Handler(BaseHTTPRequestHandler):
             try:p,ctype=assets[path];self._send(200,ctype,p.read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
             return
+        if path in ('/workstation','/workstation.html'):
+            try:self._send(200,'text/html; charset=utf-8',(ROOT/'dashboard/workstation.html').read_text(encoding='utf-8'))
+            except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'workstation page error: {exc}')
+            return
         if path=='/trades.html':
             try:self._send(200,'text/html; charset=utf-8',(ROOT/'dashboard/trades.html').read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'trades page error: {exc}')
@@ -131,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 html=INDEX.read_text(encoding='utf-8'); marker='</head>'; head='<link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="PEREZ-AI"><link rel="icon" href="/app-icon.svg">'
                 if '/manifest.webmanifest' not in html:html=html.replace(marker,head+marker)
+                link='<a href="/workstation.html" style="display:inline-block;border:1px solid #36507d;background:#101d32;color:#bdeaff;text-decoration:none;padding:7px 9px;font-size:10px;font-weight:800;border-radius:8px">OPTIONS WORKSTATION ↗</a>'
+                if '/workstation.html' not in html:html=html.replace('<div id="health"',link+'<div id="health"',1)
                 marker='</body>'
                 for src in ('/advanced.js','/pro_live.js','/app.js','/strategy_lab.js','/learning.js'):
                     if src not in html:html=html.replace(marker,f'<script src="{src}"></script>'+marker)
