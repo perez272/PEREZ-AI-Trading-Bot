@@ -8,10 +8,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from zoneinfo import ZoneInfo
 
 LIFECYCLE_LOG = Path("data/paper_trade_lifecycle.jsonl")
 IST = ZoneInfo("Asia/Kolkata")
+_CLOSE_EVENT_LOCK = threading.Lock()
 
 
 def now_utc() -> str:
@@ -47,11 +49,31 @@ def record_event(trade: dict, event: str, *, ts: str | None = None, **extra) -> 
         if value is not None:
             payload[key] = value
 
+    # Recovery and the original monitor can race to finalize one trade.
+    # Make final CLOSE telemetry idempotent within this process.
+    if payload["event"] == "CLOSE" and payload["trade_id"]:
+        with _CLOSE_EVENT_LOCK:
+            if LIFECYCLE_LOG.exists():
+                try:
+                    with LIFECYCLE_LOG.open(encoding="utf-8") as existing:
+                        for line in existing:
+                            try:
+                                prior = json.loads(line)
+                            except (TypeError, ValueError):
+                                continue
+                            if prior.get("event") == "CLOSE" and str(prior.get("trade_id") or "") == payload["trade_id"]:
+                                return str(prior.get("ts_utc") or instant.isoformat(timespec="milliseconds"))
+                except OSError:
+                    pass
+            LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with LIFECYCLE_LOG.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
+        return instant.isoformat(timespec="milliseconds")
+
     LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with LIFECYCLE_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
     return instant.isoformat(timespec="milliseconds")
-
 
 def elapsed_seconds(start_ts: str | None, end_ts: str | None) -> float | None:
     if not start_ts or not end_ts:
