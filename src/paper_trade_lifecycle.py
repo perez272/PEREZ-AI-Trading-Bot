@@ -67,12 +67,12 @@ def record_event(trade: dict, event: str, *, ts: str | None = None, **extra) -> 
                     pass
             LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)
             with LIFECYCLE_LOG.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\\n")
+                f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
         return instant.isoformat(timespec="milliseconds")
 
     LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with LIFECYCLE_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\\n")
+        f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
     return instant.isoformat(timespec="milliseconds")
 
 def elapsed_seconds(start_ts: str | None, end_ts: str | None) -> float | None:
