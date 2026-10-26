@@ -31,7 +31,7 @@ def daily_summary(path="data/trades.csv", current=None):
     current = current or now_ist()
     today = current.strftime("%Y-%m-%d")
     output = Path(path)
-    summary = {"closed_trades": 0, "pnl": 0.0, "consecutive_losses": 0, "worst_loss": 0.0}
+    summary = {"closed_trades": 0, "pnl": 0.0, "consecutive_losses": 0, "losing_trades": 0, "worst_loss": 0.0}
     if not output.exists():
         return summary
 
@@ -48,6 +48,7 @@ def daily_summary(path="data/trades.csv", current=None):
     summary["closed_trades"] = len(rows)
     summary["pnl"] = round(sum(row["_pnl"] for row in rows), 2)
     summary["worst_loss"] = round(min((row["_pnl"] for row in rows), default=0.0), 2)
+    summary["losing_trades"] = sum(1 for row in rows if row["_pnl"] < 0)
     for row in reversed(rows):
         if row["_pnl"] < 0:
             summary["consecutive_losses"] += 1
@@ -84,6 +85,9 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
 
     summary = daily_summary()
     learning_mode = _paper_learning_mode()
+    # Safety stops apply even in paper learning mode.
+    if summary["losing_trades"] >= 2:
+        return False, "TWO_LOSING_TRADES_STOP", summary
     if not learning_mode and summary["closed_trades"] >= max_trades:
         return False, f"Daily trade limit reached ({max_trades})", summary
 
@@ -92,12 +96,10 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
     if daily_loss_limit <= 0:
         return False, "No valid available capital for risk checks", summary
 
-    if not learning_mode and summary["pnl"] <= -daily_loss_limit:
+    if summary["pnl"] <= -daily_loss_limit:
         return False, f"Daily loss limit reached (2% of capital = Rs {daily_loss_limit:.2f})", summary
-    if not learning_mode and capital > 0 and summary["pnl"] <= -dynamic_limit:
-        return False, f"Daily drawdown limit reached ({MAX_DAILY_DRAWDOWN_PCT:.1f}%)", summary
     if TRADING_RISK_MANAGER.is_circuit_breaker_active():
         remaining = TRADING_RISK_MANAGER.circuit_breaker_remaining()
         minutes = max(1, int(remaining.total_seconds() + 59) // 60)
         return False, f"Timed circuit breaker active ({minutes} min remaining)", summary
-    return True, "PAPER_LEARNING_MODE: daily entry/loss limits bypassed" if learning_mode else "Risk checks passed", summary
+    return True, "Paper learning mode: trade-count limit bypassed; loss guards remain active" if learning_mode else "Risk checks passed", summary
