@@ -84,3 +84,20 @@ def test_stop_loss_closes_position(tmp_path):
     assert result["pnl"] == -20.0
     assert result["pnl_percent"] == -2.0
     assert Path(log_file).exists()
+
+
+def test_duplicate_close_event_is_written_once(tmp_path, monkeypatch):
+    import json
+    import src.paper_trade_lifecycle as lifecycle
+
+    log = tmp_path / "lifecycle.jsonl"
+    monkeypatch.setattr(lifecycle, "LIFECYCLE_LOG", log)
+    trade = {"trade_id": "DUPLICATE-CLOSE-TEST", "contract": "TESTCONTRACT"}
+
+    first = lifecycle.record_event(trade, "CLOSE", pnl=-20.0)
+    second = lifecycle.record_event(trade, "CLOSE", pnl=-20.0)
+
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(events) == 1
+    assert events[0]["event"] == "CLOSE"
+    assert first == second
