@@ -53,6 +53,7 @@ def test_daily_summary_counts_all_losing_trades_not_only_consecutive(tmp_path):
 
     summary = risk.daily_summary(path=path)
 
+    assert summary["closed_trades"] == 3
     assert summary["losing_trades"] == 2
     assert summary["consecutive_losses"] == 1
     assert summary["pnl"] == 50.0
