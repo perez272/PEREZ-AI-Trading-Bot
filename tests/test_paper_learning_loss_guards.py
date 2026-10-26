@@ -44,10 +44,10 @@ def test_daily_summary_counts_all_losing_trades_not_only_consecutive(tmp_path):
     today = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
     path = tmp_path / "trades.csv"
     path.write_text(
-        "closed_at,pnl\\n"
-        f"{today}T09:30:00+05:30,-120\\n"
-        f"{today}T10:00:00+05:30,200\\n"
-        f"{today}T10:30:00+05:30,-30\\n",
+        "closed_at,pnl\n"
+        f"{today}T09:30:00+05:30,-120\n"
+        f"{today}T10:00:00+05:30,200\n"
+        f"{today}T10:30:00+05:30,-30\n",
         encoding="utf-8",
     )
 
