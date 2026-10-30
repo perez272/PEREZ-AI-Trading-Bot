@@ -61,3 +61,14 @@ def test_overextended_high_score_surge_rejected():
 def test_option_direction_requires_underlying_confirmation():
     from src.surge_trade_bridge import _underlying_move_5m_pct
     assert callable(_underlying_move_5m_pct)
+
+
+def test_negative_1m_momentum_rejected():
+    result = validate_surge(evidence(move_1m_pct=-0.42), 150.0)
+    assert not result["eligible"]
+    assert "NO_POSITIVE_1M_MOVE" in result["reasons"]
+
+
+def test_positive_1m_momentum_passes():
+    result = validate_surge(evidence(move_1m_pct=0.1), 150.0)
+    assert result["eligible"]
