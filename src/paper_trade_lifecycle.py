@@ -6,6 +6,8 @@ Telemetry only: it never changes entry, risk, or order behavior.
 from __future__ import annotations
 
 import json
+import fcntl
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
@@ -49,25 +51,27 @@ def record_event(trade: dict, event: str, *, ts: str | None = None, **extra) -> 
         if value is not None:
             payload[key] = value
 
-    # Recovery and the original monitor can race to finalize one trade.
-    # Make final CLOSE telemetry idempotent within this process.
+    # Cross-thread/process idempotency. Read failures abort the CLOSE write.
     if payload["event"] == "CLOSE" and payload["trade_id"]:
         with _CLOSE_EVENT_LOCK:
-            if LIFECYCLE_LOG.exists():
-                try:
-                    with LIFECYCLE_LOG.open(encoding="utf-8") as existing:
-                        for line in existing:
-                            try:
-                                prior = json.loads(line)
-                            except (TypeError, ValueError):
-                                continue
-                            if prior.get("event") == "CLOSE" and str(prior.get("trade_id") or "") == payload["trade_id"]:
-                                return str(prior.get("ts_utc") or instant.isoformat(timespec="milliseconds"))
-                except OSError:
-                    pass
             LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)
-            with LIFECYCLE_LOG.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
+            with LIFECYCLE_LOG.open("a+", encoding="utf-8") as existing:
+                fcntl.flock(existing.fileno(), fcntl.LOCK_EX)
+                try:
+                    existing.seek(0)
+                    for line in existing:
+                        try:
+                            prior = json.loads(line)
+                        except (TypeError, ValueError):
+                            continue
+                        if prior.get("event") == "CLOSE" and str(prior.get("trade_id") or "") == payload["trade_id"]:
+                            return str(prior.get("ts_utc") or instant.isoformat(timespec="milliseconds"))
+                    existing.seek(0, os.SEEK_END)
+                    existing.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
+                    existing.flush()
+                    os.fsync(existing.fileno())
+                finally:
+                    fcntl.flock(existing.fileno(), fcntl.LOCK_UN)
         return instant.isoformat(timespec="milliseconds")
 
     LIFECYCLE_LOG.parent.mkdir(parents=True, exist_ok=True)

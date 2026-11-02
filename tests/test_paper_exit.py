@@ -35,7 +35,9 @@ def _base_trade():
     }
 
 
-def test_target2_closes_remaining_position(tmp_path):
+def test_target2_closes_remaining_position(tmp_path, monkeypatch):
+    import src.paper_trade_lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "LIFECYCLE_LOG", tmp_path / "lifecycle.jsonl")
     log_file = tmp_path / "trades_test.csv"
 
     result = run_monitor(
@@ -64,7 +66,9 @@ def test_target2_closes_remaining_position(tmp_path):
     assert Path(log_file).exists()
 
 
-def test_stop_loss_closes_position(tmp_path):
+def test_stop_loss_closes_position(tmp_path, monkeypatch):
+    import src.paper_trade_lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "LIFECYCLE_LOG", tmp_path / "lifecycle.jsonl")
     log_file = tmp_path / "trades_test.csv"
 
     result = run_monitor(

@@ -518,7 +518,7 @@ class UpstoxMarketData:
                 ask = float(market.get("ask_price", 0) or 0)
                 volume = float(market.get("volume", 0) or 0)
                 oi = float(market.get("oi", 0) or 0)
-                if not instrument_key or ltp <= 0 or ltp > max_premium or strike <= 0:
+                if not instrument_key or ltp <= 0 or strike <= 0:
                     continue
                 spread_pct = ((ask - bid) / ltp * 100.0) if bid > 0 and ask >= bid else 999.0
                 if spread_pct > 5.0:

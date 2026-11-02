@@ -24,7 +24,7 @@ def test_paper_learning_mode_cannot_bypass_daily_loss_limit(monkeypatch):
     assert reason == "Daily loss limit reached (2% of capital = Rs 100.00)"
 
 
-def test_two_losing_trades_stop_applies_even_if_a_win_is_between_them(monkeypatch):
+def test_two_losses_with_a_win_between_them_do_not_trigger_consecutive_loss_lock(monkeypatch):
     _enable_paper_learning(
         monkeypatch,
         {"closed_trades": 3, "pnl": -50.0, "consecutive_losses": 1,
@@ -33,8 +33,8 @@ def test_two_losing_trades_stop_applies_even_if_a_win_is_between_them(monkeypatc
 
     allowed, reason, _ = risk.can_open_new_trade(capital=5000)
 
-    assert not allowed
-    assert reason == "TWO_LOSING_TRADES_STOP"
+    assert allowed
+    assert "no arbitrary daily trade-count cap" in reason
 
 
 def test_daily_summary_counts_all_losing_trades_not_only_consecutive(tmp_path):
@@ -57,3 +57,14 @@ def test_daily_summary_counts_all_losing_trades_not_only_consecutive(tmp_path):
     assert summary["losing_trades"] == 2
     assert summary["consecutive_losses"] == 1
     assert summary["pnl"] == 50.0
+
+
+def test_three_consecutive_losses_trigger_lock(monkeypatch):
+    _enable_paper_learning(
+        monkeypatch,
+        {"closed_trades": 3, "pnl": -50.0, "consecutive_losses": 3,
+         "losing_trades": 3, "worst_loss": -30.0},
+    )
+    allowed, reason, _ = risk.can_open_new_trade(capital=5000)
+    assert not allowed
+    assert reason == "THREE_CONSECUTIVE_LOSSES_STOP"

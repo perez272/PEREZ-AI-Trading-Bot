@@ -89,10 +89,10 @@ def find_affordable_contract(
                 ltp = float(ltp_getter(row["exchange"], row["symbol"], row["token"]))
         except (TypeError, ValueError, Exception):
             continue
-        if ltp <= 0 or ltp > max_premium:
+        if ltp <= 0:
             continue
         distance_ratio = row["difference"] / max(float(spot), 1.0)
-        score = (max_premium - ltp) / max_premium * 55.0 + max(0.0, 1.0 - distance_ratio * 12.0) * 45.0
+        score = max(0.0, 1.0 - distance_ratio * 12.0) * 80.0 + 20.0 / (1.0 + ltp)
         affordable.append({**row, "ltp": ltp, "affordability_score": round(score, 2)})
 
     if not affordable:
@@ -115,6 +115,6 @@ def score_option_quote(quote: dict, underlying_score: float = 0.0) -> float:
     score += 10.0 if oi > 0 else 0.0
     if buy + sell > 0:
         score += min(max((buy - sell) / (buy + sell), 0.0) * 10.0, 10.0)
-    if 0 < ltp <= OPTION_MAX_PREMIUM:
+    if ltp > 0:
         score += 5.0
     return round(min(score, 100.0), 2)

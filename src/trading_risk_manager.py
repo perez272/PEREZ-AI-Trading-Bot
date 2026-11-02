@@ -225,6 +225,7 @@ class TradingRiskManager:
         with self._lock:
             key = lineage_id or trade_id
             existing = self.positions.get(key)
+            previous = deepcopy(existing) if existing is not None else None
             now = utc_now().isoformat()
 
             if existing:
@@ -246,20 +247,25 @@ class TradingRiskManager:
                 existing.highest_price = entry_price
                 existing.trailing_stop = None
                 existing.last_update_at = now
+                position = existing
+            else:
+                position = PositionRiskState(
+                    trade_id=key,
+                    entry_price=entry_price,
+                    highest_price=entry_price,
+                    created_at=now,
+                    last_update_at=now,
+                )
+                self.positions[key] = position
 
+            try:
                 self._save_state()
-                return existing
-
-            position = PositionRiskState(
-                trade_id=key,
-                entry_price=entry_price,
-                highest_price=entry_price,
-                created_at=now,
-                last_update_at=now,
-            )
-
-            self.positions[key] = position
-            self._save_state()
+            except Exception:
+                if previous is None:
+                    self.positions.pop(key, None)
+                else:
+                    self.positions[key] = previous
+                raise
 
             return position
 

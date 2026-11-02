@@ -185,3 +185,39 @@ def test_stop_loss_results_enforce_lineage_reentry_limit(tmp_path):
     allowed, reason = rm.can_open_trade("TRADE-3", lineage_id="LINEAGE-1")
     assert allowed is False
     assert reason == "TRADE_LINEAGE_CLOSED"
+
+
+def test_entry_persistence_failure_rolls_back_new_position(tmp_path, monkeypatch):
+    rm = manager(tmp_path)
+
+    def fail_save():
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(rm, "_save_state", fail_save)
+    try:
+        rm.register_entry("NEW-TRADE", 100)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected simulated persistence failure")
+
+    assert "NEW-TRADE" not in rm.positions
+
+
+def test_reentry_persistence_failure_restores_existing_lineage(tmp_path, monkeypatch):
+    rm = manager(tmp_path)
+    original = rm.register_entry("LINEAGE-1", 100)
+    before = vars(original).copy()
+
+    def fail_save():
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(rm, "_save_state", fail_save)
+    try:
+        rm.register_entry("TRADE-2", 125, lineage_id="LINEAGE-1")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected simulated persistence failure")
+
+    assert vars(rm.positions["LINEAGE-1"]) == before

@@ -68,8 +68,6 @@ def validate_surge(e: SurgeEvidence, max_premium: float) -> dict[str, Any]:
         reasons.append("INVALID_STRIKE")
     if e.ltp <= 0:
         reasons.append("INVALID_LTP")
-    if e.ltp > max_premium:
-        reasons.append("PREMIUM_ABOVE_LIMIT")
     if e.bid <= 0 or e.ask <= 0 or e.ask < e.bid:
         reasons.append("INVALID_ORDER_BOOK")
     if e.volume <= 0:

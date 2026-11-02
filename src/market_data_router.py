@@ -186,7 +186,7 @@ class MarketDataRouter:
             quote = self._extract_angel_quote(response)
             if self._valid_option_quote(quote):
                 self.stats["option_angel_successes"] += 1
-                return quote, "angel_one"
+                return self._normalize_angel_option_quote(quote), "angel_one"
 
         if self.mode != "angel" and self.upstox.available() and upstox_key:
             self.stats["option_upstox_attempts"] += 1
@@ -209,19 +209,49 @@ class MarketDataRouter:
         return fetched[0] if isinstance(fetched, list) and fetched and isinstance(fetched[0], dict) else None
 
     @staticmethod
+    def _normalize_angel_option_quote(quote: dict[str, Any]) -> dict[str, Any]:
+        """Map SmartAPI FULL quote aliases to the common executable-book shape."""
+        depth = quote.get("depth") or {}
+        buys = depth.get("buy") or []
+        sells = depth.get("sell") or []
+        bid = float((buys[0] or {}).get("price", 0) or quote.get("bestBidPrice", quote.get("bid_price", 0)) or 0) if buys else float(quote.get("bestBidPrice", quote.get("bid_price", 0)) or 0)
+        ask = float((sells[0] or {}).get("price", 0) or quote.get("bestAskPrice", quote.get("ask_price", 0)) or 0) if sells else float(quote.get("bestAskPrice", quote.get("ask_price", 0)) or 0)
+        bid_qty = (buys[0] or {}).get("quantity", (buys[0] or {}).get("qty", 0)) if buys else quote.get("bestBidQty", 0)
+        ask_qty = (sells[0] or {}).get("quantity", (sells[0] or {}).get("qty", 0)) if sells else quote.get("bestAskQty", 0)
+        timestamp = next((quote.get(key) for key in ("timestamp", "exchFeedTime", "exchTradeTime", "last_trade_time") if quote.get(key) not in (None, "")), None)
+        return {
+            **quote,
+            "ltp": float(quote.get("ltp", quote.get("last_price", 0)) or 0),
+            "depth": {
+                "buy": [{"price": bid, "quantity": bid_qty}] if bid > 0 else [],
+                "sell": [{"price": ask, "quantity": ask_qty}] if ask > 0 else [],
+            },
+            "timestamp": timestamp,
+            "total_buy_quantity": quote.get("total_buy_quantity", quote.get("totBuyQuan", 0)),
+            "total_sell_quantity": quote.get("total_sell_quantity", quote.get("totSellQuan", 0)),
+        }
+
+    @staticmethod
     def _normalize_upstox_option_quote(quote: dict[str, Any]) -> dict[str, Any]:
         depth = quote.get("depth") or {}
         buys, sells = depth.get("buy") or [], depth.get("sell") or []
         bid = float(buys[0].get("price", 0) or 0) if buys else 0.0
         ask = float(sells[0].get("price", 0) or 0) if sells else 0.0
+        timestamp = next((quote.get(key) for key in ("timestamp", "last_trade_time", "last_traded_time", "ltt") if quote.get(key) not in (None, "")), None)
         return {
             "ltp": float(quote.get("last_price", 0) or 0), "tradeVolume": quote.get("volume", 0),
             "opnInterest": quote.get("oi", 0), "totBuyQuan": quote.get("total_buy_quantity", 0),
             "totSellQuan": quote.get("total_sell_quantity", 0), "lastTradeQty": 0,
             "avgPrice": quote.get("average_price", 0), "netChange": quote.get("net_change", 0),
             "percentChange": 0.0,
-            "depth": {"buy": [{"price": bid}] if bid > 0 else [], "sell": [{"price": ask}] if ask > 0 else []},
-            "instrument_token": quote.get("instrument_token", ""), "timestamp": quote.get("timestamp"),
+            "depth": {
+                "buy": [{"price": bid, "quantity": buys[0].get("quantity", 0)}] if bid > 0 else [],
+                "sell": [{"price": ask, "quantity": sells[0].get("quantity", 0)}] if ask > 0 else [],
+            },
+            "instrument_token": quote.get("instrument_token", ""),
+            "timestamp": timestamp,
+            "total_buy_quantity": quote.get("total_buy_quantity", 0),
+            "total_sell_quantity": quote.get("total_sell_quantity", 0),
         }
 
     def get_option_ltp(self, exchange: str, symbol: str, token: str) -> tuple[float | None, str]:
