@@ -84,12 +84,10 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
-    learning_mode = _paper_learning_mode()
-    # Safety stops apply even in paper learning mode.
-    if summary["losing_trades"] >= 2:
-        return False, "TWO_LOSING_TRADES_STOP", summary
-    if not learning_mode and summary["closed_trades"] >= max_trades:
-        return False, f"Daily trade limit reached ({max_trades})", summary
+    # Entry lock is based on the current losing streak, not total losses.
+    # A profitable close resets the streak in daily_summary().
+    if summary["consecutive_losses"] >= 3:
+        return False, "THREE_CONSECUTIVE_LOSSES_STOP", summary
 
     dynamic_limit = abs(float(capital)) * MAX_DAILY_DRAWDOWN_PCT / 100.0
     daily_loss_limit = dynamic_limit if max_daily_loss is None else min(abs(float(max_daily_loss)), dynamic_limit)
@@ -102,4 +100,4 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         remaining = TRADING_RISK_MANAGER.circuit_breaker_remaining()
         minutes = max(1, int(remaining.total_seconds() + 59) // 60)
         return False, f"Timed circuit breaker active ({minutes} min remaining)", summary
-    return True, "Paper learning mode: trade-count limit bypassed; loss guards remain active" if learning_mode else "Risk checks passed", summary
+    return True, "Risk checks passed; no arbitrary daily trade-count cap", summary

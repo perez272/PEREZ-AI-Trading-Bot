@@ -37,12 +37,12 @@ SCAN_BATCH_SIZE = len(TIER1_INDEX_SYMBOLS)
 
 MINIMUM_SCORE = 65
 MAX_TECHNICAL_BYPASS_SCORE = 80
-MAX_TRADES_PER_DAY = 3
+MAX_TRADES_PER_DAY = None  # No arbitrary daily count cap; loss locks remain active.
 MAX_DAILY_DRAWDOWN_PCT = 2.0
 
-OPTION_MAX_PREMIUM = 150.0
+OPTION_MAX_PREMIUM = float("inf")  # Legacy compatibility only; affordability is capital/risk based.
 OPTIONS_MIN_SCORE = 60
-MAX_SPREAD_PCT = 1.50
+MAX_SPREAD_PCT = 0.80
 MAX_SLIPPAGE_PCT = 1.00
 
 INDEX_MOMENTUM_ENABLED = True

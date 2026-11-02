@@ -101,7 +101,6 @@ def run_monitor(
                     result["pnl_percent"] = round(realized / initial_exposure * 100.0, 2)
                     result["closed"] = True
                     trade["remaining_quantity"] = 0
-                    release_contract(trade["contract"], trade.get("trade_id"))
                     record_event(
                         trade,
                         "TIME_STOP_EXIT",
@@ -144,7 +143,6 @@ def run_monitor(
                 result["pnl_percent"] = round(realized / initial_exposure * 100.0, 2)
                 result["closed"] = True
                 trade["remaining_quantity"] = 0
-                release_contract(trade["contract"], trade.get("trade_id"))
 
             print("-" * 60)
             print("Trade ID :", trade.get("trade_id", ""))
@@ -218,7 +216,7 @@ def run_monitor(
                         except (TypeError, ValueError):
                             pnl = 0.0
                         exit_reason = str(result.get("exit_reason", "")).upper()
-                        stop_loss_trigger = pnl < 0.0 and exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
+                        stop_loss_trigger = exit_reason in {"STOP_LOSS", "TRAILING_STOP"}
                         applied = risk_manager.record_trade_result(
                             risk_identity,
                             pnl,
@@ -239,6 +237,8 @@ def run_monitor(
                     send_exit_alert(trade, result)
                 print(f"TRADE CLOSED: {result['exit_reason']} | trade_id={trade.get('trade_id', '')}")
                 print(f"Saved to: {log_path}")
+                # Release only after durable CLOSE and final accounting.
+                release_contract(trade["contract"], trade.get("trade_id"))
                 return {**result, "record": record}
             time.sleep(poll_seconds)
 

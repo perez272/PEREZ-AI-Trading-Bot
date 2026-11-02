@@ -336,26 +336,14 @@ def evaluate_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
         enriched["live_orders"] = False
         return enriched
     gate = validate_trade(evidence_from_candidate(enriched))
-    memory_bonus = float(enriched.get("memory_bonus", 0.0))
-    if memory_bonus > 0:
-        gate["score"] = min(100.0, round(gate["score"] + memory_bonus, 2))
-        gate["memory_bonus"] = memory_bonus
-        gate["memory_matches"] = enriched.get("move_memory", {}).get("matches", 0)
-        if gate["score"] >= 60:
-            gate["reasons"] = [
-                r for r in gate["reasons"]
-                if not r.startswith("SCORE_BELOW_")
-            ]
-            gate["memory_confirmation"] = True
-            gate["confirmations"] = [
-                "PATTERN_MEMORY_CONFIRMATION"
-            ]
-        else:
-            gate["memory_confirmation"] = False
-            gate["confirmations"] = []
-    # Recompute final eligibility after memory-adjusted score/reasons.
-    # validate_trade() calculated eligibility before the memory bonus was applied.
-    gate["eligible"] = not bool(gate.get("reasons"))
+    # Historical similarity is observational only. It may annotate/rank a
+    # candidate, but cannot change the raw gate score, remove rejection reasons,
+    # or make an ineligible candidate eligible.
+    memory_bonus = float(enriched.get("memory_bonus", 0.0) or 0.0)
+    gate["memory_bonus"] = memory_bonus
+    gate["memory_matches"] = enriched.get("move_memory", {}).get("matches", 0)
+    gate["memory_confirmation"] = False
+    gate["eligible"] = bool(gate.get("eligible")) and not bool(gate.get("reasons"))
     gate["decision"] = (
         "PAPER TRADE CANDIDATE"
         if gate["eligible"]

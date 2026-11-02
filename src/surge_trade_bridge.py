@@ -54,7 +54,8 @@ def _event_age(event: dict[str, Any]) -> float:
         ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        return age if age >= 0 else 999999.0
     except (TypeError, ValueError):
         return 999999.0
 
@@ -191,14 +192,30 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
         result["reason"] = f"RISK_BLOCK:{reason}"
         result["reasons"] = [f"RISK_BLOCK:{reason}"]
         return None, result
+    import uuid
+    trade_id = str(uuid.uuid4())
+    lineage_id = str(event.get("lineage_id") or trade_id)
+
+    allowed, reason = risk_manager.can_open_trade(trade_id, lineage_id=lineage_id)
+    if not allowed:
+        _release_event(event_id)
+        result["eligible"] = False
+        result["terminal"] = False
+        result["reason"] = f"RISK_MANAGER:{reason}"
+        result["reasons"] = [result["reason"]]
+        return None, result
+
     contract = dict(result["contract"])
     contract["ltp"] = result["ltp"]
+    contract["live_option_quote"] = result["quote"]
     contract["data_source"] = "upstox_surge_fresh_quote"
     trade = create_trade(
         symbol, float(event.get("strike") or 0.0), signal, capital,
         resolved_contract=contract,
         learning_candidate=event,
         strategy="SURGE_EARLY_EXPLOSIVE",
+        trade_id=trade_id,
+        defer_open_event=True,
     )
     if trade.get("status") != "PAPER TRADE ACTIVE":
         if trade.get("contract"):
@@ -208,9 +225,6 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
         result["reason"] = trade.get("reason", trade.get("status", "CREATE_TRADE_FAILED"))
         result["reasons"] = [result["reason"]]
         return None, result
-    import uuid
-    trade_id = trade.get("trade_id") or str(uuid.uuid4())
-    lineage_id = trade.get("lineage_id") or trade_id
     trade["trade_id"] = trade_id
     trade["lineage_id"] = lineage_id
     trade["strategy"] = "SURGE_EARLY_EXPLOSIVE"
@@ -223,15 +237,35 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
     trade["surge_move_3m_pct"] = result["evidence"].move_3m_pct
     trade["surge_move_5m_pct"] = result["evidence"].move_5m_pct
     trade["option_live_ltp_at_gate"] = result["ltp"]
-    record_event(trade, "DETECTED", ts=trade["detected_at"] or None, score=trade.get("surge_score"), move_5m_pct=trade.get("surge_move_5m_pct"), event_id=event_id)
-    allowed, reason = risk_manager.can_open_trade(trade_id, lineage_id=lineage_id)
-    if not allowed:
-        release_contract(trade["contract"], trade.get("trade_id"))
+    try:
+        risk_manager.register_entry(trade_id, float(trade["entry"]), lineage_id=lineage_id)
+    except Exception as exc:
+        release_contract(trade["contract"], trade_id)
         _release_event(event_id)
         result["eligible"] = False
         result["terminal"] = False
-        result["reason"] = f"RISK_MANAGER:{reason}"
+        result["reason"] = f"RISK_REGISTRATION_FAILED:{type(exc).__name__}"
         result["reasons"] = [result["reason"]]
         return None, result
-    risk_manager.register_entry(trade_id, float(trade["entry"]), lineage_id=lineage_id)
+
+    # Promote only after risk registration is durable. Keep PENDING on failure.
+    try:
+        from src.active_position_guard import mark_claim_active
+        mark_claim_active(trade["contract"], trade_id, trade)
+    except Exception as exc:
+        result["eligible"] = False
+        result["terminal"] = False
+        result["reason"] = f"CLAIM_ACTIVATION_FAILED:{type(exc).__name__}"
+        result["reasons"] = [result["reason"]]
+        return None, result
+
+    record_event(trade, "DETECTED", ts=trade["detected_at"] or None,
+                 score=trade.get("surge_score"),
+                 move_5m_pct=trade.get("surge_move_5m_pct"), event_id=event_id)
+    record_event(
+        trade, "OPEN", ts=trade["opened_at"], entry=trade["entry"],
+        quantity=trade["quantity"], investment=trade["investment"],
+        stop_loss=trade["stop_loss"], target1=trade["target1"],
+        target2=trade["target2"], detected_at=trade.get("detected_at") or None,
+    )
     return trade, result

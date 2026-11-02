@@ -57,7 +57,8 @@ def _process_once():
    if old_learning.get('status')=='LEARNED':total_adj+=float(old_learning.get('adjustment',0) or 0)
    if surge_learning.get('status')=='LEARNED':total_adj+=float(surge_learning.get('adjustment',0) or 0)
    total_adj=max(-8.0,min(8.0,total_adj));event['learning']['combined_adjustment']=round(total_adj,2)
-   base_score=float(event.get('score',0) or 0);event['score']=round(max(0.0,min(100.0,base_score+total_adj)),2)
+   # Keep detector score immutable for confirmation and all safety gates.
+   base_score=float(event.get('score',0) or 0)
    shadow_score=base_score+max(-8.0,min(8.0,total_adj))+max(-4.0,min(4.0,float(surge_learning.get('expected_return_pct',0) or 0)))
    record_shadow_ranking({**event,'score':base_score},shadow_score)
   except Exception as exc:

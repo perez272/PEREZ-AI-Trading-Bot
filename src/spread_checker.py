@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
-MAX_SPREAD_PCT = 0.5
+MAX_SPREAD_PCT = 0.8
 
 
 def _price(level: Any) -> float:

@@ -68,8 +68,6 @@ def validate_surge(e: SurgeEvidence, max_premium: float) -> dict[str, Any]:
         reasons.append("INVALID_STRIKE")
     if e.ltp <= 0:
         reasons.append("INVALID_LTP")
-    if e.ltp > max_premium:
-        reasons.append("PREMIUM_ABOVE_LIMIT")
     if e.bid <= 0 or e.ask <= 0 or e.ask < e.bid:
         reasons.append("INVALID_ORDER_BOOK")
     if e.volume <= 0:
@@ -84,6 +82,8 @@ def validate_surge(e: SurgeEvidence, max_premium: float) -> dict[str, Any]:
         reasons.append("INSUFFICIENT_ACCELERATION")
     if e.move_5m_pct <= 0:
         reasons.append("NO_POSITIVE_5M_MOVE")
+    if e.move_1m_pct <= 0:
+        reasons.append("NO_POSITIVE_1M_MOVE")
     # Narrow evidence-backed overextension guard.
     if e.detector_score >= 90.0 and e.move_5m_pct >= 6.0:
         reasons.append("OVEREXTENDED_SURGE")

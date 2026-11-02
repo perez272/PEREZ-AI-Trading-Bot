@@ -160,6 +160,4 @@ def monitor_trade(trade, current_price):
         "pnl_percent": pnl_percent, "status": status, "exit_reason": exit_reason,
         "target1_hit": bool(trade.get("partial_booked")), "closed": status != "RUNNING",
     }
-    if result["closed"]:
-        release_contract(trade["contract"], trade.get("trade_id"))
     return result
