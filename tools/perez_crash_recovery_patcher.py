@@ -311,7 +311,7 @@ def main():
         raise RuntimeError("trade-engine test mock anchor missing or ambiguous")
     engine_test_source = engine_test_source.replace(
         mock_anchor,
-        mock_anchor + '\\n    monkeypatch.setattr(trade_engine, "mark_claim_active", lambda *args: None)',
+        mock_anchor + '\n    monkeypatch.setattr(trade_engine, "mark_claim_active", lambda *args: None)',
         1,
     )
     updated = {
