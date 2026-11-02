@@ -296,12 +296,12 @@ def main():
             raise SystemExit(f"Missing required file: {n}")
     originals = {n: p.read_text(encoding="utf-8") for n, p in paths.items()}
     engine_source = originals["src/trade_engine.py"]
-    kw_call = 'trade["contract"], trade["symbol"], trade["trade_id"], trade_payload=trade'
-    pos_call = 'trade["contract"], trade["symbol"], trade["trade_id"], trade'
-    if kw_call in engine_source:
-        engine_source = engine_source.replace(kw_call, pos_call, 1)
-    elif pos_call not in engine_source:
-        raise RuntimeError("trade_engine claim_contract call anchor not found")
+    if "trade_payload=trade" in engine_source:
+        engine_source = engine_source.replace("trade_payload=trade", "trade", 1)
+    elif "trade_payload = trade" in engine_source:
+        engine_source = engine_source.replace("trade_payload = trade", "trade", 1)
+    elif "trade_payload" in engine_source:
+        raise RuntimeError("unexpected trade_payload call format; refusing unsafe edit")
     updated = {
         names[0]: bridge(originals[names[0]]),
         names[1]: live(originals[names[1]]),
