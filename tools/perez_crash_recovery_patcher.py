@@ -363,6 +363,8 @@ def main():
         for n in reversed(changed):
             if n == "TEST":
                 if test_path.exists(): test_path.unlink()
+            elif n == "TEST_ENGINE":
+                shutil.copy2(backups[n], test_engine_path)
             elif n in backups:
                 shutil.copy2(backups[n], paths[n])
         print("Rollback completed; backups retained.", file=sys.stderr)
