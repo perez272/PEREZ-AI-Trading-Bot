@@ -34,7 +34,7 @@ def extract_available_capital(response: Any) -> float:
 
 def get_paper_capital() -> float:
     """Return explicitly configured virtual capital for paper trading."""
-    raw = os.getenv("PAPER_CAPITAL", "50000")
+    raw = os.getenv("PAPER_CAPITAL", "5000")
     try:
         capital = float(raw)
     except (TypeError, ValueError) as exc:
