@@ -10,7 +10,7 @@ if not (R / "src/trade_engine.py").is_file():
 names = [
     "src/surge_trade_bridge.py", "src/live_trade_monitor.py",
     "src/trade_monitor.py", "src/paper_position_recovery.py",
-    "src/paper_trade_lifecycle.py",
+    "src/paper_trade_lifecycle.py", "src/trade_engine.py",
 ]
 paths = {n: R / n for n in names}
 test_path = R / "tests/test_paper_crash_recovery.py"
@@ -295,12 +295,20 @@ def main():
         if not p.is_file():
             raise SystemExit(f"Missing required file: {n}")
     originals = {n: p.read_text(encoding="utf-8") for n, p in paths.items()}
+    engine_source = originals["src/trade_engine.py"]
+    kw_call = 'trade["contract"], trade["symbol"], trade["trade_id"], trade_payload=trade'
+    pos_call = 'trade["contract"], trade["symbol"], trade["trade_id"], trade'
+    if kw_call in engine_source:
+        engine_source = engine_source.replace(kw_call, pos_call, 1)
+    elif pos_call not in engine_source:
+        raise RuntimeError("trade_engine claim_contract call anchor not found")
     updated = {
         names[0]: bridge(originals[names[0]]),
         names[1]: live(originals[names[1]]),
         names[2]: trade_monitor(originals[names[2]]),
         names[3]: recovery(originals[names[3]]),
         names[4]: lifecycle(originals[names[4]]),
+        "src/trade_engine.py": engine_source,
     }
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backups, changed = {}, []
