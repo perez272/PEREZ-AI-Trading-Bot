@@ -39,7 +39,7 @@ jobs:
           import os
           from pathlib import Path
           pid = os.environ["MAIN_PID"]
-raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+          raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
           env = {}
           for item in raw:
               if b"=" in item:
