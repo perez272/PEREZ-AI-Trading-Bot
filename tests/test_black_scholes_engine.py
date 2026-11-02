@@ -88,8 +88,9 @@ def test_invalid_or_missing_quote_is_skipped_without_ltp_fallback():
 
 
 def test_expired_contract_is_skipped():
+    # The contract expired yesterday; date-only expiry means 15:30 IST.
     chain = pd.DataFrame([{
-        "spot": 25000, "strike": 25000, "expiry": "2026-11-02",
+        "spot": 25000, "strike": 25000, "expiry": "2026-11-01",
         "option_type": "CE", "bid": 100, "ask": 101,
     }])
     result = calculate_chain_greeks(
