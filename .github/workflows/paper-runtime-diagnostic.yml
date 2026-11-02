@@ -39,7 +39,7 @@ jobs:
           import os
           from pathlib import Path
           pid = os.environ["MAIN_PID"]
-          raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\\0")
+raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
           env = {}
           for item in raw:
               if b"=" in item:
@@ -64,7 +64,7 @@ jobs:
           fi
 
           echo "=== RELATED PROCESSES (PID/COMMAND ONLY) ==="
-          ps -eo pid=,comm=,args= | awk '/PEREZ-AI-Trading-Bot/ && /main.py/ {print $1, $2; count++} END {print "MATCHING_MAIN_PROCESSES=" count+0}'
+          ps -eo pid=,comm=,args= | awk '$2 ~ /python/ && /PEREZ-AI-Trading-Bot/ && /main.py/ {print $1, $2; count++} END {print "MATCHING_MAIN_PROCESSES=" count+0}'
 
           echo "=== HEARTBEAT ==="
           if [[ -f data/runtime/heartbeat.json ]]; then
@@ -93,6 +93,6 @@ jobs:
           echo "HEALTH_TIMER_ACTIVE=$(systemctl is-active perez-ai-health.timer 2>/dev/null || true)"
 
           echo "=== RECENT ERROR COUNTS (NO LOG CONTENT) ==="
-          echo "MAIN_ERRORS_LAST_30M=$(journalctl -u perez-ai.service --since '30 minutes ago' -p err --no-pager 2>/dev/null | wc -l)"
-          echo "HEALTH_ERRORS_LAST_30M=$(journalctl -u perez-ai-health.service --since '30 minutes ago' -p err --no-pager 2>/dev/null | wc -l)"
+          echo "MAIN_ERRORS_LAST_30M=$(journalctl -q -u perez-ai.service --since '30 minutes ago' -p err --no-pager -o cat 2>/dev/null | awk 'NF {n++} END {print n+0}')"
+          echo "HEALTH_ERRORS_LAST_30M=$(journalctl -q -u perez-ai-health.service --since '30 minutes ago' -p err --no-pager -o cat 2>/dev/null | awk 'NF {n++} END {print n+0}')"
           echo "READ_ONLY_DIAGNOSTIC_COMPLETE"
