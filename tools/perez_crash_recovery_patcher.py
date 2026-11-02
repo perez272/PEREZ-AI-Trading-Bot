@@ -14,8 +14,11 @@ names = [
 ]
 paths = {n: R / n for n in names}
 test_path = R / "tests/test_paper_crash_recovery.py"
+test_engine_path = R / "tests/test_trade_engine_routing.py"
 if test_path.exists():
     raise SystemExit("Refusing to overwrite tests/test_paper_crash_recovery.py")
+if not test_engine_path.is_file():
+    raise SystemExit("Missing tests/test_trade_engine_routing.py")
 
 def once(s, old, new, label):
     n = s.count(old)
@@ -302,6 +305,15 @@ def main():
         engine_source = engine_source.replace("trade_payload = trade", "trade", 1)
     elif "trade_payload" in engine_source:
         raise RuntimeError("unexpected trade_payload call format; refusing unsafe edit")
+    engine_test_source = test_engine_path.read_text(encoding="utf-8")
+    mock_anchor = 'monkeypatch.setattr(trade_engine, "claim_contract", lambda *args: (True, "OK"))'
+    if engine_test_source.count(mock_anchor) != 1:
+        raise RuntimeError("trade-engine test mock anchor missing or ambiguous")
+    engine_test_source = engine_test_source.replace(
+        mock_anchor,
+        mock_anchor + '\\n    monkeypatch.setattr(trade_engine, "mark_claim_active", lambda *args: None)',
+        1,
+    )
     updated = {
         names[0]: bridge(originals[names[0]]),
         names[1]: live(originals[names[1]]),
@@ -317,10 +329,14 @@ def main():
             b = p.with_name(p.name + ".pre_crash_fix_" + stamp)
             shutil.copy2(p, b)
             backups[n] = b
+        test_backup = test_engine_path.with_name(test_engine_path.name + ".pre_crash_fix_" + stamp)
+        shutil.copy2(test_engine_path, test_backup)
+        backups["TEST_ENGINE"] = test_backup
         for n, content in updated.items():
             tmp = paths[n].with_suffix(paths[n].suffix + ".crashfix.tmp")
             tmp.write_text(content, encoding="utf-8")
             tmp.replace(paths[n]); changed.append(n)
+        test_engine_path.write_text(engine_test_source, encoding="utf-8"); changed.append("TEST_ENGINE")
         test_path.write_text(test_source, encoding="utf-8"); changed.append("TEST")
         py = R / "venv/bin/python"
         if not py.is_file():
