@@ -57,13 +57,13 @@ def _as_expiry_datetime(value: Any) -> datetime:
         raw = str(value).strip()
         if not raw:
             raise ValueError("EXPIRY_MISSING")
-        try:
-            result = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
+        if len(raw) == 10:
             result = datetime.combine(
-                datetime.strptime(raw[:10], "%Y-%m-%d").date(),
+                datetime.strptime(raw, "%Y-%m-%d").date(),
                 time(15, 30),
             )
+        else:
+            result = datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
     if result.tzinfo is None:
         result = result.replace(tzinfo=IST)
