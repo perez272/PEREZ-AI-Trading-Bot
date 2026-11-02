@@ -1,0 +1,98 @@
+name: Read-only PEREZ paper runtime diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostics/read-only-paper-runtime-20261102
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-diagnostic:
+    runs-on: [self-hosted, linux, x64, perez-ai-ec2]
+    timeout-minutes: 5
+    steps:
+      - name: Read-only EC2 runtime verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+
+          echo "=== DIAGNOSTIC MODE ==="
+          echo "READ_ONLY=true"
+          echo "APP_COMMIT=$(git rev-parse --short HEAD)"
+          echo "APP_BRANCH=$(git branch --show-current)"
+          echo "APP_WORKTREE_CHANGES=$(git status --porcelain | wc -l)"
+
+          echo "=== SYSTEMD SERVICE ==="
+          for property in ActiveState SubState MainPID ActiveEnterTimestamp FragmentPath DropInPaths EnvironmentFiles; do
+            value="$(systemctl show perez-ai.service --property="$property" --value)"
+            printf '%s=%s\n' "$property" "$value"
+          done
+
+          echo "=== EFFECTIVE PROCESS ENVIRONMENT (WHITELIST ONLY) ==="
+          MAIN_PID="$(systemctl show perez-ai.service --property=MainPID --value)"
+          echo "MAIN_PID=$MAIN_PID"
+          if [[ "$MAIN_PID" =~ ^[1-9][0-9]*$ && -r "/proc/$MAIN_PID/environ" ]]; then
+            MAIN_PID="$MAIN_PID" venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+          pid = os.environ["MAIN_PID"]
+          raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\\0")
+          env = {}
+          for item in raw:
+              if b"=" in item:
+                  k, v = item.split(b"=", 1)
+                  env[k.decode(errors="replace")] = v.decode(errors="replace")
+          keys = ("PAPER_MODE", "ORDERS_ENABLED", "PAPER_CAPITAL",
+                  "UPSTOX_ENABLED", "MARKET_DATA_PROVIDER", "TZ")
+          for key in keys:
+              print(f"{key}={env.get(key, 'NOT_SET')}")
+          PY
+          else
+            echo "PROCESS_ENVIRONMENT_UNAVAILABLE"
+          fi
+
+          echo "=== PAPER SAFETY RESULT ==="
+          PAPER_MODE="$(tr '\0' '\n' < "/proc/$MAIN_PID/environ" 2>/dev/null | sed -n 's/^PAPER_MODE=//p' | tail -1 || true)"
+          ORDERS_ENABLED="$(tr '\0' '\n' < "/proc/$MAIN_PID/environ" 2>/dev/null | sed -n 's/^ORDERS_ENABLED=//p' | tail -1 || true)"
+          if [[ "$PAPER_MODE" == "true" && "$ORDERS_ENABLED" == "false" ]]; then
+            echo "PROCESS_PAPER_SAFETY=PASS"
+          else
+            echo "PROCESS_PAPER_SAFETY=FAIL_OR_UNVERIFIED"
+          fi
+
+          echo "=== RELATED PROCESSES (PID/COMMAND ONLY) ==="
+          ps -eo pid=,comm=,args= | awk '/PEREZ-AI-Trading-Bot/ && /main.py/ {print $1, $2; count++} END {print "MATCHING_MAIN_PROCESSES=" count+0}'
+
+          echo "=== HEARTBEAT ==="
+          if [[ -f data/runtime/heartbeat.json ]]; then
+            venv/bin/python - <<'PY'
+          import json, time
+          from pathlib import Path
+          p = Path("data/runtime/heartbeat.json")
+          try:
+              d = json.loads(p.read_text())
+              epoch = float(d.get("epoch", 0))
+              print(f"HEARTBEAT_STATUS={d.get('status', 'NOT_SET')}")
+              print(f"HEARTBEAT_PID={d.get('pid', 'NOT_SET')}")
+              print(f"HEARTBEAT_AGE_SECONDS={max(0, time.time()-epoch):.1f}" if epoch else "HEARTBEAT_AGE_SECONDS=UNKNOWN")
+          except Exception as e:
+              print(f"HEARTBEAT_PARSE_ERROR={type(e).__name__}")
+          PY
+          else
+            echo "HEARTBEAT=MISSING"
+          fi
+
+          echo "=== HEALTH UNIT ==="
+          for property in ActiveState SubState Result ExecMainStatus; do
+            value="$(systemctl show perez-ai-health.service --property="$property" --value 2>/dev/null || true)"
+            printf 'HEALTH_%s=%s\n' "$property" "$value"
+          done
+          echo "HEALTH_TIMER_ACTIVE=$(systemctl is-active perez-ai-health.timer 2>/dev/null || true)"
+
+          echo "=== RECENT ERROR COUNTS (NO LOG CONTENT) ==="
+          echo "MAIN_ERRORS_LAST_30M=$(journalctl -u perez-ai.service --since '30 minutes ago' -p err --no-pager 2>/dev/null | wc -l)"
+          echo "HEALTH_ERRORS_LAST_30M=$(journalctl -u perez-ai-health.service --since '30 minutes ago' -p err --no-pager 2>/dev/null | wc -l)"
+          echo "READ_ONLY_DIAGNOSTIC_COMPLETE"
