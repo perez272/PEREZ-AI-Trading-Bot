@@ -155,9 +155,25 @@ def recovery(s):
             print(f"[RECOVERY] PENDING claim retained for manual reconciliation: {trade_id}")
             continue
         row_events = events.get(trade_id, [])
-        if any(e.get("event") == "CLOSE" for e in row_events):
+        close_event = next((e for e in reversed(row_events) if e.get("event") == "CLOSE"), None)
+        if close_event:
+            # CLOSE is written before risk accounting. Replay by result_id so a
+            # crash in that window cannot lose the daily/lineage result.
+            try:
+                from src.trading_risk_manager import TradingRiskManager
+                risk_manager = TradingRiskManager()
+                risk_manager.record_trade_result(
+                    str(close_event.get("lineage_id") or trade_id),
+                    float(close_event.get("pnl") or 0.0),
+                    stop_loss=str(close_event.get("exit_reason") or "").upper()
+                               in {"STOP_LOSS", "TRAILING_STOP"},
+                    result_id=trade_id,
+                )
+            except Exception as exc:
+                print(f"[RECOVERY] CLOSE risk reconciliation failed; claim retained: {trade_id}: {exc}")
+                continue
             release_contract(row[0], trade_id)
-            print(f"[RECOVERY] released claim for durably closed trade {trade_id}")
+            print(f"[RECOVERY] reconciled CLOSE and released claim for {trade_id}")
             continue
         trade = _reconstruct(row, events)
         if not trade:
@@ -252,6 +268,26 @@ def test_close_is_idempotent(tmp_path, monkeypatch):
     first = lifecycle.record_event(trade, "CLOSE", pnl=10)
     second = lifecycle.record_event(trade, "CLOSE", pnl=10)
     assert first == second and len(log.read_text().splitlines()) == 1
+
+def test_closed_claim_replays_risk_result_before_release(monkeypatch):
+    p = payload()
+    close = {"event":"CLOSE","trade_id":p["trade_id"],"lineage_id":p["lineage_id"],
+             "pnl":-22.5,"exit_reason":"STOP_LOSS"}
+    released = []
+    calls = []
+    class FakeRiskManager:
+        def record_trade_result(self, identity, pnl, *, stop_loss, result_id):
+            calls.append((identity, pnl, stop_loss, result_id))
+            return True
+    from src import trading_risk_manager
+    monkeypatch.setattr(trading_risk_manager, "TradingRiskManager", FakeRiskManager)
+    monkeypatch.setattr(recovery, "active_contracts", lambda: [row(p)])
+    monkeypatch.setattr(recovery, "_events", lambda: {p["trade_id"]:[close]})
+    monkeypatch.setattr(recovery, "release_contract",
+                        lambda contract, trade_id: released.append((contract, trade_id)))
+    assert recovery.recover_paper_positions() == 0
+    assert calls == [(p["lineage_id"], -22.5, True, p["trade_id"])]
+    assert released == [(p["contract"], p["trade_id"])]
 '''
 
 def main():
