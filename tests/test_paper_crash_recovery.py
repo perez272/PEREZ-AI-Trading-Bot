@@ -51,7 +51,8 @@ def test_close_is_idempotent(tmp_path, monkeypatch):
 def test_closed_claim_replays_risk_result_before_release(monkeypatch):
     p = payload()
     close = {"event":"CLOSE","trade_id":p["trade_id"],"lineage_id":p["lineage_id"],
-             "pnl":-22.5,"exit_reason":"STOP_LOSS"}
+             "ts_utc":"2026-11-03T04:00:00+00:00","exit_price":99.1,
+             "pnl":-22.5,"pnl_percent":-0.9,"exit_reason":"STOP_LOSS"}
     released = []
     calls = []
     class FakeRiskManager:
