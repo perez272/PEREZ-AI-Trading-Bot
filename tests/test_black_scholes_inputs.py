@@ -5,6 +5,7 @@ import pytest
 
 from src.black_scholes_inputs import (
     BSMInputResolver,
+    calculate_chain_greeks_with_resolved_inputs,
     INDEX_NAMES,
     _parse_nse_dividend_yields,
     _parse_rbi_tbill_yields,
