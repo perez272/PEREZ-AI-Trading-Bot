@@ -46,10 +46,10 @@ def test_rejects_non_nifty_and_outside_entry_window():
 
 
 def test_requires_positive_option_premium_confirmation_and_liquidity():
-    now = datetime(2026, 11, 3, 10, 0, tzinfo=IST)
+    now = datetime(2026, 11, 3, 14, 0, tzinfo=IST)
     result = evaluate_nifty_expiry_setup(
         _candles(), symbol="NIFTY", option_type="CE", expiry="2026-11-03",
-        strike=23000, option_move_1m_pct=-0.1, option_move_3m_pct=1,
+        strike=23100, option_move_1m_pct=-0.1, option_move_3m_pct=1,
         option_move_5m_pct=5, spread_pct=0.2, option_volume=0, option_oi=10000,
         now=now,
     )
@@ -58,7 +58,7 @@ def test_requires_positive_option_premium_confirmation_and_liquidity():
 
 
 def test_fails_closed_for_insufficient_history():
-    now = datetime(2026, 11, 3, 10, 0, tzinfo=IST)
+    now = datetime(2026, 11, 3, 14, 0, tzinfo=IST)
     result = evaluate_nifty_expiry_setup(
         _candles()[:20], symbol="NIFTY", option_type="CE", expiry="2026-11-03",
         strike=23000, option_move_1m_pct=2, option_move_3m_pct=3,
