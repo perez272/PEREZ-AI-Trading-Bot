@@ -200,20 +200,30 @@ class ShortCoveringFilter:
         )
 
         merged["Signal_Reason"] = np.select(
-            [merged["Signal"], merged["Baseline_Candidate"]],
-            ["PRICE_UP_INTRADAY_OI_DOWN_VOLUME_EXPANSION", "HISTORICAL_BASELINE_CANDIDATE_ONLY"],
+            [
+                merged["Signal"],
+                merged["Baseline_Candidate"] & merged["OI_Reference"].eq("previous_session_oi"),
+                merged["Baseline_Candidate"],
+            ],
+            [
+                "PRICE_UP_INTRADAY_OI_DOWN_VOLUME_EXPANSION",
+                "PREVIOUS_SESSION_BASELINE_CANDIDATE_ONLY",
+                "HISTORICAL_BASELINE_CANDIDATE_ONLY",
+            ],
             default="NO_SIGNAL",
         )
-        merged["Signal_Interpretation"] = np.where(
-            merged["Signal"],
-            "INTRADAY_OI_REDUCTION_EVIDENCE",
-            np.where(
+        merged["Signal_Interpretation"] = np.select(
+            [
+                merged["Signal"],
+                merged["Baseline_Candidate"] & merged["OI_Reference"].eq("previous_session_oi"),
                 merged["Baseline_Candidate"],
-                "PREVIOUS_SESSION_OI_BASELINE_ONLY"
-                if merged["OI_Reference"].eq("previous_session_oi").iloc[0]
-                else "HISTORICAL_OI_BASELINE_DEVIATION_ONLY",
-                "NOT_CONFIRMED",
-            ),
+            ],
+            [
+                "INTRADAY_OI_REDUCTION_EVIDENCE",
+                "PREVIOUS_SESSION_OI_BASELINE_ONLY",
+                "HISTORICAL_OI_BASELINE_DEVIATION_ONLY",
+            ],
+            default="NOT_CONFIRMED",
         )
 
         logger.info(
