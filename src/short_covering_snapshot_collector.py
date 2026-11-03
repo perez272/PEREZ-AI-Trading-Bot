@@ -8,13 +8,14 @@ from __future__ import annotations
 import math
 import sqlite3
 import statistics
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 
 DEFAULT_DB = Path("data/short_covering_observations.sqlite3")
 DEFAULT_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class ShortCoveringSnapshotCollector:
@@ -73,6 +74,7 @@ class ShortCoveringSnapshotCollector:
                 CREATE TABLE IF NOT EXISTS short_covering_observations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     captured_at TEXT NOT NULL,
+                    trading_date_ist TEXT,
                     symbol TEXT NOT NULL,
                     expiry TEXT NOT NULL,
                     instrument_key TEXT NOT NULL,
@@ -88,11 +90,20 @@ class ShortCoveringSnapshotCollector:
                 )
                 """
             )
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(short_covering_observations)"
+                ).fetchall()
+            }
+            if "trading_date_ist" not in columns:
+                conn.execute(
+                    "ALTER TABLE short_covering_observations ADD COLUMN trading_date_ist TEXT"
+                )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_short_covering_contract_time
                 ON short_covering_observations
-                (symbol, expiry, instrument_key, captured_at DESC)
+                (symbol, expiry, instrument_key, trading_date_ist, captured_at DESC)
                 """
             )
 
@@ -160,15 +171,18 @@ class ShortCoveringSnapshotCollector:
         return records, skipped
 
     def _analyse_contract(self, conn: sqlite3.Connection, symbol: str,
-                          expiry: str, instrument_key: str) -> dict[str, Any]:
+                          expiry: str, instrument_key: str,
+                          trading_date_ist: str) -> dict[str, Any]:
         rows = conn.execute(
             """
             SELECT captured_at, strike, option_type, ltp, oi, cumulative_volume
             FROM short_covering_observations
             WHERE symbol=? AND expiry=? AND instrument_key=?
+              AND trading_date_ist=?
             ORDER BY captured_at DESC LIMIT ?
             """,
-            (symbol, expiry, instrument_key, self.min_volume_baseline_intervals + 2),
+            (symbol, expiry, instrument_key, trading_date_ist,
+             self.min_volume_baseline_intervals + 2),
         ).fetchall()
         base = {
             "symbol": symbol, "expiry": expiry, "instrument_key": instrument_key,
@@ -249,6 +263,7 @@ class ShortCoveringSnapshotCollector:
         if now.tzinfo is None:
             raise ValueError("clock must return a timezone-aware datetime")
         captured_at = now.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        trading_date_ist = now.astimezone(IST).date().isoformat()
         records, skipped = self._records(chain, normalized_symbol, captured_at, expiry)
         if not records:
             raise RuntimeError(f"No valid option contracts in {normalized_symbol} chain")
@@ -256,14 +271,20 @@ class ShortCoveringSnapshotCollector:
             conn.executemany(
                 """
                 INSERT OR IGNORE INTO short_covering_observations
-                (captured_at, symbol, expiry, instrument_key, strike, option_type,
-                 ltp, oi, cumulative_volume, bid, ask, underlying_spot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (captured_at, trading_date_ist, symbol, expiry, instrument_key,
+                 strike, option_type, ltp, oi, cumulative_volume, bid, ask,
+                 underlying_spot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                records,
+                [
+                    (record[0], trading_date_ist, *record[1:])
+                    for record in records
+                ],
             )
             analyses = [
-                self._analyse_contract(conn, normalized_symbol, row[2], row[3])
+                self._analyse_contract(
+                    conn, normalized_symbol, row[2], row[3], trading_date_ist
+                )
                 for row in records
             ]
         signals = [item for item in analyses if item.get("signal")]
