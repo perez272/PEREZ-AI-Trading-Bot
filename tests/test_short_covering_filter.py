@@ -25,7 +25,8 @@ def frames(prev_oi=True):
 
 
 def test_detects_intraday_short_covering_evidence():
-    current, historical = frames()
+    current, historical = frames(prev_oi=False)
+    current["OI_Prev_Snapshot"] = [1000, 900, 1200]
     result = ShortCoveringFilter().analyze_option_chain(current, historical)
     row = result.loc[result["Strike"].eq(23000)].iloc[0]
     assert not bool(row["Signal"])
@@ -105,7 +106,8 @@ def test_negative_current_oi_or_volume_fails_closed():
 
 
 def test_strike_numeric_representation_matches():
-    current, historical = frames()
+    current, historical = frames(prev_oi=False)
+    current["OI_Prev_Snapshot"] = [1000, 900, 1200]
     current["Strike"] = current["Strike"].astype(str)
     result = ShortCoveringFilter().analyze_option_chain(current, historical)
     assert len(result) == 3
