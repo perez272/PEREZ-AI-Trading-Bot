@@ -327,7 +327,7 @@ class BSMInputResolver:
         if not raw:
             return None
         observed_raw = raw.get("observation_date")
-        observed = observed_raw if isinstance(observed_raw, date) else date.fromisoformat(str(observed_raw))
+        observed = observed_raw.date() if isinstance(observed_raw, datetime) else (observed_raw if isinstance(observed_raw, date) else date.fromisoformat(str(observed_raw)[:10]))
         retrieved = now
         units = str(raw.get("units", "")).lower()
         value = float(raw["value"])
@@ -421,3 +421,51 @@ class BSMInputResolver:
             dividend_observation_date=dividend_item.observation_date,
             retrieved_at=retrieved,
         )
+
+
+
+def calculate_chain_greeks_with_resolved_inputs(
+    chain: Any,
+    *,
+    underlying: str,
+    expiry: Any,
+    resolver: BSMInputResolver,
+    now: datetime | None = None,
+):
+    """Resolve inputs then calculate Greeks; missing/stale inputs fail closed.
+
+    Adds the exact rate/yield values and source dates to each output row for
+    auditability. It does not feed results into strategy or execution.
+    """
+    import math
+    import pandas as pd
+    from src.black_scholes_engine import calculate_chain_greeks
+
+    try:
+        inputs = resolver.resolve(underlying, expiry, now=now)
+    except Exception as exc:
+        output = chain.copy()
+        numeric = (
+            "bs_market_mid", "bs_price", "bs_iv", "bs_delta", "bs_gamma",
+            "bs_vega", "bs_theta_per_day", "bs_rho",
+        )
+        for column in numeric:
+            output[column] = math.nan
+        output["bs_status"] = "SKIPPED_INPUT_UNAVAILABLE"
+        output["bs_error"] = str(exc)
+        return output
+
+    output = calculate_chain_greeks(
+        chain,
+        risk_free_rate=inputs.risk_free_rate,
+        dividend_yield=inputs.dividend_yield,
+        now=now,
+    )
+    output["bs_risk_free_rate"] = inputs.risk_free_rate
+    output["bs_dividend_yield"] = inputs.dividend_yield
+    output["bs_risk_free_source"] = inputs.risk_free_source
+    output["bs_risk_free_observation_date"] = inputs.risk_free_observation_date.isoformat()
+    output["bs_risk_free_tenor_days"] = inputs.risk_free_tenor_days
+    output["bs_dividend_source"] = inputs.dividend_source
+    output["bs_dividend_observation_date"] = inputs.dividend_observation_date.isoformat()
+    return output
