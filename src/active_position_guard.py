@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
 import json
+import math
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -51,7 +52,7 @@ def claim_contract(contract, symbol, trade_id, trade_payload=None):
             capital = float(payload_data.get("capital_available") or 0)
             new_risk = float(payload_data.get("position_risk_inr") or 0)
             daily_limit = capital * float(MAX_DAILY_DRAWDOWN_PCT) / 100.0
-            if capital <= 0 or new_risk <= 0 or daily_limit <= 0:
+            if not all(math.isfinite(v) and v > 0 for v in (capital, new_risk, daily_limit)):
                 db.rollback()
                 return False, "RISK_RESERVATION_INVALID"
 
@@ -67,7 +68,10 @@ def claim_contract(contract, symbol, trade_id, trade_payload=None):
             ).fetchall():
                 try:
                     existing = json.loads(raw_payload or "{}")
-                    reserved += max(0.0, float(existing.get("position_risk_inr") or 0))
+                    existing_risk = float(existing.get("position_risk_inr") or 0)
+                    if not math.isfinite(existing_risk) or existing_risk < 0:
+                        raise ValueError("invalid existing risk")
+                    reserved += existing_risk
                 except (TypeError, ValueError, json.JSONDecodeError):
                     db.rollback()
                     return False, "EXISTING_RISK_RESERVATION_UNREADABLE"
