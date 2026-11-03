@@ -140,7 +140,7 @@ def _parse_rbi_tbill_yields(page: str) -> tuple[date, dict[int, float]]:
     yields: dict[int, float] = {}
     for days in (91, 182, 364):
         match = re.search(
-            rf"\b{days}\s*[- ]?\s*day\b.{{0,100}}?([0-9]+(?:\.[0-9]+)?)\s*%",
+            rf"\b{days}\s*[- ]?\s*day\s+T[- ]?bills?\s*[|:]*\s*([0-9]+(?:\.[0-9]+)?)\s*%",
             text, flags=re.IGNORECASE,
         )
         if match:
