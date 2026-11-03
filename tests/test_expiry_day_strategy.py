@@ -8,7 +8,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def _candles():
     # 60 completed 5-minute bars, arranged into complete 15-minute groups.
-    start = datetime(2026, 11, 2, 9, 0, tzinfo=IST)
+    start = datetime(2026, 11, 3, 9, 0, tzinfo=IST)
     rows = []
     price = 23000.0
     for i in range(60):
@@ -26,7 +26,7 @@ def _candles():
 
 
 def test_expiry_session_accepts_expiry_day_and_preceding_weekday():
-    now = datetime(2026, 11, 3, 10, 0, tzinfo=IST)
+    now = datetime(2026, 11, 3, 14, 0, tzinfo=IST)
     assert is_expiry_session("2026-11-03", now)
     assert is_expiry_session("2026-11-04", now)
     assert not is_expiry_session("2026-11-10", now)
@@ -36,7 +36,7 @@ def test_rejects_non_nifty_and_outside_entry_window():
     now = datetime(2026, 11, 3, 10, 0, tzinfo=IST)
     args = dict(
         candles=_candles(), option_type="CE", expiry="2026-11-03",
-        strike=23000, option_move_1m_pct=2, option_move_3m_pct=3,
+        strike=23100, option_move_1m_pct=2, option_move_3m_pct=3,
         option_move_5m_pct=5, spread_pct=0.2, option_volume=1000,
         option_oi=10000, now=now,
     )
