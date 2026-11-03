@@ -433,12 +433,25 @@ def main():
                     continue
                 contract_probe["ltp"] = live_ltp
 
+                import uuid
+                trade_id = str(uuid.uuid4())
+                lineage_id = trade_id
+                allowed, reason = TRADING_RISK_MANAGER.can_open_trade(
+                    trade_id, lineage_id=lineage_id
+                )
+                if not allowed:
+                    print(f"RISK MANAGER BLOCKED: {reason}")
+                    record_rejection(symbol=symbol, score=candidate.get("score"), options_score=options_result.get("options_score"), reason=f"RISK_MANAGER:{reason}", features={"candidate": candidate})
+                    record_cycle(rejections=1)
+                    continue
+
                 write_heartbeat("creating_trade", symbol=symbol, capital=capital, strategy=candidate.get("strategy", "CORE"))
                 try:
                     trade = create_trade(
                         symbol, candidate["close"], candidate["signal"], capital,
                         resolved_contract=contract_probe,
                         learning_candidate=candidate,
+                        trade_id=trade_id,
                     )
                 except Exception as exc:
                     print(f"TRADE CREATION FAILED for {symbol}: {exc}")
@@ -449,21 +462,8 @@ def main():
                     record_cycle(rejections=1)
                     continue
 
-                import uuid
-                trade_id = trade.get("trade_id") or str(uuid.uuid4())
-                lineage_id = trade.get("lineage_id") or trade_id
                 trade["trade_id"] = trade_id
                 trade["lineage_id"] = lineage_id
-
-                allowed, reason = TRADING_RISK_MANAGER.can_open_trade(
-                    trade_id, lineage_id=lineage_id
-                )
-                if not allowed:
-                    print(f"RISK MANAGER BLOCKED: {reason}")
-                    record_rejection(symbol=symbol, score=candidate.get("score"), options_score=options_result.get("options_score"), reason=f"RISK_MANAGER:{reason}", features={"candidate": candidate, "trade": trade})
-                    record_cycle(rejections=1)
-                    continue
-
                 TRADING_RISK_MANAGER.register_entry(
                     trade_id, float(trade["entry"]), lineage_id=lineage_id
                 )
