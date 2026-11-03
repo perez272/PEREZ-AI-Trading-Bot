@@ -167,6 +167,12 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     underlying_aligned, underlying_reason = _underlying_direction_check(
         option_type, underlying_move_5m_pct
     )
+    gate.setdefault("stages", {})["underlying_direction"] = {
+        "passed": underlying_aligned,
+        "move_5m_pct": underlying_move_5m_pct,
+        "option_type": option_type,
+        "reason": underlying_reason,
+    }
     if not underlying_aligned:
         gate["eligible"] = False
         gate["reasons"].append(underlying_reason)
@@ -174,7 +180,8 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "eligible": bool(gate["eligible"]), "terminal": True,
         "reason": ", ".join(gate["reasons"]) or "SURGE_GATE_PASSED", "reasons": gate["reasons"],
-        "gate": gate, "contract": contract, "quote": quote, "ltp": ltp, "evidence": evidence,
+        "gate": gate, "stages": gate.get("stages", {}),
+        "contract": contract, "quote": quote, "ltp": ltp, "evidence": evidence,
         "underlying_move_5m_pct": underlying_move_5m_pct,
     }
 
