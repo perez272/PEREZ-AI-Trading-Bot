@@ -123,3 +123,21 @@ def test_interval_gap_out_of_range_fails_closed(tmp_path):
 def test_invalid_configuration_fails_fast(tmp_path):
     with pytest.raises(ValueError):
         ShortCoveringSnapshotCollector(FakeClient(), tmp_path / "x.db", oi_drop_threshold=5)
+
+
+
+def test_does_not_reuse_previous_trading_session_snapshots(tmp_path):
+    client, clock = FakeClient(), Clock()
+    collector = ShortCoveringSnapshotCollector(client, tmp_path / "obs.sqlite3", clock=clock)
+    for index in range(7):
+        client.chain = [chain_row(volume=1000 + index * 100)]
+        collector.capture("NIFTY")
+        clock.advance(60)
+    # Move to the next India trading date. Old-session observations must not
+    # be used as the new day's OI, price, or volume baseline.
+    clock.advance(15 * 60 * 60)
+    client.chain = [chain_row(ltp=125, oi=800, volume=1900)]
+    result = collector.capture("NIFTY")
+    assert result["signals"] == []
+    assert result["contracts_evaluated"] == 0
+    assert all(item["reason"] == "INSUFFICIENT_SNAPSHOT_HISTORY" for item in result["analysis"])
