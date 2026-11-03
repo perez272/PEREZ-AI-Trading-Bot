@@ -107,19 +107,25 @@ jobs:
             exit 1
           fi
 
-          if grep -RniE \
-            'LIVE ORDERS.*(TRUE|ENABLED)' \
-            main.py src 2>/dev/null
-          then
-            echo "ERROR: live trading flag appears enabled"
-            exit 1
-          fi
+          # Do not infer live-order state from log/status strings in source.
+          # Verify the actual systemd-managed process environment instead.
+          PID="$(systemctl show perez-ai.service -p MainPID --value)"
+          test "${PID:-0}" -gt 0
+          test -r "/proc/$PID/environ"
 
-          grep -RniE \
-            'LIVE ORDERS.*(FALSE|DISABLED)|PAPER.*(TRUE|ENABLED)' \
-            main.py src \
-            --exclude-dir=__pycache__ \
-            | head -20 || true
+          PROCESS_ENV="$(tr '\\0' '\\n' < "/proc/$PID/environ")"
+          PAPER_MODE_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^PAPER_MODE=//p' | tail -1)"
+          ORDERS_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^ORDERS_ENABLED=//p' | tail -1)"
+          CAPITAL_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^PAPER_CAPITAL=//p' | tail -1)"
+
+          echo "SERVICE_PID=$PID"
+          echo "PAPER_MODE=$PAPER_MODE_VALUE"
+          echo "ORDERS_ENABLED=$ORDERS_VALUE"
+          echo "PAPER_CAPITAL=$CAPITAL_VALUE"
+
+          test "$PAPER_MODE_VALUE" = "true"
+          test "$ORDERS_VALUE" = "false"
+          test "$CAPITAL_VALUE" = "5000"
 
           echo "PAPER_SAFETY_CHECK_COMPLETE"
 
