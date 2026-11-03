@@ -84,7 +84,7 @@ def test_resolve_uses_rbi_and_matching_index_dividend(tmp_path, symbol):
     r = resolver(tmp_path)
     result = r.resolve(symbol, date(2026, 12, 15), now=NOW)
     assert result.underlying == symbol
-    assert result.risk_free_rate == pytest.approx(0.055)
+    assert result.risk_free_rate == pytest.approx(0.0525)
     assert result.dividend_yield > 0
     assert result.risk_free_source == "RBI_LAST_AUCTION_TBILL_PROXY"
     assert result.risk_free_tenor_days == 91  # expiry is 42 days away
@@ -163,7 +163,7 @@ def test_calculation_bridge_attaches_input_provenance(tmp_path):
     expiry = date(2026, 12, 3)
     years = time_to_expiry_years(expiry, NOW)
     theoretical = black_scholes_greeks(
-        25000, 25000, years, 0.055, 0.0149, 0.20, "CE"
+        25000, 25000, years, 0.0525, 0.0149, 0.20, "CE"
     )["price"]
     chain = pd.DataFrame([{
         "spot": 25000, "strike": 25000, "expiry": expiry,
@@ -177,7 +177,7 @@ def test_calculation_bridge_attaches_input_provenance(tmp_path):
     assert output.loc[0, "bs_status"] == "OK"
     assert output.loc[0, "bs_risk_free_source"] == "RBI_LAST_AUCTION_TBILL_PROXY"
     assert output.loc[0, "bs_dividend_source"] == "NSE_INDEX_PERFORMANCE"
-    assert output.loc[0, "bs_risk_free_rate"] == pytest.approx(0.055)
+    assert output.loc[0, "bs_risk_free_rate"] == pytest.approx(0.0525)
 
 
 def test_calculation_bridge_skips_when_inputs_unavailable(tmp_path):
