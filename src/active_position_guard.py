@@ -10,6 +10,9 @@ DB = "data/runtime/active_positions.sqlite3"
 def _db():
     Path(DB).parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB, timeout=10)
+    # Serialize schema migration as well as claims; otherwise concurrent
+    # workers can both observe a missing column and race the ALTER TABLE.
+    c.execute("BEGIN IMMEDIATE")
     c.execute("""
         CREATE TABLE IF NOT EXISTS active_positions (
             contract TEXT PRIMARY KEY,
@@ -26,7 +29,6 @@ def _db():
             SET claimed_at=opened_at
             WHERE claimed_at IS NULL
         """)
-        c.commit()
     if "status" not in cols:
         c.execute("ALTER TABLE active_positions ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
     if "trade_payload" not in cols:
