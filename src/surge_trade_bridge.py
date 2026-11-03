@@ -98,6 +98,17 @@ def _underlying_move_5m_pct(client: Any, symbol: str) -> float | None:
         return None
 
 
+def _underlying_direction_check(option_type: str, move_5m_pct: float | None) -> tuple[bool, str]:
+    """Fail closed unless a fresh underlying move confirms option direction."""
+    if move_5m_pct is None:
+        return False, "UNDERLYING_CONFIRMATION_UNAVAILABLE"
+    if option_type == "CE" and move_5m_pct > 0:
+        return True, "UNDERLYING_CONFIRMED"
+    if option_type == "PE" and move_5m_pct < 0:
+        return True, "UNDERLYING_CONFIRMED"
+    return False, "UNDERLYING_NOT_CONFIRMED"
+
+
 def _release_event(event_id: int) -> None:
     try:
         with sqlite3.connect(TIER1_DB, timeout=5) as db:
@@ -153,16 +164,13 @@ def evaluate_pending_surge(event: dict[str, Any]) -> dict[str, Any]:
     )
     gate = validate_surge(evidence, OPTION_MAX_PREMIUM)
     underlying_move_5m_pct = _underlying_move_5m_pct(client, symbol)
-    if underlying_move_5m_pct is not None:
-        aligned = (
-            option_type == "CE" and underlying_move_5m_pct > 0
-        ) or (
-            option_type == "PE" and underlying_move_5m_pct < 0
-        )
-        if not aligned:
-            gate["eligible"] = False
-            gate["reasons"].append("UNDERLYING_NOT_CONFIRMED")
-            gate["decision"] = "NO TRADE"
+    underlying_aligned, underlying_reason = _underlying_direction_check(
+        option_type, underlying_move_5m_pct
+    )
+    if not underlying_aligned:
+        gate["eligible"] = False
+        gate["reasons"].append(underlying_reason)
+        gate["decision"] = "NO TRADE"
     return {
         "eligible": bool(gate["eligible"]), "terminal": True,
         "reason": ", ".join(gate["reasons"]) or "SURGE_GATE_PASSED", "reasons": gate["reasons"],
