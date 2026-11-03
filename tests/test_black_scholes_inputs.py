@@ -152,3 +152,44 @@ def test_unknown_index_and_expired_date_rejected(tmp_path):
         r.resolve("SENSEX", "2026-12-03", now=NOW)
     with pytest.raises(ValueError, match="EXPIRY_NOT_IN_FUTURE"):
         r.resolve("NIFTY", "2026-11-02", now=NOW)
+
+
+
+def test_calculation_bridge_attaches_input_provenance(tmp_path):
+    import pandas as pd
+    from src.black_scholes_engine import black_scholes_greeks, time_to_expiry_years
+
+    expiry = date(2026, 12, 3)
+    years = time_to_expiry_years(expiry, NOW)
+    theoretical = black_scholes_greeks(
+        25000, 25000, years, 0.055, 0.0149, 0.20, "CE"
+    )["price"]
+    chain = pd.DataFrame([{
+        "spot": 25000, "strike": 25000, "expiry": expiry,
+        "option_type": "CE", "bid": theoretical - 0.05,
+        "ask": theoretical + 0.05,
+    }])
+    output = calculate_chain_greeks_with_resolved_inputs(
+        chain, underlying="NIFTY", expiry=expiry,
+        resolver=resolver(tmp_path), now=NOW,
+    )
+    assert output.loc[0, "bs_status"] == "OK"
+    assert output.loc[0, "bs_risk_free_source"] == "RBI_LAST_AUCTION_TBILL_PROXY"
+    assert output.loc[0, "bs_dividend_source"] == "NSE_INDEX_PERFORMANCE"
+    assert output.loc[0, "bs_risk_free_rate"] == pytest.approx(0.055)
+
+
+def test_calculation_bridge_skips_when_inputs_unavailable(tmp_path):
+    import pandas as pd
+
+    class NoSources:
+        def resolve(self, *args, **kwargs):
+            raise ValueError("SKIPPED_INPUT_UNAVAILABLE")
+
+    chain = pd.DataFrame([{"spot": 25000, "strike": 25000}])
+    output = calculate_chain_greeks_with_resolved_inputs(
+        chain, underlying="NIFTY", expiry="2026-12-03",
+        resolver=NoSources(), now=NOW,
+    )
+    assert output.loc[0, "bs_status"] == "SKIPPED_INPUT_UNAVAILABLE"
+    assert "SKIPPED_INPUT_UNAVAILABLE" in output.loc[0, "bs_error"]
