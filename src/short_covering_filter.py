@@ -86,11 +86,20 @@ class ShortCoveringFilter:
         )
 
         # Preserve optional previous OI when it is available in the current feed.
-        prev_col = next(
+        snapshot_prev_col = next(
+            (c for c in ("OI_Prev_Snapshot", "prev_oi_snapshot") if c in current.columns),
+            None,
+        )
+        session_prev_col = next(
             (c for c in ("Prev_OI", "OI_Prev", "prev_oi") if c in current.columns),
             None,
         )
-        has_previous_oi_column = prev_col is not None
+        prev_col = snapshot_prev_col or session_prev_col
+        previous_oi_kind = (
+            "previous_snapshot" if snapshot_prev_col
+            else "previous_session" if session_prev_col
+            else "historical_ma"
+        )
         if prev_col:
             current = current.rename(columns={prev_col: "OI_prev"})
 
@@ -121,10 +130,14 @@ class ShortCoveringFilter:
             merged["OI_prev"] = np.nan
             valid_prev = pd.Series(False, index=merged.index)
 
-        # If the feed supplies previous OI but its value is invalid, fail closed.
-        # Do not silently replace a broken intraday reference with a historical MA.
-        if has_previous_oi_column:
+        # Upstox prev_oi / Previous OI is a previous-session reference,
+        # not a prior intraday poll. Only explicitly named snapshot fields
+        # can support an intraday short-covering signal.
+        if previous_oi_kind == "previous_snapshot":
             merged["OI_Reference"] = np.where(valid_prev, "previous_snapshot", "invalid_previous_oi")
+            merged["OI_Reference_Value"] = merged["OI_prev"]
+        elif previous_oi_kind == "previous_session":
+            merged["OI_Reference"] = np.where(valid_prev, "previous_session_oi", "invalid_previous_oi")
             merged["OI_Reference_Value"] = merged["OI_prev"]
         else:
             merged["OI_Reference"] = "historical_ma"
@@ -196,7 +209,9 @@ class ShortCoveringFilter:
             "INTRADAY_OI_REDUCTION_EVIDENCE",
             np.where(
                 merged["Baseline_Candidate"],
-                "HISTORICAL_OI_BASELINE_DEVIATION_ONLY",
+                "PREVIOUS_SESSION_OI_BASELINE_ONLY"
+                if merged["OI_Reference"].eq("previous_session_oi").iloc[0]
+                else "HISTORICAL_OI_BASELINE_DEVIATION_ONLY",
                 "NOT_CONFIRMED",
             ),
         )
