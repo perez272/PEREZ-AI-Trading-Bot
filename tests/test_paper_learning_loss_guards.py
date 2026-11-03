@@ -43,7 +43,7 @@ def test_daily_summary_counts_losses_by_ist_market_date(tmp_path):
     path = tmp_path / "trades.csv"
     path.write_text(
         "closed_at,pnl\n"
-        "2026-11-02T13:05:00+00:00,-120\n"
+        "2026-11-03T00:05:00+00:00,-120\n"
         "2026-11-03T04:30:00+00:00,200\n"
         "2026-11-03T05:00:00+00:00,-30\n"
         "2026-11-02T17:00:00+00:00,-999\n",
