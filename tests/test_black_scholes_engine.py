@@ -125,3 +125,22 @@ def test_broker_comparison_requires_explicit_iv_unit():
         0.20 - compared.loc[0, "bs_iv"]
     )
     assert "delta_broker_minus_model" in compared.columns
+
+
+@pytest.mark.parametrize("kind,sign", [("CE", 1), ("PE", -1)])
+def test_rho_has_expected_sign_and_percentage_point_units(kind, sign):
+    greeks = black_scholes_greeks(25000, 25000, 0.1, 0.06, 0.01, 0.2, kind)
+    assert greeks["rho"] * sign > 0
+    bumped = black_scholes_greeks(25000, 25000, 0.1, 0.0601, 0.01, 0.2, kind)
+    assert (bumped["price"] - greeks["price"]) / 0.01 == pytest.approx(greeks["rho"], rel=0.02)
+
+
+def test_chain_includes_model_rho():
+    expiry = datetime(2026, 11, 30, 15, 30, tzinfo=IST)
+    years = time_to_expiry_years(expiry, NOW)
+    price = black_scholes_greeks(25000, 25000, years, 0.06, 0.01, 0.2, "CE")["price"]
+    chain = pd.DataFrame([{"spot": 25000, "strike": 25000, "expiry": expiry,
+                           "option_type": "CE", "bid": price - 0.05, "ask": price + 0.05}])
+    result = calculate_chain_greeks(chain, risk_free_rate=0.06, dividend_yield=0.01, now=NOW)
+    assert result.loc[0, "bs_status"] == "OK"
+    assert result.loc[0, "bs_rho"] > 0
