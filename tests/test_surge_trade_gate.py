@@ -71,3 +71,25 @@ def test_negative_1m_momentum_rejected():
 def test_positive_1m_momentum_passes():
     result = validate_surge(evidence(move_1m_pct=0.1), 150.0)
     assert result["eligible"]
+
+
+
+def test_selector_exposes_independent_evidence_stages():
+    result = validate_surge(evidence(), 150.0)
+    assert result["score_role"] == "SURGE_INTENSITY_RANKING_NOT_WIN_PROBABILITY"
+    assert result["stages"]["contract_and_data"]["passed"] is True
+    assert result["stages"]["option_momentum"]["passed"] is True
+    assert result["stages"]["execution_quality"]["passed"] is True
+    assert result["stages"]["continuation"]["confirmed"] is True
+    assert result["stages"]["portfolio_risk"]["status"].startswith("PENDING_")
+
+
+def test_high_legacy_score_cannot_bypass_failed_continuation():
+    result = validate_surge(
+        evidence(move_1m_pct=1.0, move_3m_pct=1.0, move_5m_pct=1.0,
+                 acceleration=1.0, detector_score=85.0, volume_ratio=2.0),
+        150.0,
+    )
+    assert result["eligible"] is False
+    assert "SURGE_CONTINUATION_NOT_CONFIRMED" in result["reasons"]
+    assert result["stages"]["continuation"]["confirmed"] is False
