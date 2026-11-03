@@ -38,12 +38,21 @@ def daily_summary(path="data/trades.csv", current=None):
     rows = []
     with output.open(newline="", encoding="utf-8") as file:
         for row in csv.DictReader(file):
-            if row.get("closed_at", "").startswith(today):
-                try:
-                    row["_pnl"] = float(row.get("pnl", 0) or 0)
-                except (TypeError, ValueError):
-                    row["_pnl"] = 0.0
-                rows.append(row)
+            raw_closed_at = str(row.get("closed_at", "") or "").strip()
+            if not raw_closed_at:
+                continue
+            try:
+                closed_at = datetime.fromisoformat(raw_closed_at.replace("Z", "+00:00"))
+                # New records are UTC-aware. Legacy naive timestamps are
+                # interpreted as IST to preserve their historical market date.
+                if closed_at.tzinfo is None:
+                    closed_at = closed_at.replace(tzinfo=IST)
+                if closed_at.astimezone(IST).date().isoformat() != today:
+                    continue
+                row["_pnl"] = float(row.get("pnl", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            rows.append(row)
 
     summary["closed_trades"] = len(rows)
     summary["pnl"] = round(sum(row["_pnl"] for row in rows), 2)
@@ -84,10 +93,10 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
-    # Entry lock is based on the current losing streak, not total losses.
-    # A profitable close resets the streak in daily_summary().
-    if summary["consecutive_losses"] >= 3:
-        return False, "THREE_CONSECUTIVE_LOSSES_STOP", summary
+    # Count every losing close for the IST market day. A winning trade
+    # between losses does not reset this daily protection.
+    if summary["losing_trades"] >= 2:
+        return False, "TWO_LOSING_TRADES_STOP", summary
 
     dynamic_limit = abs(float(capital)) * MAX_DAILY_DRAWDOWN_PCT / 100.0
     daily_loss_limit = dynamic_limit if max_daily_loss is None else min(abs(float(max_daily_loss)), dynamic_limit)
