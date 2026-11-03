@@ -59,7 +59,9 @@ def test_closed_claim_replays_risk_result_before_release(monkeypatch):
             calls.append((identity, pnl, stop_loss, result_id))
             return True
     from src import trading_risk_manager
+    from src import trade_logger
     monkeypatch.setattr(trading_risk_manager, "TradingRiskManager", FakeRiskManager)
+    monkeypatch.setattr(trade_logger, "log_closed_trade", lambda *args, **kwargs: {})
     monkeypatch.setattr(recovery, "active_contracts", lambda: [row(p)])
     monkeypatch.setattr(recovery, "_events", lambda: {p["trade_id"]:[close]})
     monkeypatch.setattr(recovery, "release_contract",
