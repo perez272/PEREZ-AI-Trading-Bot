@@ -343,7 +343,7 @@ jobs:
           set -euo pipefail
 
           PID="$(systemctl show perez-ai.service -p MainPID --value)"
-          test "\${PID:-0}" -gt 0
+          test "${PID:-0}" -gt 0
 
           venv/bin/python - "$PID" <<'PY'
           import sys
