@@ -29,13 +29,12 @@ def test_detects_intraday_short_covering_evidence():
     current["OI_Prev_Snapshot"] = [1000, 900, 1200]
     result = ShortCoveringFilter().analyze_option_chain(current, historical)
     row = result.loc[result["Strike"].eq(23000)].iloc[0]
-    assert not bool(row["Signal"])
-    assert bool(row["Baseline_Candidate"])
-    assert row["OI_Reference"] == "previous_session_oi"
+    assert bool(row["Signal"])
+    assert row["OI_Reference"] == "previous_snapshot"
     assert row["OI_Pct_Change"] == pytest.approx(-22.0)
     assert row["Price_Pct_Change"] == pytest.approx(50.0)
     assert row["Volume_Ratio"] == pytest.approx(3.0)
-    assert row["Signal_Interpretation"] == "PREVIOUS_SESSION_OI_BASELINE_ONLY"
+    assert row["Signal_Interpretation"] == "INTRADAY_OI_REDUCTION_EVIDENCE"
 
 
 def test_historical_oi_fallback_is_explicitly_labelled():
