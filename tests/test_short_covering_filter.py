@@ -39,7 +39,8 @@ def test_historical_oi_fallback_is_explicitly_labelled():
     current, historical = frames(prev_oi=False)
     result = ShortCoveringFilter().analyze_option_chain(current, historical)
     row = result.loc[result["Strike"].eq(23000)].iloc[0]
-    assert bool(row["Signal"])
+    assert not bool(row["Signal"])
+    assert bool(row["Baseline_Candidate"])
     assert row["OI_Reference"] == "historical_ma"
     assert row["Signal_Interpretation"] == "HISTORICAL_OI_BASELINE_DEVIATION_ONLY"
 
@@ -79,3 +80,31 @@ def test_missing_historical_contract_does_not_signal():
 def test_invalid_configuration_fails_fast():
     with pytest.raises(ValueError):
         ShortCoveringFilter(oi_drop_threshold=10)
+
+
+
+def test_invalid_previous_oi_does_not_fall_back_to_historical_ma():
+    current, historical = frames()
+    current.loc[0, "Prev_OI"] = 0
+    result = ShortCoveringFilter().analyze_option_chain(current, historical)
+    row = result.loc[result["Strike"].eq(23000)].iloc[0]
+    assert not bool(row["Signal"])
+    assert row["OI_Reference"] == "invalid_previous_oi"
+    assert row["Data_Quality"] == "INVALID_OR_MISSING_BASELINE"
+
+
+def test_negative_current_oi_or_volume_fails_closed():
+    current, historical = frames()
+    current.loc[0, "OI"] = -10
+    result = ShortCoveringFilter().analyze_option_chain(current, historical)
+    row = result.loc[result["Strike"].eq(23000)].iloc[0]
+    assert not bool(row["Signal"])
+    assert row["Data_Quality"] == "INVALID_OR_MISSING_BASELINE"
+
+
+def test_strike_numeric_representation_matches():
+    current, historical = frames()
+    current["Strike"] = current["Strike"].astype(str)
+    result = ShortCoveringFilter().analyze_option_chain(current, historical)
+    assert len(result) == 3
+    assert bool(result.loc[result["Strike"].eq(23000), "Signal"].iloc[0])
