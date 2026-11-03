@@ -252,11 +252,13 @@ def create_trade(symbol, spot, signal, capital, resolved_contract=None, learning
     if not claimed:
         return {"status": "NO TRADE", "reason": f"ACTIVE POSITION GUARD: {reason}"}
     if not defer_open_event:
+        # Persist the complete recoverable payload as ACTIVE before writing
+        # lifecycle telemetry. A crash between these operations is recoverable.
+        from src.active_position_guard import mark_claim_active
+        mark_claim_active(trade["contract"], trade["trade_id"], trade)
         record_event(
             trade, "OPEN", ts=trade["opened_at"], entry=entry, quantity=quantity,
             investment=investment, stop_loss=stop_loss, target1=target1, target2=target2,
             detected_at=trade.get("detected_at") or None,
         )
-        from src.active_position_guard import mark_claim_active
-        mark_claim_active(trade["contract"], trade["trade_id"], trade)
     return trade

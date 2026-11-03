@@ -51,7 +51,8 @@ def test_close_is_idempotent(tmp_path, monkeypatch):
 def test_closed_claim_replays_risk_result_before_release(monkeypatch):
     p = payload()
     close = {"event":"CLOSE","trade_id":p["trade_id"],"lineage_id":p["lineage_id"],
-             "pnl":-22.5,"exit_reason":"STOP_LOSS"}
+             "ts_utc":"2026-11-03T04:00:00+00:00","exit_price":99.1,
+             "pnl":-22.5,"pnl_percent":-0.9,"exit_reason":"STOP_LOSS"}
     released = []
     calls = []
     class FakeRiskManager:
@@ -59,11 +60,38 @@ def test_closed_claim_replays_risk_result_before_release(monkeypatch):
             calls.append((identity, pnl, stop_loss, result_id))
             return True
     from src import trading_risk_manager
+    from src import trade_logger
     monkeypatch.setattr(trading_risk_manager, "TradingRiskManager", FakeRiskManager)
+    monkeypatch.setattr(trade_logger, "log_closed_trade", lambda *args, **kwargs: {})
     monkeypatch.setattr(recovery, "active_contracts", lambda: [row(p)])
     monkeypatch.setattr(recovery, "_events", lambda: {p["trade_id"]:[close]})
     monkeypatch.setattr(recovery, "release_contract",
                         lambda contract, trade_id: released.append((contract, trade_id)))
     assert recovery.recover_paper_positions() == 0
     assert calls == [(p["lineage_id"], -22.5, True, p["trade_id"])]
+    assert released == [(p["contract"], p["trade_id"])]
+
+def test_closed_claim_replays_daily_csv_before_release(monkeypatch):
+    p = payload()
+    close = {"event":"CLOSE","trade_id":p["trade_id"],"lineage_id":p["lineage_id"],
+             "ts_utc":"2026-11-03T04:00:00+00:00","exit_price":99.0,
+             "pnl":-25.0,"pnl_percent":-1.0,"exit_reason":"STOP_LOSS"}
+    released = []
+    logged = []
+    class FakeRiskManager:
+        def record_trade_result(self, identity, pnl, *, stop_loss, result_id):
+            return True
+    from src import trading_risk_manager
+    from src import trade_logger
+    monkeypatch.setattr(trading_risk_manager, "TradingRiskManager", FakeRiskManager)
+    monkeypatch.setattr(trade_logger, "log_closed_trade",
+                        lambda trade, result, path: logged.append((trade, result, path)))
+    monkeypatch.setattr(recovery, "active_contracts", lambda: [row(p)])
+    monkeypatch.setattr(recovery, "_events", lambda: {p["trade_id"]:[close]})
+    monkeypatch.setattr(recovery, "release_contract",
+                        lambda contract, trade_id: released.append((contract, trade_id)))
+    assert recovery.recover_paper_positions() == 0
+    assert len(logged) == 1
+    assert logged[0][1]["pnl"] == -25.0
+    assert logged[0][1]["time"] == close["ts_utc"]
     assert released == [(p["contract"], p["trade_id"])]

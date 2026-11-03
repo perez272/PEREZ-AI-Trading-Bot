@@ -165,17 +165,57 @@ def recover_paper_positions():
             # CLOSE is written before risk accounting. Replay by result_id so a
             # crash in that window cannot lose the daily/lineage result.
             try:
+                # CLOSE is durable before CSV/risk accounting. Replay both
+                # idempotently so a crash cannot hide a closed loss from the
+                # daily IST entry gate.
+                payload = {}
+                if len(row) > 5 and row[5]:
+                    value = json.loads(row[5])
+                    if isinstance(value, dict):
+                        payload = value
+                pnl = float(close_event.get("pnl") or 0.0)
+                exit_price = float(close_event.get("exit_price") or 0.0)
+                closed_at = str(close_event.get("ts_utc") or "")
+                if not all((payload.get("entry"), exit_price, closed_at,
+                            payload.get("contract") or row[0])):
+                    raise ValueError("CLOSE event or persisted trade payload is incomplete")
+                from src.trade_logger import log_closed_trade
+                closed_trade = {
+                    "trade_id": trade_id,
+                    "symbol": payload.get("symbol") or row[1],
+                    "signal": payload.get("signal") or "",
+                    "contract": payload.get("contract") or row[0],
+                    "exchange": payload.get("exchange") or "",
+                    "lots": payload.get("lots", ""),
+                    "investment": payload.get("investment", ""),
+                }
+                closed_result = {
+                    "time": closed_at,
+                    "entry": float(payload["entry"]),
+                    "exit_price": exit_price,
+                    "current": exit_price,
+                    "original_quantity": int(payload.get("original_quantity") or payload.get("quantity") or 0),
+                    "quantity": 0,
+                    "remaining_quantity": 0,
+                    "realized_pnl": pnl,
+                    "unrealized_pnl": 0.0,
+                    "pnl": pnl,
+                    "pnl_percent": float(close_event.get("pnl_percent") or 0.0),
+                    "exit_reason": str(close_event.get("exit_reason") or "RECOVERED_CLOSE"),
+                }
+                log_closed_trade(closed_trade, closed_result, "data/trades.csv")
+
                 from src.trading_risk_manager import TradingRiskManager
                 risk_manager = TradingRiskManager()
                 risk_manager.record_trade_result(
                     str(close_event.get("lineage_id") or trade_id),
-                    float(close_event.get("pnl") or 0.0),
+                    pnl,
                     stop_loss=str(close_event.get("exit_reason") or "").upper()
                                in {"STOP_LOSS", "TRAILING_STOP"},
                     result_id=trade_id,
                 )
             except Exception as exc:
-                print(f"[RECOVERY] CLOSE risk reconciliation failed; claim retained: {trade_id}: {exc}")
+                print(f"[RECOVERY] CLOSE reconciliation failed; claim retained: {trade_id}: {exc}")
                 continue
             release_contract(row[0], trade_id)
             print(f"[RECOVERY] reconciled CLOSE and released claim for {trade_id}")
