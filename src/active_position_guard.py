@@ -1,11 +1,13 @@
 from __future__ import annotations
 import sqlite3
 import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 DB = "data/runtime/active_positions.sqlite3"
 
 def _db():
+    Path(DB).parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB, timeout=10)
     c.execute("""
         CREATE TABLE IF NOT EXISTS active_positions (
@@ -40,7 +42,44 @@ def claim_contract(contract, symbol, trade_id, trade_payload=None):
         db.execute("BEGIN IMMEDIATE")
         try:
             now = datetime.now(timezone.utc).isoformat()
-            payload = json.dumps(trade_payload or {}, separators=(",", ":"), default=str)
+            payload_data = dict(trade_payload or {})
+
+            # Serialize every worker's entry decision in this SQLite transaction.
+            from src.risk_manager import daily_summary
+            from src.upgrade_config import MAX_DAILY_DRAWDOWN_PCT
+
+            capital = float(payload_data.get("capital_available") or 0)
+            new_risk = float(payload_data.get("position_risk_inr") or 0)
+            daily_limit = capital * float(MAX_DAILY_DRAWDOWN_PCT) / 100.0
+            if capital <= 0 or new_risk <= 0 or daily_limit <= 0:
+                db.rollback()
+                return False, "RISK_RESERVATION_INVALID"
+
+            summary = daily_summary()
+            remaining_budget = round(daily_limit + float(summary.get("pnl") or 0), 2)
+            if remaining_budget <= 0:
+                db.rollback()
+                return False, "DAILY_LOSS_LIMIT_REACHED"
+
+            reserved = 0.0
+            for (raw_payload,) in db.execute(
+                "SELECT trade_payload FROM active_positions"
+            ).fetchall():
+                try:
+                    existing = json.loads(raw_payload or "{}")
+                    reserved += max(0.0, float(existing.get("position_risk_inr") or 0))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    db.rollback()
+                    return False, "EXISTING_RISK_RESERVATION_UNREADABLE"
+
+            if reserved + new_risk > remaining_budget + 1e-9:
+                db.rollback()
+                return False, (
+                    f"DAILY_RISK_BUDGET_EXCEEDED: reserved={reserved:.2f} "
+                    f"new={new_risk:.2f} remaining={remaining_budget:.2f}"
+                )
+
+            payload = json.dumps(payload_data, separators=(",", ":"), default=str)
             db.execute(
                 """INSERT INTO active_positions
                    (contract,symbol,trade_id,opened_at,claimed_at,status,trade_payload)
