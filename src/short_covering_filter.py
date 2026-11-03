@@ -61,6 +61,9 @@ class ShortCoveringFilter:
         out = frame.copy()
         if out[KEYS].isna().any().any():
             raise ValueError(f"{label} contains missing Strike/Type keys")
+        out["Strike"] = pd.to_numeric(out["Strike"], errors="coerce")
+        if out["Strike"].isna().any() or not np.isfinite(out["Strike"]).all():
+            raise ValueError(f"{label} contains invalid Strike values")
         out["Type"] = out["Type"].astype(str).str.upper().str.strip()
         if not out["Type"].isin(["CE", "PE"]).all():
             raise ValueError(f"{label} Type must contain only CE or PE")
@@ -87,6 +90,7 @@ class ShortCoveringFilter:
             (c for c in ("Prev_OI", "OI_Prev", "prev_oi") if c in current.columns),
             None,
         )
+        has_previous_oi_column = prev_col is not None
         if prev_col:
             current = current.rename(columns={prev_col: "OI_prev"})
 
@@ -117,10 +121,14 @@ class ShortCoveringFilter:
             merged["OI_prev"] = np.nan
             valid_prev = pd.Series(False, index=merged.index)
 
-        merged["OI_Reference"] = np.where(valid_prev, "previous_snapshot", "historical_ma")
-        merged["OI_Reference_Value"] = np.where(
-            valid_prev, merged["OI_prev"], merged["OI_ma"]
-        )
+        # If the feed supplies previous OI but its value is invalid, fail closed.
+        # Do not silently replace a broken intraday reference with a historical MA.
+        if has_previous_oi_column:
+            merged["OI_Reference"] = np.where(valid_prev, "previous_snapshot", "invalid_previous_oi")
+            merged["OI_Reference_Value"] = merged["OI_prev"]
+        else:
+            merged["OI_Reference"] = "historical_ma"
+            merged["OI_Reference_Value"] = merged["OI_ma"]
 
         def pct_change(now: pd.Series, base: pd.Series) -> pd.Series:
             valid = now.notna() & base.notna() & now.ge(0) & base.gt(0)
@@ -155,33 +163,42 @@ class ShortCoveringFilter:
             | merged["LTP_ma"].isna()
             | merged["Volume_ma"].isna()
             | merged["OI_Reference_Value"].le(0)
+            | merged["OI_curr"].lt(0)
+            | merged["Volume_curr"].lt(0)
             | merged["LTP_ma"].le(0)
             | merged["Volume_ma"].le(0)
             | merged["LTP_curr"].le(0)
         )
         merged.loc[missing_or_invalid & merged["Data_Quality"].eq("OK"), "Data_Quality"] = "INVALID_OR_MISSING_BASELINE"
 
-        conditions = (
+        # A historical moving-average deviation is not proof of intraday OI
+        # reduction. Keep it visible as a candidate, but only emit Signal=True
+        # when a valid previous-snapshot OI reference exists.
+        common_conditions = (
             merged["Data_Quality"].eq("OK")
             & merged["OI_Pct_Change"].le(self.oi_drop_threshold)
             & merged["Price_Pct_Change"].ge(self.price_spike_threshold)
             & merged["Volume_Ratio"].ge(self.volume_multiplier)
         )
-        merged["Signal"] = conditions.fillna(False).astype(bool)
+        merged["Baseline_Candidate"] = common_conditions.fillna(False).astype(bool)
+        merged["Signal"] = (
+            merged["Baseline_Candidate"]
+            & merged["OI_Reference"].eq("previous_snapshot")
+        )
 
         merged["Signal_Reason"] = np.select(
-            [merged["Signal"]],
-            ["PRICE_UP_OI_DOWN_VOLUME_EXPANSION"],
+            [merged["Signal"], merged["Baseline_Candidate"]],
+            ["PRICE_UP_INTRADAY_OI_DOWN_VOLUME_EXPANSION", "HISTORICAL_BASELINE_CANDIDATE_ONLY"],
             default="NO_SIGNAL",
         )
         merged["Signal_Interpretation"] = np.where(
             merged["Signal"],
+            "INTRADAY_OI_REDUCTION_EVIDENCE",
             np.where(
-                merged["OI_Reference"].eq("previous_snapshot"),
-                "INTRADAY_OI_REDUCTION_EVIDENCE",
+                merged["Baseline_Candidate"],
                 "HISTORICAL_OI_BASELINE_DEVIATION_ONLY",
+                "NOT_CONFIRMED",
             ),
-            "NOT_CONFIRMED",
         )
 
         logger.info(
