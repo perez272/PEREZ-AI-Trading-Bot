@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import requests
@@ -438,7 +438,6 @@ def calculate_chain_greeks_with_resolved_inputs(
     auditability. It does not feed results into strategy or execution.
     """
     import math
-    import pandas as pd
     from src.black_scholes_engine import calculate_chain_greeks
 
     try:
