@@ -1,12 +1,18 @@
 from __future__ import annotations
 import sqlite3
 import json
+import math
+from pathlib import Path
 from datetime import datetime, timezone
 
 DB = "data/runtime/active_positions.sqlite3"
 
 def _db():
+    Path(DB).parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB, timeout=10)
+    # Serialize schema migration as well as claims; otherwise concurrent
+    # workers can both observe a missing column and race the ALTER TABLE.
+    c.execute("BEGIN IMMEDIATE")
     c.execute("""
         CREATE TABLE IF NOT EXISTS active_positions (
             contract TEXT PRIMARY KEY,
@@ -23,7 +29,6 @@ def _db():
             SET claimed_at=opened_at
             WHERE claimed_at IS NULL
         """)
-        c.commit()
     if "status" not in cols:
         c.execute("ALTER TABLE active_positions ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
     if "trade_payload" not in cols:
@@ -40,7 +45,47 @@ def claim_contract(contract, symbol, trade_id, trade_payload=None):
         db.execute("BEGIN IMMEDIATE")
         try:
             now = datetime.now(timezone.utc).isoformat()
-            payload = json.dumps(trade_payload or {}, separators=(",", ":"), default=str)
+            payload_data = dict(trade_payload or {})
+
+            # Serialize every worker's entry decision in this SQLite transaction.
+            from src.risk_manager import daily_summary
+            from src.upgrade_config import MAX_DAILY_DRAWDOWN_PCT
+
+            capital = float(payload_data.get("capital_available") or 0)
+            new_risk = float(payload_data.get("position_risk_inr") or 0)
+            daily_limit = capital * float(MAX_DAILY_DRAWDOWN_PCT) / 100.0
+            if not all(math.isfinite(v) and v > 0 for v in (capital, new_risk, daily_limit)):
+                db.rollback()
+                return False, "RISK_RESERVATION_INVALID"
+
+            summary = daily_summary()
+            remaining_budget = round(daily_limit + float(summary.get("pnl") or 0), 2)
+            if remaining_budget <= 0:
+                db.rollback()
+                return False, "DAILY_LOSS_LIMIT_REACHED"
+
+            reserved = 0.0
+            for (raw_payload,) in db.execute(
+                "SELECT trade_payload FROM active_positions"
+            ).fetchall():
+                try:
+                    existing = json.loads(raw_payload or "{}")
+                    existing_risk = float(existing.get("position_risk_inr") or 0)
+                    if not math.isfinite(existing_risk) or existing_risk < 0:
+                        raise ValueError("invalid existing risk")
+                    reserved += existing_risk
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    db.rollback()
+                    return False, "EXISTING_RISK_RESERVATION_UNREADABLE"
+
+            if reserved + new_risk > remaining_budget + 1e-9:
+                db.rollback()
+                return False, (
+                    f"DAILY_RISK_BUDGET_EXCEEDED: reserved={reserved:.2f} "
+                    f"new={new_risk:.2f} remaining={remaining_budget:.2f}"
+                )
+
+            payload = json.dumps(payload_data, separators=(",", ":"), default=str)
             db.execute(
                 """INSERT INTO active_positions
                    (contract,symbol,trade_id,opened_at,claimed_at,status,trade_payload)

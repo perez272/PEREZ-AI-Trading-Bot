@@ -342,6 +342,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+
           PID="$(systemctl show perez-ai.service -p MainPID --value)"
           test "${PID:-0}" -gt 0
 
