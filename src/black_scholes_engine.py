@@ -153,6 +153,7 @@ def black_scholes_greeks(
         "gamma": gamma,
         "vega": vega,
         "theta_per_day": theta_annual / 365.0,
+        "rho": (k * t * disc_r * (_normal_cdf(d2) if kind == "CE" else -_normal_cdf(-d2))) / 100.0,
         "d1": d1,
         "d2": d2,
     }
@@ -244,7 +245,7 @@ def calculate_chain_greeks(
     output = chain.copy()
     calculated = [
         "bs_market_mid", "bs_price", "bs_iv", "bs_delta", "bs_gamma",
-        "bs_vega", "bs_theta_per_day", "bs_status", "bs_error",
+        "bs_vega", "bs_theta_per_day", "bs_rho", "bs_status", "bs_error",
     ]
     for column in calculated:
         output[column] = math.nan if column not in {"bs_status", "bs_error"} else ""
@@ -282,6 +283,7 @@ def calculate_chain_greeks(
             output.at[idx, "bs_gamma"] = greeks["gamma"]
             output.at[idx, "bs_vega"] = greeks["vega"]
             output.at[idx, "bs_theta_per_day"] = greeks["theta_per_day"]
+            output.at[idx, "bs_rho"] = greeks["rho"]
             output.at[idx, "bs_status"] = "OK"
         except Exception as exc:
             output.at[idx, "bs_status"] = "SKIPPED"
