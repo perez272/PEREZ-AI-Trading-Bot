@@ -67,3 +67,16 @@ def test_fails_closed_for_insufficient_history():
     )
     assert not result["eligible"]
     assert "INSUFFICIENT_COMPLETED_5M_HISTORY" in result["reasons"]
+
+def test_all_explicit_call_conditions_pass():
+    now = datetime(2026, 11, 3, 14, 0, tzinfo=IST)
+    result = evaluate_nifty_expiry_setup(
+        _candles(), symbol="NIFTY", option_type="CE", expiry="2026-11-03",
+        strike=23100, option_move_1m_pct=2, option_move_3m_pct=3,
+        option_move_5m_pct=5, spread_pct=0.2, option_volume=1000, option_oi=10000,
+        now=now,
+    )
+    assert result["eligible"] is True
+    assert result["reasons"] == []
+    assert result["volume_ratio"] >= 1.5
+
