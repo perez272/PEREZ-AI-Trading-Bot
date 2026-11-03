@@ -19,15 +19,15 @@ def test_paper_learning_mode_cannot_bypass_daily_loss_limit(monkeypatch):
     assert reason == "Daily loss limit reached (2% of capital = Rs 100.00)"
 
 
-def test_two_losses_with_a_win_between_them_trigger_daily_lock(monkeypatch):
+def test_two_losses_with_a_win_between_them_do_not_trigger_daily_lock(monkeypatch):
     _enable_paper_learning(monkeypatch,
         {"closed_trades": 3, "pnl": 50.0, "consecutive_losses": 1, "losing_trades": 2, "worst_loss": -120.0})
     allowed, reason, _ = risk.can_open_new_trade(capital=5000)
-    assert not allowed
-    assert reason == "TWO_LOSING_TRADES_STOP"
+    assert allowed
+    assert "no arbitrary daily trade-count cap" in reason
 
 
-def test_one_loss_does_not_trigger_two_loss_daily_lock(monkeypatch):
+def test_one_loss_does_not_trigger_daily_lock(monkeypatch):
     _enable_paper_learning(monkeypatch,
         {"closed_trades": 1, "pnl": -30.0, "consecutive_losses": 1, "losing_trades": 1, "worst_loss": -30.0})
     allowed, reason, _ = risk.can_open_new_trade(capital=5000)
@@ -56,10 +56,13 @@ def test_daily_summary_counts_losses_by_ist_market_date(tmp_path):
     assert summary["pnl"] == 50.0
 
 
-def test_two_loss_daily_lock_precedes_three_loss_circuit_breaker(monkeypatch):
+def test_three_consecutive_losses_are_blocked_by_circuit_breaker(monkeypatch):
     _enable_paper_learning(monkeypatch,
         {"closed_trades": 3, "pnl": -50.0, "consecutive_losses": 3, "losing_trades": 3, "worst_loss": -30.0})
+    monkeypatch.setattr(risk.TRADING_RISK_MANAGER, "is_circuit_breaker_active", lambda: True)
+    monkeypatch.setattr(risk.TRADING_RISK_MANAGER, "circuit_breaker_remaining",
+                        lambda: __import__("datetime").timedelta(minutes=45))
     allowed, reason, _ = risk.can_open_new_trade(capital=5000)
     assert not allowed
-    assert reason == "TWO_LOSING_TRADES_STOP"
+    assert reason == "Timed circuit breaker active (45 min remaining)"
 
