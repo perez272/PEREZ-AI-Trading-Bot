@@ -93,10 +93,9 @@ def can_open_new_trade(max_trades=3, max_daily_loss=None, capital=0):
         return False, "Outside entry window: 09:15-14:45 IST", daily_summary()
 
     summary = daily_summary()
-    # Count every losing close for the IST market day. A winning trade
-    # between losses does not reset this daily protection.
-    if summary["losing_trades"] >= 2:
-        return False, "TWO_LOSING_TRADES_STOP", summary
+    # Losing-trade count is diagnostic only. Do not impose a blunt
+    # two-loss daily lock: the hard daily drawdown and persistent
+    # consecutive-loss circuit breaker below remain the entry protections.
 
     dynamic_limit = abs(float(capital)) * MAX_DAILY_DRAWDOWN_PCT / 100.0
     daily_loss_limit = dynamic_limit if max_daily_loss is None else min(abs(float(max_daily_loss)), dynamic_limit)
