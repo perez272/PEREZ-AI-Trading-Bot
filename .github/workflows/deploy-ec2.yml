@@ -113,21 +113,27 @@ jobs:
           test "${PID:-0}" -gt 0
           test -r "/proc/$PID/environ"
 
-          PROCESS_ENV="$(tr '\\0' '\\n' < "/proc/$PID/environ")"
-          PAPER_MODE_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^PAPER_MODE=//p' | tail -1)"
-          ORDERS_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^ORDERS_ENABLED=//p' | tail -1)"
-          CAPITAL_VALUE="$(printf '%s\\n' "$PROCESS_ENV" | sed -n 's/^PAPER_CAPITAL=//p' | tail -1)"
+          venv/bin/python - "$PID" <<'PY'
+          import sys
+          from pathlib import Path
 
-          echo "SERVICE_PID=$PID"
-          echo "PAPER_MODE=$PAPER_MODE_VALUE"
-          echo "ORDERS_ENABLED=$ORDERS_VALUE"
-          echo "PAPER_CAPITAL=$CAPITAL_VALUE"
+          pid = int(sys.argv[1])
+          raw = Path(f"/proc/{pid}/environ").read_bytes()
+          env = {}
+          for item in raw.split(b"\0"):
+              if b"=" in item:
+                  key, value = item.split(b"=", 1)
+                  env[key.decode(errors="replace")] = value.decode(errors="replace")
 
-          test "$PAPER_MODE_VALUE" = "true"
-          test "$ORDERS_VALUE" = "false"
-          test "$CAPITAL_VALUE" = "5000"
-
-          echo "PAPER_SAFETY_CHECK_COMPLETE"
+          expected = {"PAPER_MODE": "true", "ORDERS_ENABLED": "false", "PAPER_CAPITAL": "5000"}
+          print(f"SERVICE_PID={pid}")
+          for key in expected:
+              print(f"{key}={env.get(key, '<missing>')}")
+          failures = [key for key, value in expected.items() if env.get(key) != value]
+          if failures:
+              raise SystemExit("PAPER_SAFETY_FAIL: " + ", ".join(failures))
+          print("PAPER_SAFETY_CHECK_COMPLETE")
+          PY
 
       - name: Check runtime services and duplicate processes
         run: |
@@ -336,13 +342,75 @@ jobs:
         run: |
           set -euo pipefail
 
-          PAPER_MODE_VALUE="$(systemctl show perez-ai.service -p Environment --value | tr ' ' '\n' | grep '^PAPER_MODE=' | cut -d= -f2- || true)"
-          ORDERS_VALUE="$(systemctl show perez-ai.service -p Environment --value | tr ' ' '\n' | grep '^ORDERS_ENABLED=' | cut -d= -f2- || true)"
+          PID="$(systemctl show perez-ai.service -p MainPID --value)"
+          test "\${PID:-0}" -gt 0
 
-          echo "PAPER_MODE=$PAPER_MODE_VALUE"
-          echo "ORDERS_ENABLED=$ORDERS_VALUE"
+          venv/bin/python - "$PID" <<'PY'
+          import sys
+          from pathlib import Path
 
-          test "$PAPER_MODE_VALUE" = "true"
-          test "$ORDERS_VALUE" = "false"
+          pid = int(sys.argv[1])
+          env = {}
+          for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+              if b"=" in item:
+                  key, value = item.split(b"=", 1)
+                  env[key.decode(errors="replace")] = value.decode(errors="replace")
+          expected = {"PAPER_MODE": "true", "ORDERS_ENABLED": "false", "PAPER_CAPITAL": "5000"}
+          for key, value in expected.items():
+              print(f"{key}={env.get(key, '<missing>')}")
+          failed = [key for key, value in expected.items() if env.get(key) != value]
+          if failed:
+              raise SystemExit("FINAL_PAPER_SAFETY=FAIL: " + ", ".join(failed))
+          print("FINAL_PAPER_SAFETY=PASS")
+          PY
 
-          echo "FINAL_PAPER_SAFETY=PASS"
+      - name: Summarize today's closed paper trades
+        if: always()
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/PEREZ-AI-Trading-Bot
+          venv/bin/python - <<'PY'
+          import csv
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          path = Path("data/trades.csv")
+          today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+          ist = ZoneInfo("Asia/Kolkata")
+          print(f"TRADE_SUMMARY_DATE_IST={today.isoformat()}")
+          if not path.exists():
+              print("TRADE_SUMMARY=NO_TRADES_FILE")
+              raise SystemExit(0)
+
+          rows = []
+          with path.open(newline="", encoding="utf-8") as f:
+              for row in csv.DictReader(f):
+                  stamp = (row.get("closed_at") or "").strip()
+                  try:
+                      closed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                      if closed.tzinfo is None:
+                          closed = closed.replace(tzinfo=ist)
+                      if closed.astimezone(ist).date() == today:
+                          row["_pnl"] = float(row.get("pnl") or 0)
+                          rows.append(row)
+                  except (TypeError, ValueError):
+                      continue
+
+          print(f"TODAY_CLOSED_TRADES={len(rows)}")
+          print(f"TODAY_WINNERS={sum(r['_pnl'] > 0 for r in rows)}")
+          print(f"TODAY_LOSERS={sum(r['_pnl'] < 0 for r in rows)}")
+          print(f"TODAY_NET_PNL={sum(r['_pnl'] for r in rows):.2f}")
+          for row in rows:
+              print(
+                  "TRADE",
+                  row.get("underlying", ""),
+                  row.get("contract", ""),
+                  row.get("signal", ""),
+                  f"entry={row.get('entry', '')}",
+                  f"exit={row.get('exit', '')}",
+                  f"pnl={row.get('pnl', '')}",
+                  f"reason={row.get('exit_reason', '')}",
+                  f"closed_at={row.get('closed_at', '')}",
+              )
+          PY
