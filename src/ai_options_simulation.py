@@ -235,7 +235,11 @@ def build_simulations() -> dict[str, Any]:
     rejections = _rejections()
     paper = _paper_trades(events)
     rejected = _rejected_scenarios(rejections)
-    rejected.extend(_shadow_paths(rejections))
+    shadow = _shadow_paths(rejections)
+    shadow_by_id = {item["id"]: item for item in shadow}
+    rejected = [shadow_by_id.get(item["id"], item) for item in rejected]
+    known = {item["id"] for item in rejected}
+    rejected.extend(item for item in shadow if item["id"] not in known)
     return {
         "status": "READY" if paper or rejected else "WAITING_FOR_RECORDED_DATA",
         "safety": "OBSERVATION_ONLY",
