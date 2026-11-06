@@ -58,7 +58,7 @@ function chart(item){
  let svg='<svg class="sim-chart" viewBox="0 0 720 170" role="img" aria-label="Recorded option price path and trade levels"><line x1="45" y1="145" x2="700" y2="145" stroke="#30425e"/>';
  for(let i=0;i<5;i++){let yy=20+i*31;svg+='<line x1="45" y1="'+yy+'" x2="700" y2="'+yy+'" stroke="#1b2b42"/>'}
  levels.forEach(([label,v,color])=>{if(v==null)return;let yy=y(v);svg+='<line x1="45" y1="'+yy+'" x2="700" y2="'+yy+'" stroke="'+color+'" stroke-dasharray="6 4"/><text x="48" y="'+Math.max(12,yy-4)+'" fill="'+color+'" font-size="10">'+label+' '+esc(num(v))+'</text>'});
- if(pts.length){let coords=pts.map((p,i)=>((45+i*(655/Math.max(1,pts.length-1)))+','+y(p.price))).join(' ');svg+='<polyline points="'+coords+'" fill="none" stroke="#72cfff" stroke-width="2.5"/>';pts.forEach((p,i)=>{let x=45+i*(655/Math.max(1,pts.length-1));svg+='<circle cx="'+x+'" cy="'+y(p.price)+'" r="3.5" fill="#72cfff"><title>'+esc(p.event||'Recorded')+': '+esc(p.price)+'</title></circle>'})}
+ if(pts.length){const horizon=p=>{const m=String(p.time||'').match(/^\+(\d+(?:\.\d+)?)m$/);return m?Number(m[1]):null};const hs=pts.map(horizon),maxH=Math.max(1,...hs.filter(v=>v!==null));const xpos=i=>hs[i]===null?45+i*(655/Math.max(1,pts.length-1)):45+(hs[i]/maxH)*655;let coords=pts.map((p,i)=>(xpos(i)+','+y(p.price))).join(' ');svg+='<polyline points="'+coords+'" fill="none" stroke="#72cfff" stroke-width="2.5"/>';pts.forEach((p,i)=>{let x=xpos(i);svg+='<circle cx="'+x+'" cy="'+y(p.price)+'" r="3.5" fill="#72cfff"><title>'+esc(p.time||p.event||'Recorded')+': '+esc(p.price)+'</title></circle>'})}
  svg+='</svg>';return svg;
 }
 function card(x){
