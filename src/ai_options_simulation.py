@@ -159,11 +159,83 @@ def _rejected_scenarios(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+
+def _shadow_paths(rows: list[dict[str, Any]], db: Path = ROOT / "data" / "memory" / "adaptive_trade_memory.sqlite3") -> list[dict[str, Any]]:
+    """Attach only persisted post-detection quotes to genuine rejected surge events."""
+    if not db.exists():
+        return []
+    keys = {}
+    for row in rows:
+        details = _details(row)
+        raw = details.get("features_json") or row.get("features_json")
+        if isinstance(raw, str):
+            try:
+                details = {**details, **json.loads(raw)}
+            except (TypeError, ValueError):
+                pass
+        event = details.get("event") if isinstance(details.get("event"), dict) else {}
+        key = event.get("event_key") or details.get("event_key")
+        if key:
+            keys[str(key)] = row
+    if not keys:
+        return []
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2) as conn:
+            conn.row_factory = sqlite3.Row
+            candidates = conn.execute(
+                "SELECT c.event_key,c.symbol,c.option_type,c.instrument_key,c.expiry,c.strike,"
+                "c.detection_ts,c.entry_ltp,c.score,o.h1_ltp,o.h3_ltp,o.h5_ltp,o.h10_ltp,"
+                "o.h15_ltp,o.mfe_pct,o.mae_pct,o.label,o.resolved_ts "
+                "FROM surge_candidates c LEFT JOIN surge_outcomes o ON o.candidate_id=c.id "
+                "WHERE c.event_key IN (" + ",".join("?" for _ in keys) + ")",
+                tuple(keys),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        return []
+    result = []
+    for item in candidates:
+        row = keys.get(item["event_key"])
+        if not row:
+            continue
+        prices = [item[f"h{h}_ltp"] for h in (1, 3, 5, 10, 15)]
+        path = [{"time": f"+{h}m", "event": f"SHADOW_H{h}", "price": float(price)}
+                for h, price in zip((1, 3, 5, 10, 15), prices) if price is not None]
+        entry = _number(item["entry_ltp"])
+        details = _details(row)
+        raw = details.get("features_json") or row.get("features_json")
+        if isinstance(raw, str):
+            try:
+                details = {**details, **json.loads(raw)}
+            except (TypeError, ValueError):
+                pass
+        event = details.get("event") if isinstance(details.get("event"), dict) else {}
+        merged = {**event, **details}
+        result.append({
+            "id": str(row.get("id") or item["event_key"]), "kind": "REJECTED",
+            "symbol": item["symbol"], "contract": merged.get("contract") or item["instrument_key"],
+            "reason": row.get("reason"), "time": item["detection_ts"],
+            "score": _number(item["score"], row.get("score")), "entry": entry,
+            "stop_loss": _number(merged.get("stop_loss"), merged.get("sl")),
+            "target1": _number(merged.get("target1"), merged.get("target_1")),
+            "target2": _number(merged.get("target2"), merged.get("target_2")),
+            "path": ([{"time": item["detection_ts"], "event": "DETECTION_ENTRY_REFERENCE", "price": entry}]
+                     if entry is not None else []) + path,
+            "pnl": None, "return_pct": ((float(item["h15_ltp"])-entry)/entry*100.0
+                                         if entry and item["h15_ltp"] is not None else None),
+            "mfe_pct": _number(item["mfe_pct"]), "mae_pct": _number(item["mae_pct"]),
+            "outcome_label": item["label"], "resolved_time": item["resolved_ts"],
+            "source": "adaptive_trade_memory.sqlite3:surge_candidates+surge_outcomes",
+            "data_quality": "RECORDED_SHADOW_PATH" if path else "ENTRY_REFERENCE_ONLY",
+            "quantity": None, "note": "Observed option-price path after rejection; not an executed trade. No hypothetical rupee P&L or missing levels are inferred.",
+        })
+    return result
+
 def build_simulations() -> dict[str, Any]:
     events = _read_lifecycle()
     rejections = _rejections()
     paper = _paper_trades(events)
     rejected = _rejected_scenarios(rejections)
+    rejected.extend(_shadow_paths(rejections))
     return {
         "status": "READY" if paper or rejected else "WAITING_FOR_RECORDED_DATA",
         "safety": "OBSERVATION_ONLY",
