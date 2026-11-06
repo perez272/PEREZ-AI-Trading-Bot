@@ -191,7 +191,14 @@ def create_surge_trade(event: dict[str, Any], capital: float, risk_manager: Any)
     event_id = int(event.get("id"))
     if not _claim_event(event_id):
         return None, {"eligible": False, "terminal": False, "reason": "EVENT_ALREADY_CLAIMED", "reasons": ["EVENT_ALREADY_CLAIMED"]}
-    result = evaluate_pending_surge(event)
+    # A transient provider/validation exception must not strand the event
+    # in the claim table forever. Release the claim and let the worker retry.
+    try:
+        result = evaluate_pending_surge(event)
+    except Exception:
+        _release_event(event_id)
+        raise
+
     if not result.get("eligible"):
         if not result.get("terminal"):
             _release_event(event_id)
