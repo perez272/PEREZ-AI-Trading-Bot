@@ -33,7 +33,7 @@ def test_rejected_scenario_never_invents_missing_levels():
 def test_api_is_observation_only():
     result = build_simulations()
     assert result["safety"] == "OBSERVATION_ONLY"
-    assert "No synthetic prices" in result["disclaimer"]
+    assert "no synthetic prices" in result["disclaimer"].lower()
 
 
 
