@@ -216,7 +216,7 @@ def test_create_trade_rejects_missing_or_future_quote_timestamp(monkeypatch):
     monkeypatch.setenv("ORDERS_ENABLED", "false")
     base = {
         "status": "CONTRACT VALID", "option_type": "CE", "contract": "NIFTY TEST CE",
-        "exchange": "NFO", "token": "TEST", "expiry": "2026-11-05",
+        "exchange": "NFO", "token": "TEST", "expiry": (datetime.now().date() + timedelta(days=7)).strftime("%Y-%m-%d"),
         "strike": 25000, "lotsize": 25, "ltp": 40.0,
     }
     book = {"depth": {"buy": [{"price": 39.9, "quantity": 100}], "sell": [{"price": 40.1, "quantity": 100}]}}
