@@ -26,9 +26,10 @@ style.textContent=`
 @media(max-width:950px){#ai-sim-workspace{grid-template-columns:1fr}}
 `;
 document.head.appendChild(style);
-const host=document.querySelector('main.shell');
-const header=host?.querySelector('header.top');
-if(!host||!header)return;
+const workstation=document.querySelector('main.shell');
+const dashboard=document.querySelector('.wrap');
+const header=workstation?.querySelector('header.top')||dashboard?.querySelector('.top');
+if(!header||document.getElementById('ai-sim-workspace'))return;
 const root=document.createElement('section');
 root.id='ai-sim-workspace';
 root.innerHTML=`

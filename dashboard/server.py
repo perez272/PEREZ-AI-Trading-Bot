@@ -164,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
                 link='<a href="/workstation.html" style="display:inline-block;border:1px solid #36507d;background:#101d32;color:#bdeaff;text-decoration:none;padding:7px 9px;font-size:10px;font-weight:800;border-radius:8px">OPTIONS WORKSTATION ↗</a>'
                 if '/workstation.html' not in html:html=html.replace('<div id="health"',link+'<div id="health"',1)
                 marker='</body>'
-                for src in ('/advanced.js','/pro_live.js','/app.js','/strategy_lab.js','/learning.js'):
+                for src in ('/ai_options_simulation.js','/advanced.js','/pro_live.js','/app.js','/strategy_lab.js','/learning.js'):
                     if src not in html:html=html.replace(marker,f'<script src="{src}"></script>'+marker)
                 self._send(200,'text/html; charset=utf-8',html)
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'index error: {exc}')
