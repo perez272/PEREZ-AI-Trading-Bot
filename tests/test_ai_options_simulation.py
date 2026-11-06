@@ -1,4 +1,7 @@
-import json\nimport sqlite3\n\nfrom src.ai_options_simulation import _paper_trades, _rejected_scenarios, _shadow_paths, build_simulations
+import json
+import sqlite3
+
+from src.ai_options_simulation import _paper_trades, _rejected_scenarios, _shadow_paths, build_simulations
 
 
 def test_paper_trade_path_uses_only_recorded_prices():
