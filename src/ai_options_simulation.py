@@ -243,7 +243,7 @@ def build_simulations() -> dict[str, Any]:
     return {
         "status": "READY" if paper or rejected else "WAITING_FOR_RECORDED_DATA",
         "safety": "OBSERVATION_ONLY",
-        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections"],
+        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections", "adaptive_trade_memory.sqlite3:surge_outcomes"],
         "paper_trades": paper,
         "rejected_scenarios": rejected,
         "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected)},
