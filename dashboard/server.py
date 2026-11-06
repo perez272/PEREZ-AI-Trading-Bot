@@ -114,6 +114,14 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/me':
             user=str(self.headers.get('X-Remote-User','')).strip(); role='admin' if user=='perez' else 'viewer'; self._send(200,'application/json; charset=utf-8',json.dumps({'ok':True,'user':user,'role':role})); return
         if path in ('/api','/api/state'):self._send(200,'application/json; charset=utf-8',json.dumps(state(),default=str));return
+        if path=='/api/ai-options-simulations':
+            try:
+                from src.ai_options_simulation import build_simulations
+                payload=build_simulations()
+                self._send(200,'application/json; charset=utf-8',json.dumps(payload,default=str))
+            except Exception as exc:
+                self._send(200,'application/json; charset=utf-8',json.dumps({'status':'UNAVAILABLE','safety':'OBSERVATION_ONLY','paper_trades':[],'rejected_scenarios':[],'error':str(exc)}))
+            return
         if path=='/api/market-intelligence':
             try:
                 from dashboard.market_intelligence_api import build_snapshot
@@ -133,13 +141,16 @@ class Handler(BaseHTTPRequestHandler):
             try:self._send(200,'application/json; charset=utf-8',json.dumps(build_lab(),default=str))
             except Exception as exc:self._send(200,'application/json; charset=utf-8',json.dumps({'status':'UNAVAILABLE','safety':'OBSERVATION_ONLY','error':str(exc)}))
             return
-        assets={'/market_intelligence_live.js':(ROOT/'dashboard/market_intelligence_live.js','application/javascript; charset=utf-8'),'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/strategy_lab.js':(LABJS,'application/javascript; charset=utf-8'),'/learning.js':(LEARNJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
+        assets={'/ai_options_simulation.js':(ROOT/'dashboard/ai_options_simulation.js','application/javascript; charset=utf-8'),'/market_intelligence_live.js':(ROOT/'dashboard/market_intelligence_live.js','application/javascript; charset=utf-8'),'/advanced.js':(ADVANCED,'application/javascript; charset=utf-8'),'/pro_live.js':(PROLIVE,'application/javascript; charset=utf-8'),'/app.js':(APPJS,'application/javascript; charset=utf-8'),'/strategy_lab.js':(LABJS,'application/javascript; charset=utf-8'),'/learning.js':(LEARNJS,'application/javascript; charset=utf-8'),'/sw.js':(SW,'application/javascript; charset=utf-8'),'/manifest.webmanifest':(MANIFEST,'application/manifest+json; charset=utf-8'),'/app-icon.svg':(ICON,'image/svg+xml')}
         if path in assets:
             try:p,ctype=assets[path];self._send(200,ctype,p.read_text(encoding='utf-8'))
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'asset error: {exc}')
             return
         if path in ('/workstation','/workstation.html'):
-            try:self._send(200,'text/html; charset=utf-8',(ROOT/'dashboard/workstation.html').read_text(encoding='utf-8'))
+            try:
+                html=(ROOT/'dashboard/workstation.html').read_text(encoding='utf-8')
+                html=html.replace('</body>','<script src="/ai_options_simulation.js"></script></body>')
+                self._send(200,'text/html; charset=utf-8',html)
             except Exception as exc:self._send(500,'text/plain; charset=utf-8',f'workstation page error: {exc}')
             return
         if path=='/trades.html':
