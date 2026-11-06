@@ -13,7 +13,7 @@ def test_paper_trade_path_uses_only_recorded_prices():
     ]
     result = _paper_trades(events)
     assert len(result) == 1
-    assert [point["price"] for point in result[0]["path"]] == [116, 118]
+    assert [point["price"] for point in result[0]["path"]] == [100, 116, 118]
     assert result[0]["entry"] == 100
     assert result[0]["pnl"] == 180
     assert result[0]["data_quality"] == "RECORDED_PATH"
