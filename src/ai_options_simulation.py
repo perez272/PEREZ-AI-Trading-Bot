@@ -79,7 +79,7 @@ def _rejections(db: Path = CORE) -> list[dict[str, Any]]:
 def _event_price(event: dict[str, Any]) -> float | None:
     return _number(event.get("ltp"), event.get("price"), event.get("option_ltp"),
                    event.get("mark_price"), event.get("exit_price"),
-                   event.get("current_ltp"))
+                   event.get("current_ltp"), event.get("entry"), event.get("entry_price"))
 
 
 def _paper_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
