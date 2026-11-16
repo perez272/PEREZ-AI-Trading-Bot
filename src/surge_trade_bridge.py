@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -84,17 +84,32 @@ def _claim_event(event_id: int) -> bool:
 
 
 def _underlying_move_5m_pct(client: Any, symbol: str) -> float | None:
-    """Return the latest 5-minute underlying index move from 1-minute candles."""
+    """Return a five-minute move only from six fresh, consecutive 1-minute candles."""
     candles = client.get_candles(symbol, interval_minutes=1)
-    if not candles or len(candles) < 2:
+    if not isinstance(candles, list) or len(candles) < 6:
         return None
     try:
-        latest = float(candles[-1][4])
-        prior = float(candles[-6][4]) if len(candles) >= 6 else float(candles[0][4])
-        if latest <= 0 or prior <= 0:
+        recent = candles[-6:]
+        stamps = []
+        closes = []
+        for row in recent:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                return None
+            stamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+            stamps.append(stamp.astimezone(timezone.utc))
+            closes.append(float(row[4]))
+        if any(value <= 0 for value in closes):
             return None
-        return (latest - prior) / prior * 100.0
-    except (TypeError, ValueError, IndexError):
+        gaps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])]
+        if any(gap < 30 or gap > 90 for gap in gaps):
+            return None
+        age = (datetime.now(timezone.utc) - stamps[-1]).total_seconds()
+        if age < -5 or age > 120:
+            return None
+        return (closes[-1] - closes[0]) / closes[0] * 100.0
+    except (TypeError, ValueError, IndexError, OverflowError):
         return None
 
 
