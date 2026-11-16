@@ -62,15 +62,25 @@ def test_option_direction_requires_underlying_confirmation():
     assert callable(_underlying_move_5m_pct)
 
 
-def test_negative_1m_momentum_rejected():
-    result = validate_surge(evidence(move_1m_pct=-0.42), 150.0)
-    assert not result["eligible"]
-    assert "NO_POSITIVE_1M_MOVE" in result["reasons"]
+def test_controlled_1m_pullback_can_pass_with_strong_continuation():
+    result = validate_surge(
+        evidence(move_1m_pct=-1.84, move_3m_pct=6.35, move_5m_pct=5.69,
+                 acceleration=5.0, spread_pct=0.23, volume_ratio=1.05,
+                 detector_score=65.0),
+        150.0,
+    )
+    assert result["eligible"] is True
+    assert result["stages"]["continuation"]["confirmed"] is True
 
 
-def test_positive_1m_momentum_passes():
-    result = validate_surge(evidence(move_1m_pct=0.1), 150.0)
-    assert result["eligible"]
+def test_1m_pullback_without_continuation_is_rejected():
+    result = validate_surge(
+        evidence(move_1m_pct=-0.42, move_3m_pct=0.4, move_5m_pct=0.6,
+                 acceleration=0.1, volume_ratio=1.0),
+        150.0,
+    )
+    assert result["eligible"] is False
+    assert "SURGE_CONTINUATION_NOT_CONFIRMED" in result["reasons"]
 
 
 
