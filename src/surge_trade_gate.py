@@ -86,8 +86,9 @@ def validate_surge(e: SurgeEvidence, max_premium: float) -> dict[str, Any]:
         momentum_reasons.append("INSUFFICIENT_ACCELERATION")
     if e.move_5m_pct <= 0:
         momentum_reasons.append("NO_POSITIVE_5M_MOVE")
-    if e.move_1m_pct <= 0:
-        momentum_reasons.append("NO_POSITIVE_1M_MOVE")
+    # A controlled 1m pullback may be a valid continuation entry. The
+    # independent confirmation gate below decides whether 3m/5m structure,
+    # acceleration, spread and participation still support the move.
     if e.detector_score >= 90.0 and e.move_5m_pct >= 6.0:
         momentum_reasons.append("OVEREXTENDED_SURGE")
     reasons.extend(momentum_reasons)
