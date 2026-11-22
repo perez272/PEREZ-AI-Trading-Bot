@@ -43,9 +43,12 @@ def test_stale_underlying_candles_fail_closed():
 
 def test_option_volume_ratio_uses_interval_deltas_not_cumulative_total():
     start = datetime(2026, 11, 24, 10, 0, tzinfo=IST)
+    increments = [100, 100, 100, 100, 100, 300]
+    volumes = [1000]
+    for increment in increments:
+        volumes.append(volumes[-1] + increment)
     points = [{"observed_at": (start + timedelta(minutes=i)).isoformat(),
-               "volume": 1000 + i * (100 if i < 6 else 300)}
-              for i in range(7)]
+               "volume": volumes[i]} for i in range(len(volumes))]
     result = option_volume_expansion(points, minimum_baseline_intervals=5)
     assert result["status"] == "READY"
     assert result["volume_ratio"] == 3.0
