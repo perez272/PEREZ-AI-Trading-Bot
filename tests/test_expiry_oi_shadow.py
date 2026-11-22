@@ -112,3 +112,43 @@ def test_snapshot_persists_and_exposes_latest_record(tmp_path):
     second = record_chain_snapshot("NIFTY", chain, "2026-11-22T10:00:15+05:30", db)
     assert second["oi_direction"] == "NO_CONFIRMED_OI_PATTERN"
     assert latest_observations(db)[0]["observed_at"] == "2026-11-22T10:00:15+05:30"
+
+
+
+def test_clean_up_breakout_requires_two_snapshots_beyond_oi_wall_and_bullish_oi():
+    chain = _chain()
+    for row in chain:
+        row["underlying_spot_price"] = 25100
+    previous = {}
+    for row in chain:
+        for side in ("CE", "PE"):
+            option = row["call_options" if side == "CE" else "put_options"]
+            previous[option["instrument_key"]] = {
+                "oi": option["market_data"]["oi"] + (100 if side == "CE" else -100),
+                "ltp": option["market_data"]["ltp"] - (5 if side == "CE" else 0),
+                "spot": 25080, "observed_at": "2026-11-22T10:00:00+05:30",
+            }
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:15+05:30", previous)
+    assert result["oi_direction"] == "BULLISH_OI_PATTERN"
+    assert result["breakout_status"] == "UP_BREAKOUT_CONFIRMED"
+    assert result["breakout_confirmed"] is True
+    assert result["safety"] == "OBSERVATION_ONLY"
+
+
+def test_breakout_is_not_confirmed_without_prior_spot_beyond_oi_wall():
+    chain = _chain()
+    for row in chain:
+        row["underlying_spot_price"] = 25100
+    previous = {}
+    for row in chain:
+        for side in ("CE", "PE"):
+            option = row["call_options" if side == "CE" else "put_options"]
+            previous[option["instrument_key"]] = {
+                "oi": option["market_data"]["oi"] + (100 if side == "CE" else -100),
+                "ltp": option["market_data"]["ltp"] - (5 if side == "CE" else 0),
+                "spot": 25060, "observed_at": "2026-11-22T10:00:00+05:30",
+            }
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:15+05:30", previous)
+    assert result["oi_direction"] == "BULLISH_OI_PATTERN"
+    assert result["breakout_status"] == "NOT_CONFIRMED"
+    assert result["breakout_confirmed"] is False
