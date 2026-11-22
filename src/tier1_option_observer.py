@@ -9,6 +9,7 @@ from pathlib import Path
 from src.alternative_market_data import get_upstox_client
 from src.explosive_move_detector import ExplosiveMoveSignal,detect_explosive_move
 from src.surge_outcome_learning import remember_surge,record_quotes
+from src.expiry_oi_shadow import record_chain_snapshot
 TIER1_SYMBOLS=("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTYNXT50");MOVE_THRESHOLDS=(5.0,10.0,15.0,20.0,30.0,40.0,50.0,75.0,100.0);MEMORY_PATH=Path(os.getenv("TIER1_OPTION_MEMORY","data/memory/tier1_option_moves.sqlite3"));BASELINE_TTL_SECONDS=int(os.getenv("TIER1_OPTION_BASELINE_TTL_SECONDS","900"));CHAIN_REFRESH_TTL_SECONDS=int(os.getenv("TIER1_OPTION_CHAIN_REFRESH_TTL_SECONDS","15"));MAX_MEMORY_ROWS=int(os.getenv("TIER1_OPTION_MAX_MEMORY_ROWS","50000"));HISTORY_POINTS=30
 class Tier1OptionObserver:
  def __init__(self,db_path:Path=MEMORY_PATH):
@@ -94,7 +95,11 @@ class Tier1OptionObserver:
     cached=self._chain_cache.get(symbol)
     if cached and now-cached[0]<CHAIN_REFRESH_TTL_SECONDS:chain=cached[1];source="cache"
     else:chain=client.get_option_chain(symbol);self._chain_cache.__setitem__(symbol,(time.monotonic(),chain)) if chain else None;source="upstox"
-    if chain and source=="upstox":events.extend(self.observe(symbol,chain,observed_ts=datetime.now(timezone.utc).isoformat()));print(f"[TIER1 OBSERVER] {symbol}: observation source={source}")
+    if chain and source=="upstox":
+     observed_ts=datetime.now(timezone.utc).isoformat()
+     try:record_chain_snapshot(symbol,chain,observed_ts)
+     except Exception as exc:print(f"[EXPIRY/OI SHADOW] {symbol}: observation skipped: {exc}")
+     events.extend(self.observe(symbol,chain,observed_ts=observed_ts));print(f"[TIER1 OBSERVER] {symbol}: observation source={source}")
     elif chain:
      self._record_cached_quotes(symbol,chain)
      print(f"[TIER1 OBSERVER] {symbol}: cached snapshot — outcome quotes recorded")
