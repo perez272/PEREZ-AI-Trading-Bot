@@ -1,6 +1,6 @@
 from src.sniper_expiry_simulation import (
     build_sniper_observations, evaluate_sniper_signal, select_sniper_contract,
-    simulate_runner,
+    simulate_runner, compare_runner_scenarios,
 )
 
 
@@ -103,3 +103,37 @@ def test_existing_observations_without_context_are_rejected():
     result = build_sniper_observations([_observation()])
     assert len(result) == 1
     assert result[0]["eligible"] is False
+
+
+
+def test_contract_selector_uses_maximum_affordable_whole_lots():
+    candidates = [{
+        "side": "CE", "strike": 25100, "ltp": 40, "delta": 0.52,
+        "gamma": 0.04, "lot_size": 25, "volume_ratio": 2.0,
+    }]
+    result = select_sniper_contract(candidates, 25120, 50, "CE")
+    selected = result["selected"]
+    assert selected["affordable_lots"] == 4
+    assert selected["whole_lot_quantity"] == 100
+    assert selected["estimated_entry_cost"] == 4000
+    assert selected["whole_lot_quantity"] % selected["lot_size"] == 0
+
+
+def test_runner_scenario_comparison_replays_same_recorded_path():
+    path = [{"price": price} for price in (100, 115, 145, 170, 160, 155)]
+    result = compare_runner_scenarios(path, entry=100, initial_stop=90, quantity=25)
+    assert result["status"] == "READY"
+    assert result["scenario_count"] == 9
+    assert len(result["scenarios"]) == 9
+    assert result["comparison_basis"] == "SAME_RECORDED_OPTION_PREMIUM_PATH"
+    assert result["safety"] == "SIMULATION_ONLY"
+    assert result["best_observed_scenario"]["net_pnl"] == max(
+        item["net_pnl"] for item in result["scenarios"]
+    )
+
+
+def test_runner_scenario_comparison_without_path_does_not_invent_results():
+    result = compare_runner_scenarios([], entry=100, initial_stop=90, quantity=25)
+    assert result["status"] == "INSUFFICIENT_RECORDED_PATH"
+    assert result["best_observed_scenario"] is None
+    assert all(item["net_pnl"] is None for item in result["scenarios"])
