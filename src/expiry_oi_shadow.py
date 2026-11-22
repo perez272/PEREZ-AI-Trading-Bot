@@ -121,6 +121,14 @@ def analyze_chain(
         if leg["oi"] is not None:
             combined[leg["strike"]] += leg["oi"]
     highest = max(combined, key=combined.get) if combined else None
+    call_oi = {x["strike"]: x["oi"] for x in rows if x["side"] == "CE" and x["oi"] is not None}
+    put_oi = {x["strike"]: x["oi"] for x in rows if x["side"] == "PE" and x["oi"] is not None}
+    settlement_costs = {
+        settlement: sum(max(settlement - strike, 0.0) * oi for strike, oi in call_oi.items())
+        + sum(max(strike - settlement, 0.0) * oi for strike, oi in put_oi.items())
+        for settlement in strikes
+    }
+    max_pain = min(settlement_costs, key=settlement_costs.get) if settlement_costs else None
 
     candidates = []
     if spot is not None and step:
@@ -164,6 +172,7 @@ def analyze_chain(
         "strike_step": step, "atm_strike": min(strikes, key=lambda value: abs(value - spot)) if spot is not None and strikes else None,
         "candidates": candidates, "oi_evidence": [{"side": x["side"], "strike": x["strike"], "oi": x["oi"], "oi_change": x["oi_change"], "premium": x["ltp"], "premium_change": x["premium_change"], "volume": x["volume"]} for x in rows if x["oi"] is not None], "highest_combined_oi_strike": highest,
         "highest_combined_oi": combined.get(highest) if highest is not None else None,
+        "max_pain_strike": max_pain, "max_pain_payout": settlement_costs.get(max_pain) if max_pain is not None else None,
         "pinning_window": midday, "pinning_candidate": pinned,
         "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
         "oi_direction": direction,
