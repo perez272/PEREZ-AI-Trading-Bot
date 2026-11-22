@@ -67,6 +67,8 @@ def test_midday_pinning_requires_proximity_to_highest_combined_oi_strike():
     result = analyze_chain("NIFTY", _chain(), "2026-11-22T12:00:00+05:30")
     assert result["pinning_window"] is True
     assert result["highest_combined_oi_strike"] == 25050
+    assert result["max_pain_strike"] == 25000
+    assert result["max_pain_strike"] != result["highest_combined_oi_strike"]
     assert result["pinning_candidate"] is False
 
 
