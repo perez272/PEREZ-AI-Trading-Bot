@@ -10,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from src.expiry_oi_shadow import latest_observations as _latest_expiry_oi_observations
+
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "data" / "memory" / "perez_ai_memory.db"
 LIFECYCLE = ROOT / "data" / "paper_trade_lifecycle.jsonl"
@@ -243,9 +245,10 @@ def build_simulations() -> dict[str, Any]:
     return {
         "status": "READY" if paper or rejected else "WAITING_FOR_RECORDED_DATA",
         "safety": "OBSERVATION_ONLY",
-        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections", "adaptive_trade_memory.sqlite3:surge_outcomes"],
+        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections", "adaptive_trade_memory.sqlite3:surge_outcomes", "expiry_oi_shadow.sqlite3"],
         "paper_trades": paper,
         "rejected_scenarios": rejected,
+        "expiry_oi_observations": _latest_expiry_oi_observations(),
         "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected)},
-        "disclaimer": "Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
+        "disclaimer": "Expiry/OI signals are observation-only proxies; they do not authorize entries. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
     }
