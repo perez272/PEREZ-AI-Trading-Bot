@@ -31,7 +31,10 @@ def _local_time(value):
     if isinstance(value, datetime):
         parsed = value
     elif value:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
     else:
         return None
     if parsed.tzinfo is None:
@@ -60,7 +63,10 @@ def evaluate_sniper_signal(observation: dict, context: dict | None = None) -> di
     local_clock = observed.timetz().replace(tzinfo=None) if observed else None
     midday = bool(local_clock and PIN_START <= local_clock <= PIN_END)
     late = bool(bucket == "0DTE" and local_clock and local_clock >= LATE_0DTE)
+    checks["observation_time_available"] = local_clock is not None
     checks["outside_midday_chop"] = not midday
+    if local_clock is None:
+        reasons.append("OBSERVATION_TIME_MISSING")
     checks["before_0dte_cutoff"] = not late
     if midday:
         reasons.append("MIDDAY_CHOP_WINDOW")
@@ -103,11 +109,13 @@ def evaluate_sniper_signal(observation: dict, context: dict | None = None) -> di
 
     evidence = observation.get("oi_evidence") or []
     near = []
-    if spot is not None and step:
+    writer_side = "CE" if direction == "CE" else "PE" if direction == "PE" else ""
+    if spot is not None and step and writer_side:
         near = [row for row in evidence if isinstance(row, dict)
                 and _num(row.get("strike")) is not None
-                and abs(_num(row.get("strike")) - spot) <= step * 1.5]
-    writer_side = "CE" if direction == "CE" else "PE" if direction == "PE" else ""
+                and abs(_num(row.get("strike")) - spot) <= step * 1.5
+                and ((writer_side == "CE" and _num(row.get("strike")) <= spot + step * 0.5)
+                     or (writer_side == "PE" and _num(row.get("strike")) >= spot - step * 0.5))]
     unwind = any(row.get("side") == writer_side
                  and _num(row.get("oi_change")) is not None and _num(row.get("oi_change")) < 0
                  and _num(row.get("premium_change")) is not None and _num(row.get("premium_change")) > 0
@@ -182,6 +190,7 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
     stop = initial_stop
     exit_price = None
     exit_index = None
+    trail_triggered = False
     for index, price in enumerate(prices):
         high = max(high, price)
         ema = price if ema is None else alpha * price + (1 - alpha) * ema
@@ -196,6 +205,7 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
             stop = max(stop, breakeven, trail)
         if price <= stop:
             exit_price, exit_index = stop, index
+            trail_triggered = True
             break
         previous = price
     if exit_price is None:
@@ -204,7 +214,7 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
     gross = (exit_price - entry) * quantity
     net = gross - brokerage
     return {
-        "status": "TRAIL_EXIT" if exit_index < len(prices) - 1 else "PATH_END",
+        "status": "TRAIL_EXIT" if trail_triggered else "PATH_END",
         "activation_pct": activation_pct, "brokerage_inr": brokerage,
         "quantity": quantity, "exit_price": round(exit_price, 2),
         "gross_pnl": round(gross, 2), "net_pnl": round(net, 2),
