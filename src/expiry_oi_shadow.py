@@ -138,12 +138,13 @@ def analyze_chain(
                         "instrument_key": leg["instrument_key"],
                     })
 
+    near_rows = [x for x in rows if spot is not None and step is not None and abs(x["strike"] - spot) <= 2 * step]
     call_unwind = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] < 0
-                      and x["premium_change"] is not None and x["premium_change"] > 0 for x in rows)
+                      and x["premium_change"] is not None and x["premium_change"] > 0 for x in near_rows)
     put_unwind = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] < 0
-                     and x["premium_change"] is not None and x["premium_change"] > 0 for x in rows)
-    put_build = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
-    call_build = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
+                     and x["premium_change"] is not None and x["premium_change"] > 0 for x in near_rows)
+    put_build = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in near_rows)
+    call_build = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in near_rows)
     old_spots = [_number(x.get("spot")) for x in previous.values() if _number(x.get("spot")) is not None and (not x.get("observed_at") or 0 <= (now - _local_datetime(x["observed_at"])).total_seconds() <= 120)]
     old_spot = median(old_spots) if old_spots else None
     spot_up = spot is not None and old_spot is not None and spot > old_spot
