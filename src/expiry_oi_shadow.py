@@ -52,7 +52,7 @@ def expiry_class(expiry: str | date, observed_at: str | datetime | None = None) 
 def _strike_step(strikes: list[float]) -> float | None:
     ordered = sorted(set(strikes))
     gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > a]
-    return median(gaps) if gaps else None
+    return min(gaps) if gaps else None
 
 
 def _leg(row: dict[str, Any], side: str) -> dict[str, Any]:
@@ -180,7 +180,7 @@ def analyze_chain(
         "pinning_window": midday, "pinning_candidate": pinned,
         "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
         "oi_direction": direction,
-        "oi_note": "OI changes are interval-based proxies, not proof of participant intent; premium and spot confirmation are required.",
+        "oi_note": ("OI changes are interval-based proxies, not proof of participant intent; premium and spot confirmation are required. " + ("Full-chain OI available." if oi_chain_complete else "Incomplete OI chain: max-pain and concentration metrics are unavailable.")),
         "late_0dte_cutoff": late, "safety": "OBSERVATION_ONLY",
     }
 
