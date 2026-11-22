@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.expiry_oi_shadow import latest_observations as _latest_expiry_oi_observations
+from src.sniper_expiry_simulation import build_sniper_observations
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "data" / "memory" / "perez_ai_memory.db"
@@ -239,6 +240,7 @@ def build_simulations() -> dict[str, Any]:
     rejected = _rejected_scenarios(rejections)
     shadow = _shadow_paths(rejections)
     expiry_oi = _latest_expiry_oi_observations()
+    sniper_observations = build_sniper_observations(expiry_oi)
     shadow_by_id = {item["id"]: item for item in shadow}
     rejected = [shadow_by_id.get(item["id"], item) for item in rejected]
     known = {item["id"] for item in rejected}
@@ -250,6 +252,7 @@ def build_simulations() -> dict[str, Any]:
         "paper_trades": paper,
         "rejected_scenarios": rejected,
         "expiry_oi_observations": expiry_oi,
-        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi)},
-        "disclaimer": "Expiry/OI signals are observation-only proxies; they do not authorize entries. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
+        "sniper_expiry_observations": sniper_observations,
+        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi), "sniper_expiry_observations": len(sniper_observations), "sniper_confirmed": sum(1 for x in sniper_observations if x["eligible"])},
+        "disclaimer": "Expiry/OI and Sniper signals are observation-only. Missing ORB, multi-timeframe, volume, Greeks, or historical premium-path evidence fails closed; these results never authorize entries or orders. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
     }
