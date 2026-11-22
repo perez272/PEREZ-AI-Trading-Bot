@@ -66,3 +66,23 @@ def test_three_consecutive_losses_are_blocked_by_circuit_breaker(monkeypatch):
     assert not allowed
     assert reason == "Timed circuit breaker active (45 min remaining)"
 
+
+
+def test_daily_summary_uses_net_pnl_and_reports_fees(tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    path = tmp_path / "trades.csv"
+    path.write_text(
+        "closed_at,pnl,brokerage_inr,net_pnl\n"
+        "2026-11-03T06:00:00+00:00,20,30,-10\n",
+        encoding="utf-8",
+    )
+    summary = risk.daily_summary(
+        path=path, current=datetime(2026, 11, 3, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    )
+    assert summary["gross_pnl"] == 20.0
+    assert summary["brokerage"] == 30.0
+    assert summary["net_pnl"] == -10.0
+    assert summary["pnl"] == -10.0
+    assert summary["consecutive_losses"] == 1
