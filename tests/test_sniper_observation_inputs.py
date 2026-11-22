@@ -30,7 +30,8 @@ def test_incomplete_opening_range_does_not_claim_orb():
     result = build_underlying_context(_candles(count=10),
                                      "2026-11-24T09:26:30+05:30")
     assert result["orb_breakout"] is False
-    assert result["underlying_input_status"] == "INSUFFICIENT_OR_STALE"
+    assert result["underlying_input_status"] == "READY"
+    assert result["orb_high"] is None
 
 
 def test_stale_underlying_candles_fail_closed():
