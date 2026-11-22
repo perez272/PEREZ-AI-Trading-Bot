@@ -10,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from src.expiry_oi_shadow import latest_observations as _latest_expiry_oi_observations
+
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "data" / "memory" / "perez_ai_memory.db"
 LIFECYCLE = ROOT / "data" / "paper_trade_lifecycle.jsonl"
@@ -236,16 +238,18 @@ def build_simulations() -> dict[str, Any]:
     paper = _paper_trades(events)
     rejected = _rejected_scenarios(rejections)
     shadow = _shadow_paths(rejections)
+    expiry_oi = _latest_expiry_oi_observations()
     shadow_by_id = {item["id"]: item for item in shadow}
     rejected = [shadow_by_id.get(item["id"], item) for item in rejected]
     known = {item["id"] for item in rejected}
     rejected.extend(item for item in shadow if item["id"] not in known)
     return {
-        "status": "READY" if paper or rejected else "WAITING_FOR_RECORDED_DATA",
+        "status": "READY" if paper or rejected or expiry_oi else "WAITING_FOR_RECORDED_DATA",
         "safety": "OBSERVATION_ONLY",
-        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections", "adaptive_trade_memory.sqlite3:surge_outcomes"],
+        "generated_from": ["paper_trade_lifecycle.jsonl", "perez_ai_memory.db:rejections", "adaptive_trade_memory.sqlite3:surge_outcomes", "expiry_oi_shadow.sqlite3"],
         "paper_trades": paper,
         "rejected_scenarios": rejected,
-        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected)},
-        "disclaimer": "Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
+        "expiry_oi_observations": expiry_oi,
+        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi)},
+        "disclaimer": "Expiry/OI signals are observation-only proxies; they do not authorize entries. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
     }
