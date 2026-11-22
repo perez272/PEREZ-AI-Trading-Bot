@@ -212,7 +212,7 @@ def run_monitor(
                     if risk_identity and trade_id:
                         risk_manager = TradingRiskManager()
                         try:
-                            pnl = float(result.get("pnl", 0.0) or 0.0)
+                            pnl = float(record.get("net_pnl", result.get("pnl", 0.0)) or 0.0)
                         except (TypeError, ValueError):
                             pnl = 0.0
                         exit_reason = str(result.get("exit_reason", "")).upper()
