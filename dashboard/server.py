@@ -96,13 +96,13 @@ def learning(outcomes,rejections,audit):
     return {'outcomes':len(pnls),'wins':wins,'losses':losses,'flat':flat,'win_rate_pct':round(wins/len(pnls)*100,1) if pnls else None,'net_pnl':round(sum(pnls),2),'brokerage':round(sum(fees),2),'brokerage_unknown_trades':unknown,'avg_pnl':round(sum(pnls)/len(pnls),2) if pnls else None,'rejections':len(rejections),'manual_labels':manual,'shadow_performance':shadow,'shadow_diagnostics':diagnostics}
 def performance(outcomes, start_capital=50000.0):
     ordered=list(reversed(outcomes)); pnls,fees,unknown=_net_pnls(ordered); total=sum(pnls); gross_total=sum(float(x.get('pnl') or 0) for x in ordered)
-    wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]; gross_win=sum(wins); gross_loss=abs(sum(losses))
+    wins=[p for p in pnls if p>0]; losses=[p for p in pnls if p<0]; gross_values=[float(x.get('pnl') or 0) for x in ordered]; gross_wins=[p for p in gross_values if p>0]; gross_losses=[p for p in gross_values if p<0]; net_win=sum(wins); net_loss=abs(sum(losses)); gross_win=sum(gross_wins); gross_loss=abs(sum(gross_losses))
     peak=start_capital; max_dd=0.0; curve=[start_capital]
     for p in pnls:
         eq=curve[-1]+p; peak=max(peak,eq); max_dd=min(max_dd,eq-peak); curve.append(eq)
     today=time.strftime('%Y-%m-%d')
-    today_pnl=sum(float(x.get('pnl') or 0) for x in outcomes if str(x.get('ts') or '').startswith(today))
-    return {'start_capital':start_capital,'equity':round(start_capital+total,2),'total_pnl':round(total,2),'gross_pnl':round(gross_total,2),'brokerage':round(sum(fees),2),'brokerage_unknown_trades':unknown,'total_pnl_pct':round(total/start_capital*100,2),'today_pnl':round(sum(p for x,p in zip(outcomes,pnls) if str(x.get('ts') or '').startswith(today)),2),'drawdown':round(max_dd,2),'win_rate_pct':round(len(wins)/len(pnls)*100,1) if pnls else 0.0,'profit_factor':round(gross_win/gross_loss,2) if gross_loss else None,'avg_win':round(gross_win/len(wins),2) if wins else 0.0,'avg_loss':round(sum(losses)/len(losses),2) if losses else 0.0,'closed_trades':len(pnls),'gross_profit':round(gross_win,2),'gross_loss':round(gross_loss,2),'equity_curve':[round(x,2) for x in curve]}
+    today_values,_,_=_net_pnls(outcomes); today_pnl=sum(p for x,p in zip(outcomes,today_values) if str(x.get('ts') or '').startswith(today))
+    return {'start_capital':start_capital,'equity':round(start_capital+total,2),'total_pnl':round(total,2),'gross_pnl':round(gross_total,2),'brokerage':round(sum(fees),2),'brokerage_unknown_trades':unknown,'total_pnl_pct':round(total/start_capital*100,2),'today_pnl':round(today_pnl,2),'drawdown':round(max_dd,2),'win_rate_pct':round(len(wins)/len(pnls)*100,1) if pnls else 0.0,'profit_factor':round(net_win/net_loss,2) if net_loss else None,'avg_win':round(net_win/len(wins),2) if wins else 0.0,'avg_loss':round(sum(losses)/len(losses),2) if losses else 0.0,'closed_trades':len(pnls),'gross_profit':round(gross_win,2),'gross_loss':round(gross_loss,2),'equity_curve':[round(x,2) for x in curve]}
 def active_paper_trades():
     """Read-only live view. active_positions is authoritative; lifecycle only enriches it."""
     rows=q(ROOT/'data/runtime/active_positions.sqlite3','SELECT * FROM active_positions ORDER BY claimed_at')
