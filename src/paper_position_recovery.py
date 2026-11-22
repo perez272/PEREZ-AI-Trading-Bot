@@ -209,7 +209,7 @@ def recover_paper_positions():
                 risk_manager = TradingRiskManager()
                 risk_manager.record_trade_result(
                     str(close_event.get("lineage_id") or trade_id),
-                    float(record.get("net_pnl", pnl) or 0.0),
+                    float((record or {}).get("net_pnl", pnl) or 0.0),
                     stop_loss=str(close_event.get("exit_reason") or "").upper()
                                in {"STOP_LOSS", "TRAILING_STOP"},
                     result_id=trade_id,
