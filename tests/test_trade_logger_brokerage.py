@@ -2,6 +2,7 @@ from src.trade_logger import log_closed_trade
 
 
 def test_completed_trade_charges_brokerage_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAPER_MODE", "true")
     monkeypatch.setenv("PAPER_TRADE_COST_INR", "30")
     trade = {"trade_id": "T1", "contract": "NIFTY", "symbol": "NIFTY"}
     result = {
