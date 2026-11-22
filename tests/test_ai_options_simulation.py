@@ -34,6 +34,8 @@ def test_api_is_observation_only():
     result = build_simulations()
     assert result["safety"] == "OBSERVATION_ONLY"
     assert "no synthetic prices" in result["disclaimer"].lower()
+    assert "sniper_expiry_observations" in result
+    assert "sniper_runner_comparisons" in result
 
 
 
