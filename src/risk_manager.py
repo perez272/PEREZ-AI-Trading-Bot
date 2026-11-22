@@ -31,7 +31,7 @@ def daily_summary(path="data/trades.csv", current=None):
     current = current or now_ist()
     today = current.strftime("%Y-%m-%d")
     output = Path(path)
-    summary = {"closed_trades": 0, "pnl": 0.0, "consecutive_losses": 0, "losing_trades": 0, "worst_loss": 0.0}
+    summary = {"closed_trades": 0, "pnl": 0.0, "gross_pnl": 0.0, "brokerage": 0.0, "net_pnl": 0.0, "consecutive_losses": 0, "losing_trades": 0, "worst_loss": 0.0}
     if not output.exists():
         return summary
 
@@ -49,13 +49,18 @@ def daily_summary(path="data/trades.csv", current=None):
                     closed_at = closed_at.replace(tzinfo=IST)
                 if closed_at.astimezone(IST).date().isoformat() != today:
                     continue
-                row["_pnl"] = float(row.get("pnl", 0) or 0)
+                row["_gross_pnl"] = float(row.get("pnl", 0) or 0)
+                row["_brokerage"] = float(row.get("brokerage_inr", 0) or 0)
+                row["_pnl"] = float(row.get("net_pnl") if row.get("net_pnl") not in (None, "") else row["_gross_pnl"])
             except (TypeError, ValueError):
                 continue
             rows.append(row)
 
     summary["closed_trades"] = len(rows)
-    summary["pnl"] = round(sum(row["_pnl"] for row in rows), 2)
+    summary["gross_pnl"] = round(sum(row["_gross_pnl"] for row in rows), 2)
+    summary["brokerage"] = round(sum(row["_brokerage"] for row in rows), 2)
+    summary["net_pnl"] = round(sum(row["_pnl"] for row in rows), 2)
+    summary["pnl"] = summary["net_pnl"]
     summary["worst_loss"] = round(min((row["_pnl"] for row in rows), default=0.0), 2)
     summary["losing_trades"] = sum(1 for row in rows if row["_pnl"] < 0)
     for row in reversed(rows):
