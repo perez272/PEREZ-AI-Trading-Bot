@@ -96,6 +96,13 @@ def analyze_chain(
             leg = _leg(row, side)
             key = str(leg["instrument_key"] or "")
             old = previous.get(key) if key else None
+            if old and old.get("observed_at"):
+                try:
+                    age = (now - _local_datetime(old["observed_at"])).total_seconds()
+                    if age < 0 or age > 120:
+                        old = None
+                except (TypeError, ValueError):
+                    old = None
             leg.update({"side": side, "strike": strike, "expiry": str(expiry)[:10] if expiry else None})
             leg["oi_change"] = (leg["oi"] - _number(old.get("oi"))
                                 if old and leg["oi"] is not None and _number(old.get("oi")) is not None else None)
@@ -137,7 +144,7 @@ def analyze_chain(
                      and x["premium_change"] is not None and x["premium_change"] > 0 for x in rows)
     put_build = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
     call_build = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
-    old_spots = [_number(x.get("spot")) for x in previous.values() if _number(x.get("spot")) is not None]
+    old_spots = [_number(x.get("spot")) for x in previous.values() if _number(x.get("spot")) is not None and (not x.get("observed_at") or 0 <= (now - _local_datetime(x["observed_at"])).total_seconds() <= 120)]
     old_spot = median(old_spots) if old_spots else None
     spot_up = spot is not None and old_spot is not None and spot > old_spot
     spot_down = spot is not None and old_spot is not None and spot < old_spot
@@ -154,7 +161,7 @@ def analyze_chain(
         "symbol": str(symbol).upper(), "observed_at": now.isoformat(), "spot": spot,
         "expiry": expiry_info["expiry"], "dte": expiry_info["dte"], "expiry_bucket": expiry_info["bucket"],
         "strike_step": step, "atm_strike": min(strikes, key=lambda value: abs(value - spot)) if spot is not None and strikes else None,
-        "candidates": candidates, "highest_combined_oi_strike": highest,
+        "candidates": candidates, "oi_evidence": [{"side": x["side"], "strike": x["strike"], "oi": x["oi"], "oi_change": x["oi_change"], "premium": x["ltp"], "premium_change": x["premium_change"], "volume": x["volume"]} for x in rows if x["oi"] is not None], "highest_combined_oi_strike": highest,
         "highest_combined_oi": combined.get(highest) if highest is not None else None,
         "pinning_window": midday, "pinning_candidate": pinned,
         "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
@@ -189,11 +196,11 @@ def record_chain_snapshot(
             observed_at TEXT NOT NULL, payload_json TEXT NOT NULL)""")
         for key in current:
             row = conn.execute(
-                "SELECT oi,ltp,spot FROM chain_snapshots WHERE instrument_key=? ORDER BY observed_at DESC LIMIT 1",
+                "SELECT oi,ltp,spot,observed_at FROM chain_snapshots WHERE instrument_key=? ORDER BY observed_at DESC LIMIT 1",
                 (key,),
             ).fetchone()
             if row:
-                previous[key] = {"oi": row[0], "ltp": row[1], "spot": row[2]}
+                previous[key] = {"oi": row[0], "ltp": row[1], "spot": row[2], "observed_at": row[3]}
         result = analyze_chain(symbol, chain, now, previous)
         for key, item in current.items():
             conn.execute("INSERT OR REPLACE INTO chain_snapshots VALUES (?,?,?,?,?,?)",
