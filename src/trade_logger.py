@@ -6,7 +6,7 @@ FIELDS = [
     "closed_at", "underlying", "signal", "contract", "exchange",
     "entry", "exit", "original_quantity", "exit_quantity", "remaining_quantity",
     "lots", "investment", "realized_pnl", "unrealized_pnl", "pnl",
-    "pnl_percent", "exit_reason",
+    "pnl_percent", "exit_reason", "brokerage_inr", "net_pnl",
 ]
 
 
@@ -50,6 +50,13 @@ def log_closed_trade(trade, result, path="data/trades.csv"):
         "pnl_percent": result["pnl_percent"],
         "exit_reason": result["exit_reason"],
     }
+    # One flat paper brokerage estimate per completed trade, not per partial exit.
+    try:
+        brokerage = max(0.0, float(__import__("os").getenv("PAPER_TRADE_COST_INR", "30")))
+    except (TypeError, ValueError):
+        raise ValueError("PAPER_TRADE_COST_INR must be a non-negative number")
+    record["brokerage_inr"] = round(brokerage, 2)
+    record["net_pnl"] = round(float(record["pnl"]) - record["brokerage_inr"], 2)
     trade_id = record.get("trade_id", "")
     if trade_id and output.exists() and output.stat().st_size > 0:
         with output.open(newline="", encoding="utf-8") as file:
