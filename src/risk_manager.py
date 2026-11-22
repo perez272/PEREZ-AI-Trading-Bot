@@ -50,8 +50,20 @@ def daily_summary(path="data/trades.csv", current=None):
                 if closed_at.astimezone(IST).date().isoformat() != today:
                     continue
                 row["_gross_pnl"] = float(row.get("pnl", 0) or 0)
-                row["_brokerage"] = float(row.get("brokerage_inr", 0) or 0)
-                row["_pnl"] = float(row.get("net_pnl") if row.get("net_pnl") not in (None, "") else row["_gross_pnl"])
+                fee_value = row.get("brokerage_inr")
+                if fee_value in (None, ""):
+                    fee_value = (
+                        os.getenv("PAPER_TRADE_COST_INR", "30")
+                        if os.getenv("PAPER_MODE", "false").lower() == "true"
+                        else 0
+                    )
+                row["_brokerage"] = max(0.0, float(fee_value or 0))
+                net_value = row.get("net_pnl")
+                row["_pnl"] = (
+                    float(net_value)
+                    if net_value not in (None, "")
+                    else round(row["_gross_pnl"] - row["_brokerage"], 2)
+                )
             except (TypeError, ValueError):
                 continue
             rows.append(row)
