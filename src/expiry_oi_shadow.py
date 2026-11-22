@@ -96,6 +96,8 @@ def analyze_chain(
             leg = _leg(row, side)
             key = str(leg["instrument_key"] or "")
             old = previous.get(key) if key else None
+            if old and not old.get("observed_at"):
+                old = None
             if old and old.get("observed_at"):
                 try:
                     age = (now - _local_datetime(old["observed_at"])).total_seconds()
@@ -120,7 +122,8 @@ def analyze_chain(
     for leg in rows:
         if leg["oi"] is not None:
             combined[leg["strike"]] += leg["oi"]
-    highest = max(combined, key=combined.get) if combined else None
+    oi_chain_complete = bool(rows) and all(x["oi"] is not None for x in rows)
+    highest = max(combined, key=combined.get) if combined and oi_chain_complete else None
     call_oi = {x["strike"]: x["oi"] for x in rows if x["side"] == "CE" and x["oi"] is not None}
     put_oi = {x["strike"]: x["oi"] for x in rows if x["side"] == "PE" and x["oi"] is not None}
     settlement_costs = {
@@ -128,7 +131,7 @@ def analyze_chain(
         + sum(max(strike - settlement, 0.0) * oi for strike, oi in put_oi.items())
         for settlement in strikes
     }
-    max_pain = min(settlement_costs, key=settlement_costs.get) if settlement_costs else None
+    max_pain = min(settlement_costs, key=settlement_costs.get) if settlement_costs and oi_chain_complete else None
 
     candidates = []
     if spot is not None and step:
@@ -153,7 +156,7 @@ def analyze_chain(
                      and x["premium_change"] is not None and x["premium_change"] > 0 for x in near_rows)
     put_build = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in near_rows)
     call_build = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in near_rows)
-    old_spots = [_number(x.get("spot")) for x in previous.values() if _number(x.get("spot")) is not None and (not x.get("observed_at") or 0 <= (now - _local_datetime(x["observed_at"])).total_seconds() <= 120)]
+    old_spots = [_number(x.get("spot")) for x in previous.values() if x.get("observed_at") and _number(x.get("spot")) is not None and 0 <= (now - _local_datetime(x["observed_at"])).total_seconds() <= 120]
     old_spot = median(old_spots) if old_spots else None
     spot_up = spot is not None and old_spot is not None and spot > old_spot
     spot_down = spot is not None and old_spot is not None and spot < old_spot
@@ -172,6 +175,7 @@ def analyze_chain(
         "strike_step": step, "atm_strike": min(strikes, key=lambda value: abs(value - spot)) if spot is not None and strikes else None,
         "candidates": candidates, "oi_evidence": [{"side": x["side"], "strike": x["strike"], "oi": x["oi"], "oi_change": x["oi_change"], "premium": x["ltp"], "premium_change": x["premium_change"], "volume": x["volume"]} for x in rows if x["oi"] is not None], "highest_combined_oi_strike": highest,
         "highest_combined_oi": combined.get(highest) if highest is not None else None,
+        "oi_chain_complete": oi_chain_complete,
         "max_pain_strike": max_pain, "max_pain_payout": settlement_costs.get(max_pain) if max_pain is not None else None,
         "pinning_window": midday, "pinning_candidate": pinned,
         "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
@@ -229,7 +233,9 @@ def latest_observations(db_path: Path = DEFAULT_DB, limit: int = 30) -> list[dic
         return []
     try:
         with sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=2) as conn:
-            rows = conn.execute("SELECT payload_json FROM observations ORDER BY id DESC LIMIT ?",
+            rows = conn.execute("""SELECT payload_json FROM observations AS o WHERE id IN
+                                 (SELECT MAX(id) FROM observations GROUP BY symbol)
+                                 ORDER BY id DESC LIMIT ?""",
                                  (max(1, min(int(limit), 100)),)).fetchall()
         return [json.loads(row[0]) for row in rows]
     except (sqlite3.Error, OSError, ValueError, TypeError):
