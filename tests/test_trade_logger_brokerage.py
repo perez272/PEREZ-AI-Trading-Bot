@@ -16,5 +16,5 @@ def test_completed_trade_charges_brokerage_once(tmp_path, monkeypatch):
     second = log_closed_trade(trade, result, path)
     assert first["brokerage_inr"] == 30.0
     assert first["net_pnl"] == -31.0
-    assert second["net_pnl"] == -31.0
+    assert float(second["net_pnl"]) == -31.0
     assert path.read_text().count("T1") == 1
