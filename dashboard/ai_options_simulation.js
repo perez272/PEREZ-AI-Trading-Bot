@@ -45,6 +45,10 @@ root.innerHTML=`
  <div id="sim-disclaimer" class="sim-muted">Loading recorded simulation evidence…</div>
  <div class="sim-head" style="margin-top:10px"><div class="sim-title">EXPIRY &amp; OI SHADOW INTELLIGENCE</div><span class="sim-muted">Observation only · no entry gating</span></div>
  <div id="sim-expiry-oi"><div class="sim-empty">Waiting for recorded option-chain snapshots…</div></div>
+ <div class="sim-head" style="margin-top:10px"><div class="sim-title">SNIPER EXPIRY MODE · STRICT CONFLUENCE</div><span class="sim-muted">Simulation only · never authorizes entries</span></div>
+ <div id="sim-sniper"><div class="sim-empty">Waiting for recorded expiry/OI observations…</div></div>
+ <div class="sim-head" style="margin-top:10px"><div class="sim-title">SNIPER RUNNER · RECORDED PATH REPLAY</div><span class="sim-muted">All quantity · ₹30 flat fee · simulation only</span></div>
+ <div id="sim-runner"><div class="sim-empty">Waiting for recorded paper-trade paths…</div></div>
  <div id="sim-list"><div class="sim-empty">Loading scenarios…</div></div>
 </div>`;
 mount.innerHTML='';mount.appendChild(root);
@@ -81,9 +85,30 @@ function renderExpiryOi(){
   return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.expiry_bucket)+' · DTE '+esc(x.dte)+'</h4><div class="sim-meta">Spot '+esc(num(x.spot))+' · Expiry '+esc(x.expiry)+' · Observed '+esc(x.observed_at)+'</div><div class="sim-meta">Highest combined OI strike: '+esc(num(x.highest_combined_oi_strike))+' · Pinning window: '+(x.pinning_window?'YES':'NO')+' · Pin candidate: '+(x.pinning_candidate?'YES':'NO')+' · Max pain: '+esc(num(x.max_pain_strike))+' · OI chain complete: '+(x.oi_chain_complete?'YES':'NO')+' · Breakout: '+esc(x.breakout_status)+'</div><div class="sim-meta">OI pattern: '+esc(x.oi_direction)+' · 0-DTE late cutoff: '+(x.late_0dte_cutoff?'REACHED':'NOT REACHED')+'</div><div class="sim-levels">'+candidates+'</div>'+oiTable+'<div class="sim-meta">'+esc(x.oi_note)+'</div></article>';
  }).join('');
 }
+function renderSniper(){
+ const host=document.getElementById('sim-sniper');
+ const rows=payload.sniper_expiry_observations||[];
+ if(!rows.length){host.innerHTML='<div class="sim-empty">No expiry/OI observations recorded. Sniper remains unavailable until fresh evidence exists.</div>';return}
+ host.innerHTML=rows.map(x=>{
+  const checks=Object.entries(x.checks||{}).map(([k,v])=>'<span class="sim-level">'+esc(k.replaceAll('_',' '))+': '+(v?'PASS':'FAIL')+'</span>').join('');
+  const reasons=(x.rejection_reasons||[]).map(esc).join(' · ')||'All simulated confluence checks passed.';
+  const status=x.eligible?'<span style="color:#55e3a0">CONFLUENCE PASS</span>':'<span style="color:#ff9aa8">REJECTED</span>';
+  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.expiry_bucket)+' · '+esc(x.direction||'DIRECTION UNCONFIRMED')+' · '+status+'</h4><div class="sim-meta">Spot '+esc(num(x.spot))+' · Max pain '+esc(num(x.max_pain_strike))+' · OI '+esc(x.oi_direction)+' · Breakout '+esc(x.breakout_status)+'</div><div class="sim-levels">'+checks+'</div><div class="sim-meta">Reasons: '+reasons+'</div><div class="sim-meta">Observation-only evaluation. No entry, order, strike selection, or live/paper execution is triggered.</div></article>';
+ }).join('');
+}
+function renderRunner(){
+ const host=document.getElementById('sim-runner');
+ const rows=payload.sniper_runner_comparisons||[];
+ if(!rows.length){host.innerHTML='<div class="sim-empty">No recorded paper trades available for runner replay.</div>';return}
+ host.innerHTML=rows.map(x=>{
+  const pnl=x.net_pnl==null?'Net P&L unavailable':money(x.net_pnl);
+  const note=x.status==='NO_RECORDED_PATH'?'No recorded premium path.':('Runner '+(x.runner_activated?'activated':'not activated')+' · stop '+num(x.final_stop)+' · exit '+num(x.exit_price));
+  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.contract||x.trade_id)+'</h4><div class="sim-meta">Recorded P&L '+money(x.recorded_pnl)+' · Simulated runner net P&L '+esc(pnl)+'</div><div class="sim-meta">'+esc(note)+' · observations '+esc(x.observations_used??'—')+'</div></article>';
+ }).join('');
+}
 function render(){const rows=view==='paper'?payload.paper_trades:payload.rejected_scenarios;const list=document.getElementById('sim-list');list.innerHTML=rows?.length?rows.map(card).join(''):'<div class="sim-empty">'+(view==='paper'?'No paper-trade lifecycle entries found.':'No rejected setups were recorded in the rejection table.')+'</div>';document.querySelectorAll('#ai-sim-workspace .sim-tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.view===view)));}
 document.querySelectorAll('#ai-sim-workspace .sim-tab').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render()}));
 async function market(){const status=document.getElementById('sim-market-status');try{const r=await fetch('/api/market-intelligence',{cache:'no-store'});const d=await r.json();status.textContent=d.status||'UNKNOWN';const rows=d.symbols||[];document.getElementById('sim-market-summary').textContent=(d.provider||'Provider')+' · '+(d.as_of||'timestamp unavailable')+' · '+rows.length+' live quotes';document.getElementById('sim-market-rows').innerHTML=rows.length?rows.slice(0,30).map(x=>'<tr><td>'+esc(x.symbol)+'</td><td>'+esc(num(x.price))+'</td><td>'+esc(x.change_pct==null?'—':x.change_pct+'%')+'</td><td>'+esc(num(x.volume))+'</td></tr>').join(''):'<tr><td colspan="4">'+esc(d.reason||'No verified quotes available')+'</td></tr>';const opts=d.options||[];document.getElementById('sim-option-rows').innerHTML=opts.length?opts.slice(0,20).map(x=>'<tr><td>'+esc(x.symbol)+'</td><td>'+esc(x.strike)+' '+esc(x.side)+'</td><td>'+esc(x.expiry)+'</td><td>'+esc(num(x.ltp))+'</td><td>'+esc(num(x.iv))+'</td><td>'+esc(num(x.delta))+'</td></tr>').join(''):'<tr><td colspan="6">No verified option-chain rows available.</td></tr>';document.getElementById('sim-market-note').textContent=d.demo===false?'Source: '+(d.source||'Upstox API')+'. Snapshot timestamp: '+(d.as_of||'unavailable')+'.':'Market data source not verified; values suppressed.'}catch(e){status.textContent='UNAVAILABLE';document.getElementById('sim-market-summary').textContent='Market Pulse unavailable: '+e.message}}
-async function simulations(){try{const r=await fetch('/api/ai-options-simulations',{cache:'no-store'});payload=await r.json();document.getElementById('sim-data-status').textContent=payload.status||'UNKNOWN';document.getElementById('sim-disclaimer').textContent=payload.disclaimer||'Recorded evidence only; no orders.';renderExpiryOi();render()}catch(e){document.getElementById('sim-data-status').textContent='UNAVAILABLE';document.getElementById('sim-list').innerHTML='<div class="sim-empty">Simulation data unavailable: '+esc(e.message)+'</div>'}}
+async function simulations(){try{const r=await fetch('/api/ai-options-simulations',{cache:'no-store'});payload=await r.json();document.getElementById('sim-data-status').textContent=payload.status||'UNKNOWN';document.getElementById('sim-disclaimer').textContent=payload.disclaimer||'Recorded evidence only; no orders.';renderExpiryOi();renderSniper();renderRunner();render()}catch(e){document.getElementById('sim-data-status').textContent='UNAVAILABLE';document.getElementById('sim-list').innerHTML='<div class="sim-empty">Simulation data unavailable: '+esc(e.message)+'</div>'}}
 market();simulations();setInterval(market,15000);setInterval(simulations,15000);
 })();
