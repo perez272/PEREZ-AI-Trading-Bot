@@ -65,6 +65,8 @@ def _leg(row: dict[str, Any], side: str) -> dict[str, Any]:
         "oi": _number(market.get("oi")),
         "volume": _number(market.get("volume")),
         "delta": _number(greeks.get("delta")),
+        "gamma": _number(greeks.get("gamma")),
+        "lot_size": _number(option.get("lot_size") or row.get("lot_size")),
     }
 
 
@@ -147,6 +149,7 @@ def analyze_chain(
                         "delta": delta, "volume": leg["volume"], "oi": leg["oi"],
                         "delta_in_band": DELTA_MIN <= delta <= DELTA_MAX if delta is not None else None,
                         "instrument_key": leg["instrument_key"],
+                        "gamma": leg["gamma"], "lot_size": leg["lot_size"],
                     })
 
     near_rows = [x for x in rows if spot is not None and step is not None and abs(x["strike"] - spot) <= 2 * step]

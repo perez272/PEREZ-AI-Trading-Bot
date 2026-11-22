@@ -40,4 +40,4 @@ jobs:
             echo 'ERROR: live-order API usage detected'
             exit 1
           fi
-          grep -RniE 'PAPER_MODE|ORDERS_ENABLED' main.py src deploy/systemd/perez-ai.service | head -30
+          git grep -nIE 'PAPER_MODE|ORDERS_ENABLED' -- main.py src deploy/systemd/perez-ai.service | sed -n '1,30p'

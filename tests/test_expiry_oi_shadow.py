@@ -152,3 +152,15 @@ def test_breakout_is_not_confirmed_without_prior_spot_beyond_oi_wall():
     assert result["oi_direction"] == "BULLISH_OI_PATTERN"
     assert result["breakout_status"] == "NOT_CONFIRMED"
     assert result["breakout_confirmed"] is False
+
+
+
+def test_candidate_exposes_real_gamma_and_lot_size_when_provider_supplies_them():
+    chain = _chain()
+    chain[0]["call_options"]["option_greeks"]["gamma"] = 0.031
+    chain[0]["call_options"]["lot_size"] = 25
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    candidate = next(item for item in result["candidates"]
+                     if item["side"] == "CE" and item["strike"] == 25000)
+    assert candidate["gamma"] == 0.031
+    assert candidate["lot_size"] == 25
