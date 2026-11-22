@@ -63,6 +63,30 @@ def test_bullish_oi_pattern_requires_spot_rise_call_unwind_and_put_build():
     assert analyze_chain("NIFTY", chain, "2026-11-22T10:00:15+05:30", previous)["oi_direction"] == "BULLISH_OI_PATTERN"
 
 
+def test_bearish_oi_pattern_requires_spot_fall_put_unwind_and_call_build():
+    chain = _chain()
+    previous = {}
+    for row in chain:
+        for side in ("CE", "PE"):
+            option = row["call_options" if side == "CE" else "put_options"]
+            previous[option["instrument_key"]] = {
+                "oi": option["market_data"]["oi"] + (-100 if side == "CE" else 100),
+                "ltp": option["market_data"]["ltp"] - (5 if side == "PE" else 0),
+                "spot": 25030, "observed_at": "2026-11-22T10:00:00+05:30",
+            }
+    assert analyze_chain("NIFTY", chain, "2026-11-22T10:00:15+05:30", previous)["oi_direction"] == "BEARISH_OI_PATTERN"
+
+
+def test_incomplete_oi_chain_does_not_claim_max_pain_or_pinning_strike():
+    chain = _chain()
+    chain[0]["put_options"]["market_data"]["oi"] = None
+    result = analyze_chain("NIFTY", chain, "2026-11-22T12:00:00+05:30")
+    assert result["oi_chain_complete"] is False
+    assert result["highest_combined_oi_strike"] is None
+    assert result["max_pain_strike"] is None
+    assert result["pinning_candidate"] is False
+
+
 def test_midday_pinning_requires_proximity_to_highest_combined_oi_strike():
     result = analyze_chain("NIFTY", _chain(), "2026-11-22T12:00:00+05:30")
     assert result["pinning_window"] is True
