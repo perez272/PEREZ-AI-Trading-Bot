@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.expiry_oi_shadow import latest_observations as _latest_expiry_oi_observations
-from src.sniper_expiry_simulation import build_sniper_observations
+from src.sniper_expiry_simulation import build_sniper_observations, simulate_runner
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "data" / "memory" / "perez_ai_memory.db"
@@ -233,6 +233,23 @@ def _shadow_paths(rows: list[dict[str, Any]], db: Path = ROOT / "data" / "memory
         })
     return result
 
+
+def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run the all-quantity Sniper trail only on recorded paper-trade price paths."""
+    results = []
+    for trade in paper:
+        result = simulate_runner(
+            trade.get("path") or [], trade.get("entry"), trade.get("stop_loss"),
+            int(trade.get("quantity") or 0),
+        )
+        results.append({
+            "trade_id": trade.get("id"), "symbol": trade.get("symbol"),
+            "contract": trade.get("contract"), "recorded_pnl": trade.get("pnl"),
+            **result,
+        })
+    return results
+
+
 def build_simulations() -> dict[str, Any]:
     events = _read_lifecycle()
     rejections = _rejections()
@@ -241,6 +258,7 @@ def build_simulations() -> dict[str, Any]:
     shadow = _shadow_paths(rejections)
     expiry_oi = _latest_expiry_oi_observations()
     sniper_observations = build_sniper_observations(expiry_oi)
+    sniper_runner_comparisons = _sniper_runner_comparisons(paper)
     shadow_by_id = {item["id"]: item for item in shadow}
     rejected = [shadow_by_id.get(item["id"], item) for item in rejected]
     known = {item["id"] for item in rejected}
@@ -253,6 +271,7 @@ def build_simulations() -> dict[str, Any]:
         "rejected_scenarios": rejected,
         "expiry_oi_observations": expiry_oi,
         "sniper_expiry_observations": sniper_observations,
-        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi), "sniper_expiry_observations": len(sniper_observations), "sniper_confirmed": sum(1 for x in sniper_observations if x["eligible"])},
+        "sniper_runner_comparisons": sniper_runner_comparisons,
+        "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi), "sniper_expiry_observations": len(sniper_observations), "sniper_confirmed": sum(1 for x in sniper_observations if x["eligible"]), "sniper_runner_comparisons": len(sniper_runner_comparisons)},
         "disclaimer": "Expiry/OI and Sniper signals are observation-only. Missing ORB, multi-timeframe, volume, Greeks, or historical premium-path evidence fails closed; these results never authorize entries or orders. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
     }
