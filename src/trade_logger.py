@@ -52,7 +52,12 @@ def log_closed_trade(trade, result, path="data/trades.csv"):
     }
     # One flat paper brokerage estimate per completed trade, not per partial exit.
     try:
-        brokerage = max(0.0, float(__import__("os").getenv("PAPER_TRADE_COST_INR", "30")))
+        import os
+        brokerage = (
+            max(0.0, float(os.getenv("PAPER_TRADE_COST_INR", "30")))
+            if os.getenv("PAPER_MODE", "false").lower() == "true"
+            else 0.0
+        )
     except (TypeError, ValueError):
         raise ValueError("PAPER_TRADE_COST_INR must be a non-negative number")
     record["brokerage_inr"] = round(brokerage, 2)
