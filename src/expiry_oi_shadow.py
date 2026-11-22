@@ -1,0 +1,219 @@
+"""Observation-only expiry and option-chain intelligence.
+
+No trade eligibility, order, sizing, or risk decisions are made here.
+"""
+from __future__ import annotations
+
+import json
+import math
+import sqlite3
+from datetime import date, datetime, time
+from pathlib import Path
+from statistics import median
+from typing import Any
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = ROOT / "data" / "memory" / "expiry_oi_shadow.sqlite3"
+IST = ZoneInfo("Asia/Kolkata")
+DELTA_MIN = 0.45
+DELTA_MAX = 0.60
+LATE_0DTE_CUTOFF = time(14, 15)
+PIN_WINDOW_START = time(11, 30)
+PIN_WINDOW_END = time(13, 30)
+
+
+def _number(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_datetime(value: str | datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(IST)
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=IST) if parsed.tzinfo is None else parsed.astimezone(IST)
+
+
+def expiry_class(expiry: str | date, observed_at: str | datetime | None = None) -> dict[str, Any]:
+    now = _local_datetime(observed_at)
+    expiry_date = expiry if isinstance(expiry, date) else date.fromisoformat(str(expiry)[:10])
+    days = (expiry_date - now.date()).days
+    return {"expiry": expiry_date.isoformat(), "dte": days,
+            "bucket": "0DTE" if days == 0 else "1DTE" if days == 1 else "OTHER" if days > 1 else "EXPIRED"}
+
+
+def _strike_step(strikes: list[float]) -> float | None:
+    ordered = sorted(set(strikes))
+    gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > a]
+    return median(gaps) if gaps else None
+
+
+def _leg(row: dict[str, Any], side: str) -> dict[str, Any]:
+    option = row.get("call_options" if side == "CE" else "put_options") or {}
+    market = option.get("market_data") or {}
+    greeks = option.get("option_greeks") or {}
+    return {
+        "instrument_key": option.get("instrument_key"),
+        "ltp": _number(market.get("ltp")),
+        "oi": _number(market.get("oi")),
+        "volume": _number(market.get("volume")),
+        "delta": _number(greeks.get("delta")),
+    }
+
+
+def analyze_chain(
+    symbol: str,
+    chain: list[dict[str, Any]],
+    observed_at: str | datetime | None = None,
+    previous: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Summarize one timestamped chain. Missing/stale comparisons remain unavailable."""
+    now = _local_datetime(observed_at)
+    previous = previous or {}
+    rows = []
+    strikes = []
+    spots = []
+    expiries = []
+    for row in chain or []:
+        strike = _number(row.get("strike_price"))
+        expiry = row.get("expiry")
+        spot = _number(row.get("underlying_spot_price") or row.get("underlying_spot"))
+        if strike is None or strike <= 0:
+            continue
+        strikes.append(strike)
+        if spot is not None and spot > 0:
+            spots.append(spot)
+        if expiry:
+            expiries.append(str(expiry)[:10])
+        for side in ("CE", "PE"):
+            leg = _leg(row, side)
+            key = str(leg["instrument_key"] or "")
+            old = previous.get(key) if key else None
+            leg.update({"side": side, "strike": strike, "expiry": str(expiry)[:10] if expiry else None})
+            leg["oi_change"] = (leg["oi"] - _number(old.get("oi"))
+                                if old and leg["oi"] is not None and _number(old.get("oi")) is not None else None)
+            leg["premium_change"] = (leg["ltp"] - _number(old.get("ltp"))
+                                     if old and leg["ltp"] is not None and _number(old.get("ltp")) is not None else None)
+            rows.append(leg)
+    spot = median(spots) if spots else None
+    step = _strike_step(strikes)
+    expiry = min(expiries) if expiries else None
+    expiry_info = expiry_class(expiry, now) if expiry else {"expiry": None, "dte": None, "bucket": "UNKNOWN"}
+
+    combined: dict[float, float] = {}
+    for strike in strikes:
+        combined[strike] = 0.0
+    for leg in rows:
+        if leg["oi"] is not None:
+            combined[leg["strike"]] += leg["oi"]
+    highest = max(combined, key=combined.get) if combined else None
+
+    candidates = []
+    if spot is not None and step:
+        atm = min(strikes, key=lambda value: abs(value - spot))
+        for side in ("CE", "PE"):
+            target = atm - step if side == "CE" else atm + step
+            candidate_strikes = {atm, min(strikes, key=lambda value: abs(value - target))}
+            for leg in rows:
+                if leg["side"] == side and leg["strike"] in candidate_strikes:
+                    delta = abs(leg["delta"]) if leg["delta"] is not None else None
+                    candidates.append({
+                        "side": side, "strike": leg["strike"], "ltp": leg["ltp"],
+                        "delta": delta, "volume": leg["volume"], "oi": leg["oi"],
+                        "delta_in_band": DELTA_MIN <= delta <= DELTA_MAX if delta is not None else None,
+                        "instrument_key": leg["instrument_key"],
+                    })
+
+    call_unwind = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] < 0
+                      and x["premium_change"] is not None and x["premium_change"] > 0 for x in rows)
+    put_unwind = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] < 0
+                     and x["premium_change"] is not None and x["premium_change"] > 0 for x in rows)
+    put_build = any(x["side"] == "PE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
+    call_build = any(x["side"] == "CE" and x["oi_change"] is not None and x["oi_change"] > 0 for x in rows)
+    old_spots = [_number(x.get("spot")) for x in previous.values() if _number(x.get("spot")) is not None]
+    old_spot = median(old_spots) if old_spots else None
+    spot_up = spot is not None and old_spot is not None and spot > old_spot
+    spot_down = spot is not None and old_spot is not None and spot < old_spot
+    direction = "BULLISH_OI_PATTERN" if spot_up and call_unwind and put_build else (
+        "BEARISH_OI_PATTERN" if spot_down and put_unwind and call_build else "NO_CONFIRMED_OI_PATTERN")
+
+    local_time = now.timetz().replace(tzinfo=None)
+    midday = PIN_WINDOW_START <= local_time <= PIN_WINDOW_END
+    pinned = bool(midday and spot is not None and highest is not None and step is not None
+                  and abs(spot - highest) <= step / 2)
+    late = expiry_info["bucket"] == "0DTE" and local_time >= LATE_0DTE_CUTOFF
+
+    return {
+        "symbol": str(symbol).upper(), "observed_at": now.isoformat(), "spot": spot,
+        "expiry": expiry_info["expiry"], "dte": expiry_info["dte"], "expiry_bucket": expiry_info["bucket"],
+        "strike_step": step, "atm_strike": min(strikes, key=lambda value: abs(value - spot)) if spot is not None and strikes else None,
+        "candidates": candidates, "highest_combined_oi_strike": highest,
+        "highest_combined_oi": combined.get(highest) if highest is not None else None,
+        "pinning_window": midday, "pinning_candidate": pinned,
+        "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
+        "oi_direction": direction,
+        "oi_note": "OI changes are interval-based proxies, not proof of participant intent; premium and spot confirmation are required.",
+        "late_0dte_cutoff": late, "safety": "OBSERVATION_ONLY",
+    }
+
+
+def record_chain_snapshot(
+    symbol: str, chain: list[dict[str, Any]], observed_at: str | datetime | None = None,
+    db_path: Path = DEFAULT_DB,
+) -> dict[str, Any]:
+    now = _local_datetime(observed_at)
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    current = {}
+    for row in chain or []:
+        spot = _number(row.get("underlying_spot_price") or row.get("underlying_spot"))
+        for side in ("CE", "PE"):
+            leg = _leg(row, side)
+            key = str(leg["instrument_key"] or "")
+            if key and leg["oi"] is not None:
+                current[key] = {"oi": leg["oi"], "ltp": leg["ltp"], "spot": spot}
+    previous = {}
+    with sqlite3.connect(db_path, timeout=3) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS chain_snapshots (
+            instrument_key TEXT NOT NULL, symbol TEXT NOT NULL, observed_at TEXT NOT NULL,
+            oi REAL, ltp REAL, spot REAL, PRIMARY KEY(instrument_key, observed_at))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+            observed_at TEXT NOT NULL, payload_json TEXT NOT NULL)""")
+        for key in current:
+            row = conn.execute(
+                "SELECT oi,ltp,spot FROM chain_snapshots WHERE instrument_key=? ORDER BY observed_at DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+            if row:
+                previous[key] = {"oi": row[0], "ltp": row[1], "spot": row[2]}
+        result = analyze_chain(symbol, chain, now, previous)
+        for key, item in current.items():
+            conn.execute("INSERT OR REPLACE INTO chain_snapshots VALUES (?,?,?,?,?,?)",
+                         (key, str(symbol).upper(), now.isoformat(), item["oi"], item["ltp"], item["spot"]))
+        conn.execute("INSERT INTO observations(symbol,observed_at,payload_json) VALUES (?,?,?)",
+                     (str(symbol).upper(), now.isoformat(), json.dumps(result, separators=(",", ":"))))
+        conn.execute("""DELETE FROM observations WHERE id NOT IN
+                        (SELECT id FROM observations ORDER BY id DESC LIMIT 500)""")
+        conn.execute("""DELETE FROM chain_snapshots WHERE rowid NOT IN
+                        (SELECT rowid FROM chain_snapshots ORDER BY observed_at DESC LIMIT 30000)""")
+    return result
+
+
+def latest_observations(db_path: Path = DEFAULT_DB, limit: int = 30) -> list[dict[str, Any]]:
+    if not Path(db_path).exists():
+        return []
+    try:
+        with sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=2) as conn:
+            rows = conn.execute("SELECT payload_json FROM observations ORDER BY id DESC LIMIT ?",
+                                 (max(1, min(int(limit), 100)),)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return []
