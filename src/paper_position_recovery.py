@@ -203,13 +203,13 @@ def recover_paper_positions():
                     "pnl_percent": float(close_event.get("pnl_percent") or 0.0),
                     "exit_reason": str(close_event.get("exit_reason") or "RECOVERED_CLOSE"),
                 }
-                log_closed_trade(closed_trade, closed_result, "data/trades.csv")
+                record = log_closed_trade(closed_trade, closed_result, "data/trades.csv")
 
                 from src.trading_risk_manager import TradingRiskManager
                 risk_manager = TradingRiskManager()
                 risk_manager.record_trade_result(
                     str(close_event.get("lineage_id") or trade_id),
-                    pnl,
+                    float((record or {}).get("net_pnl", pnl) or 0.0),
                     stop_loss=str(close_event.get("exit_reason") or "").upper()
                                in {"STOP_LOSS", "TRAILING_STOP"},
                     result_id=trade_id,

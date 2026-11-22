@@ -8,6 +8,12 @@ from threading import RLock
 from typing import Optional
 import json
 import os
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows test/dev fallback
+    fcntl = None
 
 UTC = timezone.utc
 
@@ -67,7 +73,8 @@ class TradingRiskManager:
         self.global_state = GlobalRiskState()
         self.processed_result_ids = set()
 
-        self._load_state()
+        with self._state_file_lock():
+            self._load_state()
 
     # ------------------------------------------------------------
     # Persistence
@@ -115,12 +122,27 @@ class TradingRiskManager:
                 f"Cannot safely load risk state: {exc}"
             ) from exc
 
+    @contextmanager
+    def _state_file_lock(self):
+        """Serialize cross-process risk-state reads and writes on Linux."""
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_file.with_suffix(self.state_file.suffix + ".lock")
+        with lock_path.open("a+") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     # ------------------------------------------------------------
     # Circuit breaker
     # ------------------------------------------------------------
 
     def is_circuit_breaker_active(self):
-        with self._lock:
+        with self._lock, self._state_file_lock():
+            self._load_state()
             until = self.global_state.circuit_breaker_until
 
             if not until:
@@ -141,7 +163,8 @@ class TradingRiskManager:
             return False
 
     def circuit_breaker_remaining(self):
-        with self._lock:
+        with self._lock, self._state_file_lock():
+            self._load_state()
             until = self.global_state.circuit_breaker_until
 
             if not until:
@@ -376,7 +399,10 @@ class TradingRiskManager:
         Legacy callers may omit result_id; production callers should provide
         the unique closed-trade ID to enable idempotency.
         """
-        with self._lock:
+        with self._lock, self._state_file_lock():
+            # Each monitor process may hold a stale instance; reload while holding
+            # the OS lock so loss streaks and idempotency are shared atomically.
+            self._load_state()
             if result_id:
                 result_id = str(result_id)
                 if result_id in self.processed_result_ids:

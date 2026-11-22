@@ -31,7 +31,7 @@ def daily_summary(path="data/trades.csv", current=None):
     current = current or now_ist()
     today = current.strftime("%Y-%m-%d")
     output = Path(path)
-    summary = {"closed_trades": 0, "pnl": 0.0, "consecutive_losses": 0, "losing_trades": 0, "worst_loss": 0.0}
+    summary = {"closed_trades": 0, "pnl": 0.0, "gross_pnl": 0.0, "brokerage": 0.0, "net_pnl": 0.0, "consecutive_losses": 0, "losing_trades": 0, "worst_loss": 0.0}
     if not output.exists():
         return summary
 
@@ -49,13 +49,30 @@ def daily_summary(path="data/trades.csv", current=None):
                     closed_at = closed_at.replace(tzinfo=IST)
                 if closed_at.astimezone(IST).date().isoformat() != today:
                     continue
-                row["_pnl"] = float(row.get("pnl", 0) or 0)
+                row["_gross_pnl"] = float(row.get("pnl", 0) or 0)
+                fee_value = row.get("brokerage_inr")
+                if fee_value in (None, ""):
+                    fee_value = (
+                        os.getenv("PAPER_TRADE_COST_INR", "30")
+                        if os.getenv("PAPER_MODE", "false").lower() == "true"
+                        else 0
+                    )
+                row["_brokerage"] = max(0.0, float(fee_value or 0))
+                net_value = row.get("net_pnl")
+                row["_pnl"] = (
+                    float(net_value)
+                    if net_value not in (None, "")
+                    else round(row["_gross_pnl"] - row["_brokerage"], 2)
+                )
             except (TypeError, ValueError):
                 continue
             rows.append(row)
 
     summary["closed_trades"] = len(rows)
-    summary["pnl"] = round(sum(row["_pnl"] for row in rows), 2)
+    summary["gross_pnl"] = round(sum(row["_gross_pnl"] for row in rows), 2)
+    summary["brokerage"] = round(sum(row["_brokerage"] for row in rows), 2)
+    summary["net_pnl"] = round(sum(row["_pnl"] for row in rows), 2)
+    summary["pnl"] = summary["net_pnl"]
     summary["worst_loss"] = round(min((row["_pnl"] for row in rows), default=0.0), 2)
     summary["losing_trades"] = sum(1 for row in rows if row["_pnl"] < 0)
     for row in reversed(rows):

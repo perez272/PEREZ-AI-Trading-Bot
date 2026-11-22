@@ -221,3 +221,14 @@ def test_reentry_persistence_failure_restores_existing_lineage(tmp_path, monkeyp
         raise AssertionError("expected simulated persistence failure")
 
     assert vars(rm.positions["LINEAGE-1"]) == before
+
+
+def test_separate_manager_instances_share_consecutive_loss_state(tmp_path):
+    first = manager(tmp_path)
+    second = manager(tmp_path)
+    first.record_trade_result("T1", -10, result_id="R1")
+    first.record_trade_result("T2", -10, result_id="R2")
+    second.record_trade_result("T3", -10, result_id="R3")
+    assert first.is_circuit_breaker_active() is True
+    assert first.status()["consecutive_losses"] == 3
+
