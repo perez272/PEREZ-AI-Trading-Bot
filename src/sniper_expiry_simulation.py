@@ -157,13 +157,20 @@ def select_sniper_contract(candidates: list[dict], spot: float, strike_step: flo
             continue
         if abs(strike - spot) > strike_step * 1.51 or not 0.45 <= abs(delta) <= 0.60:
             continue
-        quantity = int(lot)
+        lot_quantity = int(lot)
+        one_lot_cost = premium * lot_quantity
+        if one_lot_cost <= 0 or one_lot_cost > capital:
+            continue
+        affordable_lots = int(capital // one_lot_cost)
+        quantity = lot_quantity * affordable_lots
         cost = premium * quantity
-        if cost > capital:
+        if affordable_lots < 1 or quantity % lot_quantity != 0 or cost > capital:
             continue
         ranked.append({**row, "estimated_entry_cost": round(cost, 2),
-                       "whole_lot_quantity": quantity, "gamma_rank": gamma})
-    ranked.sort(key=lambda row: (row["gamma_rank"], _num(row.get("volume_ratio")) or 0), reverse=True)
+                       "whole_lot_quantity": quantity, "lot_size": lot_quantity,
+                       "affordable_lots": affordable_lots, "gamma_rank": gamma})
+    ranked.sort(key=lambda row: (row["gamma_rank"], _num(row.get("volume_ratio")) or 0,
+                                 -row["estimated_entry_cost"]), reverse=True)
     return {"selected": ranked[0] if ranked else None,
             "reason": "HIGHEST_GAMMA_AFFORDABLE_NEAR_ATM" if ranked else "NO_VALID_GAMMA_DELTA_AFFORDABLE_CONTRACT",
             "candidates": ranked, "safety": "OBSERVATION_ONLY"}
@@ -221,6 +228,47 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
         "net_return_pct": round(net / (entry * quantity) * 100, 2),
         "runner_activated": active, "final_stop": round(stop, 2),
         "observations_used": exit_index + 1, "safety": "SIMULATION_ONLY",
+    }
+
+
+def compare_runner_scenarios(
+    path: list[dict], entry: float, initial_stop: float, quantity: int,
+    brokerage: float = FLAT_BROKERAGE_INR,
+    activation_pcts: tuple[float, ...] = (40.0, 45.0, 50.0),
+    atr_multiples: tuple[float, ...] = (1.0, 1.5, 2.0),
+) -> dict:
+    """Compare runner parameter scenarios on the same recorded premium path.
+
+    This is a path replay, not a predictive backtest. It does not optimize live
+    parameters or modify any production trade monitor.
+    """
+    scenarios = []
+    for activation in activation_pcts:
+        for atr_multiple in atr_multiples:
+            result = simulate_runner(
+                path, entry, initial_stop, quantity, brokerage,
+                activation_pct=float(activation), atr_multiple=float(atr_multiple),
+            )
+            scenarios.append({
+                "activation_pct": float(activation),
+                "atr_multiple": float(atr_multiple),
+                **result,
+            })
+    valid = [item for item in scenarios if item.get("net_pnl") is not None]
+    best = max(valid, key=lambda item: item["net_pnl"]) if valid else None
+    return {
+        "status": "READY" if valid else "INSUFFICIENT_RECORDED_PATH",
+        "scenario_count": len(scenarios),
+        "scenarios": scenarios,
+        "best_observed_scenario": ({
+            "activation_pct": best["activation_pct"],
+            "atr_multiple": best["atr_multiple"],
+            "net_pnl": best["net_pnl"],
+            "net_return_pct": best["net_return_pct"],
+        } if best else None),
+        "comparison_basis": "SAME_RECORDED_OPTION_PREMIUM_PATH",
+        "safety": "SIMULATION_ONLY",
+        "warning": "Highest replay P&L is an in-sample path result, not evidence of future performance or a production parameter recommendation.",
     }
 
 
