@@ -163,6 +163,21 @@ def analyze_chain(
     direction = "BULLISH_OI_PATTERN" if spot_up and call_unwind and put_build else (
         "BEARISH_OI_PATTERN" if spot_down and put_unwind and call_build else "NO_CONFIRMED_OI_PATTERN")
 
+    # A clean breakout is observational only: require two consecutive fresh
+    # snapshots beyond the current highest-combined-OI wall, continued spot
+    # progress, and matching OI/premium direction confirmation.
+    wall_upper = highest + step / 2 if highest is not None and step is not None else None
+    wall_lower = highest - step / 2 if highest is not None and step is not None else None
+    up_breakout = bool(wall_upper is not None and spot is not None and old_spot is not None
+                       and old_spot > wall_upper and spot > wall_upper and spot > old_spot
+                       and direction == "BULLISH_OI_PATTERN")
+    down_breakout = bool(wall_lower is not None and spot is not None and old_spot is not None
+                         and old_spot < wall_lower and spot < wall_lower and spot < old_spot
+                         and direction == "BEARISH_OI_PATTERN")
+    breakout_status = ("UP_BREAKOUT_CONFIRMED" if up_breakout else
+                       "DOWN_BREAKOUT_CONFIRMED" if down_breakout else
+                       "NOT_CONFIRMED" if highest is not None else "INSUFFICIENT_OI_DATA")
+
     local_time = now.timetz().replace(tzinfo=None)
     midday = PIN_WINDOW_START <= local_time <= PIN_WINDOW_END
     pinned = bool(midday and spot is not None and highest is not None and step is not None
@@ -178,7 +193,7 @@ def analyze_chain(
         "oi_chain_complete": oi_chain_complete,
         "max_pain_strike": max_pain, "max_pain_payout": settlement_costs.get(max_pain) if max_pain is not None else None,
         "pinning_window": midday, "pinning_candidate": pinned,
-        "breakout_status": "NOT_CONFIRMED" if pinned else "NOT_EVALUATED",
+        "breakout_status": breakout_status,\n        "breakout_confirmed": up_breakout or down_breakout,
         "oi_direction": direction,
         "oi_note": ("OI changes are interval-based proxies, not proof of participant intent; premium and spot confirmation are required. " + ("Full-chain OI available." if oi_chain_complete else "Incomplete OI chain: max-pain and concentration metrics are unavailable.")),
         "late_0dte_cutoff": late, "safety": "OBSERVATION_ONLY",
