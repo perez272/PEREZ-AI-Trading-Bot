@@ -73,7 +73,8 @@ class TradingRiskManager:
         self.global_state = GlobalRiskState()
         self.processed_result_ids = set()
 
-        self._load_state()
+        with self._state_file_lock():
+            self._load_state()
 
     # ------------------------------------------------------------
     # Persistence
