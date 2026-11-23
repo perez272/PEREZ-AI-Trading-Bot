@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - EC2/Linux uses fcntl
 STATE_DIR = Path("data/runtime")
 LOCK_PATH = STATE_DIR / "perez_ai.lock"
 HEARTBEAT_PATH = STATE_DIR / "heartbeat.json"
+WORKER_HEARTBEAT_DIR = STATE_DIR / "worker_heartbeats"
 
 
 def acquire_single_instance():
@@ -44,8 +45,20 @@ def release_single_instance(handle):
         handle.close()
 
 
+def _heartbeat_path_for_current_process() -> Path:
+    """Keep worker heartbeats from overwriting the main service heartbeat."""
+    try:
+        owner_pid = int(LOCK_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, TypeError, ValueError):
+        owner_pid = None
+    if owner_pid == os.getpid():
+        return HEARTBEAT_PATH
+    WORKER_HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+    return WORKER_HEARTBEAT_DIR / f"{os.getpid()}.json"
+
+
 def write_heartbeat(status="running", **extra):
-    """Write a machine-readable heartbeat and optionally mirror it remotely."""
+    """Atomically write a process-owned heartbeat and mirror it remotely."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -54,9 +67,10 @@ def write_heartbeat(status="running", **extra):
         "status": status,
         **extra,
     }
-    temp = HEARTBEAT_PATH.with_suffix(".tmp")
+    heartbeat_path = _heartbeat_path_for_current_process()
+    temp = heartbeat_path.with_suffix(".tmp")
     temp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    temp.replace(HEARTBEAT_PATH)
+    temp.replace(heartbeat_path)
 
     # Remote publishing is deliberately best-effort. A cloud/API outage must
     # never stop the local scanner or paper-trading process.
