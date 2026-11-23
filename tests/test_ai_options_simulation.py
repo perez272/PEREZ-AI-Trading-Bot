@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from src.ai_options_simulation import _paper_trades, _rejected_scenarios, _shadow_paths, build_simulations
+from src.ai_options_simulation import _paper_trades, _rejected_scenarios, _shadow_paths, _sniper_runner_comparisons, build_simulations
 
 
 def test_paper_trade_path_uses_only_recorded_prices():
@@ -73,3 +73,50 @@ def test_shadow_path_ignores_unmatched_rejection(tmp_path):
         db.execute("CREATE TABLE surge_candidates (id INTEGER, event_key TEXT)")
         db.execute("CREATE TABLE surge_outcomes (candidate_id INTEGER)")
     assert _shadow_paths([{"id": 1, "features_json": "{}"}], db_path) == []
+
+
+def test_paper_trade_accounting_joins_csv_by_trade_id_and_keeps_gross(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text(
+        "trade_id,pnl,brokerage_inr,net_pnl\nT-1,125,30,95\n",
+        encoding="utf-8",
+    )
+    events = [
+        {"trade_id": "T-1", "event": "OPEN", "entry": 100, "quantity": 25},
+        {"trade_id": "T-1", "event": "CLOSE", "pnl": 125, "exit_price": 105},
+    ]
+    trade = _paper_trades(events, csv_path)[0]
+    assert trade["pnl"] == trade["recorded_gross_pnl"] == 125
+    assert trade["recorded_brokerage_inr"] == 30
+    assert trade["recorded_net_pnl"] == 95
+    assert trade["accounting_source"] == "data/trades.csv"
+
+
+def test_missing_accounting_fee_is_not_assumed_zero(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text("trade_id,pnl\nT-2,50\n", encoding="utf-8")
+    trade = _paper_trades([
+        {"trade_id": "T-2", "event": "OPEN", "entry": 100},
+        {"trade_id": "T-2", "event": "CLOSE", "pnl": 50},
+    ], csv_path)[0]
+    assert trade["recorded_gross_pnl"] == 50
+    assert trade["recorded_brokerage_inr"] is None
+    assert trade["recorded_net_pnl"] is None
+
+
+def test_api_runner_comparisons_expose_all_nine_scenarios_and_gross_net():
+    paper = [{
+        "id": "T-9", "symbol": "NIFTY", "contract": "NIFTY CE",
+        "recorded_gross_pnl": 100, "recorded_brokerage_inr": 25,
+        "recorded_net_pnl": 75, "accounting_source": "data/trades.csv",
+        "entry": 100, "stop_loss": 90, "quantity": 25,
+        "path": [{"price": p} for p in (100, 120, 145, 170, 160)],
+    }]
+    result = _sniper_runner_comparisons(paper)[0]
+    assert result["recorded_gross_pnl"] == 100
+    assert result["recorded_brokerage_inr"] == 25
+    assert result["recorded_net_pnl"] == 75
+    assert result["scenario_count"] == 9
+    assert len(result["scenarios"]) == 9
+    assert {x["activation_pct"] for x in result["scenarios"]} == {40.0, 45.0, 50.0}
+    assert {x["atr_multiple"] for x in result["scenarios"]} == {1.0, 1.5, 2.0}

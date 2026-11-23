@@ -5,13 +5,14 @@ It never creates orders, changes strategy settings, or invents missing prices.
 """
 from __future__ import annotations
 
+import csv
 import json
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from src.expiry_oi_shadow import latest_observations as _latest_expiry_oi_observations
-from src.sniper_expiry_simulation import build_sniper_observations, simulate_runner
+from src.sniper_expiry_simulation import build_sniper_observations, compare_runner_scenarios
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "data" / "memory" / "perez_ai_memory.db"
@@ -85,7 +86,37 @@ def _event_price(event: dict[str, Any]) -> float | None:
                    event.get("current_ltp"), event.get("entry"), event.get("entry_price"))
 
 
-def _paper_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _trade_accounting(path: Path = ROOT / "data" / "trades.csv") -> dict[str, dict[str, float]]:
+    """Read completed-trade accounting by stable trade_id."""
+    if not path.exists():
+        return {}
+    result: dict[str, dict[str, float]] = {}
+    try:
+        with path.open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                trade_id = str(row.get("trade_id") or "").strip()
+                if not trade_id:
+                    continue
+                brokerage = _number(row.get("brokerage_inr"))
+                gross = _number(row.get("pnl"))
+                net = _number(row.get("net_pnl"))
+                result[trade_id] = {
+                    "brokerage_inr": brokerage,
+                    "net_pnl": net if net is not None else (
+                        round(gross - brokerage, 2)
+                        if gross is not None and brokerage is not None else None
+                    ),
+                }
+    except (OSError, csv.Error):
+        return {}
+    return result
+
+
+def _paper_trades(
+    events: list[dict[str, Any]],
+    trades_csv: Path = ROOT / "data" / "trades.csv",
+) -> list[dict[str, Any]]:
+    accounting = _trade_accounting(trades_csv)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         trade_id = str(event.get("trade_id") or event.get("lineage_id") or "")
@@ -124,6 +155,10 @@ def _paper_trades(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "target1": levels["target1"], "target2": levels["target2"],
             "quantity": _number(opened.get("quantity"), opened.get("qty")),
             "pnl": _number(close.get("pnl"), close.get("realized_pnl")) if close else None,
+            "recorded_gross_pnl": _number(close.get("pnl"), close.get("realized_pnl")) if close else None,
+            "recorded_brokerage_inr": accounting.get(trade_id, {}).get("brokerage_inr") if close else None,
+            "recorded_net_pnl": accounting.get(trade_id, {}).get("net_pnl") if close else None,
+            "accounting_source": "data/trades.csv" if trade_id in accounting else "BROKERAGE_NOT_RECORDED",
             "exit_reason": close.get("exit_reason") if close else None,
             "path": path, "source": "data/paper_trade_lifecycle.jsonl",
             "data_quality": "RECORDED_PATH" if len(path) > 1 else "ENTRY_ONLY",
@@ -238,13 +273,22 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
     """Run the all-quantity Sniper trail only on recorded paper-trade price paths."""
     results = []
     for trade in paper:
-        result = simulate_runner(
+        result = compare_runner_scenarios(
             trade.get("path") or [], trade.get("entry"), trade.get("stop_loss"),
             int(trade.get("quantity") or 0),
+            brokerage=(
+                trade.get("recorded_brokerage_inr")
+                if trade.get("recorded_brokerage_inr") is not None else 30.0
+            ),
         )
         results.append({
             "trade_id": trade.get("id"), "symbol": trade.get("symbol"),
-            "contract": trade.get("contract"), "recorded_pnl": trade.get("pnl"),
+            "contract": trade.get("contract"),
+            "recorded_pnl": trade.get("recorded_gross_pnl"),
+            "recorded_gross_pnl": trade.get("recorded_gross_pnl"),
+            "recorded_brokerage_inr": trade.get("recorded_brokerage_inr"),
+            "recorded_net_pnl": trade.get("recorded_net_pnl"),
+            "accounting_source": trade.get("accounting_source"),
             **result,
         })
     return results
