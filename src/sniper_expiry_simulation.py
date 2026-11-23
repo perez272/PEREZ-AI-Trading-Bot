@@ -183,11 +183,11 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
     entry, initial_stop = _num(entry), _num(initial_stop)
     brokerage = _num(brokerage)
     if entry is None or initial_stop is None or entry <= 0 or quantity < 1 or brokerage is None:
-        return {"status": "INSUFFICIENT_INPUT", "exit_price": None, "net_pnl": None}
+        return {"status": "INSUFFICIENT_INPUT", "exit_price": None, "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE", "activation_reason": "INSUFFICIENT_INPUT", "activation_threshold_price": None, "max_favorable_price": None, "max_favorable_pct": None}
     prices = [_num(point.get("price")) for point in path or [] if isinstance(point, dict)]
     prices = [price for price in prices if price is not None and price > 0]
     if not prices:
-        return {"status": "NO_RECORDED_PATH", "exit_price": None, "net_pnl": None}
+        return {"status": "NO_RECORDED_PATH", "exit_price": None, "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE", "activation_reason": "NO_RECORDED_PATH", "activation_threshold_price": round(entry * (1 + activation_pct / 100.0), 2), "max_favorable_price": None, "max_favorable_pct": None}
     ema = None
     alpha = 2.0 / 4.0
     previous = None
@@ -226,7 +226,13 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
         "quantity": quantity, "exit_price": round(exit_price, 2),
         "gross_pnl": round(gross, 2), "net_pnl": round(net, 2),
         "net_return_pct": round(net / (entry * quantity) * 100, 2),
-        "runner_activated": active, "final_stop": round(stop, 2),
+        "runner_activated": active,
+        "activation_status": "ACTIVATED" if active else "NOT_REACHED",
+        "activation_reason": "THRESHOLD_REACHED" if active else "MAX_FAVORABLE_MOVE_BELOW_THRESHOLD",
+        "activation_threshold_price": round(entry * (1 + activation_pct / 100.0), 2),
+        "max_favorable_price": round(high, 2),
+        "max_favorable_pct": round((high / entry - 1) * 100.0, 2),
+        "final_stop": round(stop, 2),
         "observations_used": exit_index + 1, "safety": "SIMULATION_ONLY",
     }
 
