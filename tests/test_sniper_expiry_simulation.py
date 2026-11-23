@@ -137,3 +137,23 @@ def test_runner_scenario_comparison_without_path_does_not_invent_results():
     assert result["status"] == "INSUFFICIENT_RECORDED_PATH"
     assert result["best_observed_scenario"] is None
     assert all(item["net_pnl"] is None for item in result["scenarios"])
+
+
+def test_runner_reports_activation_threshold_and_max_favorable_move():
+    path = [{"price": p} for p in (100, 110, 120, 130)]
+    result = simulate_runner(path, entry=100, initial_stop=90, quantity=25,
+                             activation_pct=45.0)
+    assert result["activation_status"] == "NOT_REACHED"
+    assert result["activation_reason"] == "MAX_FAVORABLE_MOVE_BELOW_THRESHOLD"
+    assert result["activation_threshold_price"] == 145
+    assert result["max_favorable_price"] == 130
+    assert result["max_favorable_pct"] == 30
+
+
+def test_runner_diagnostics_show_activation_when_threshold_crossed():
+    result = simulate_runner([{"price": 100}, {"price": 146}, {"price": 140}],
+                             entry=100, initial_stop=90, quantity=25)
+    assert result["runner_activated"] is True
+    assert result["activation_status"] == "ACTIVATED"
+    assert result["activation_reason"] == "THRESHOLD_REACHED"
+    assert result["max_favorable_pct"] == 46
