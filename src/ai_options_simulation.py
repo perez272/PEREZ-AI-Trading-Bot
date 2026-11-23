@@ -336,6 +336,21 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
 def build_simulations() -> dict[str, Any]:
     events = _read_lifecycle()
     rejections = _rejections()
+    accounting = _trade_accounting()
+    duplicate_ids = sorted(
+        trade_id for trade_id, item in accounting.items()
+        if item.get("accounting_status") == "DUPLICATE_TRADE_ID"
+    )
+    accounting_integrity = {
+        "csv_trade_ids": len(accounting),
+        "duplicate_trade_id_count": len(duplicate_ids),
+        "duplicate_trade_id_examples": duplicate_ids[:10],
+        "unique_rows_missing_fee_count": sum(
+            1 for item in accounting.values()
+            if item.get("accounting_status") == "CSV_ROW_MATCHED_FEE_MISSING"
+        ),
+        "status": "DUPLICATES_FOUND" if duplicate_ids else "NO_DUPLICATE_IDS_DETECTED",
+    }
     paper = _paper_trades(events)
     rejected = _rejected_scenarios(rejections)
     shadow = _shadow_paths(rejections)
@@ -355,6 +370,7 @@ def build_simulations() -> dict[str, Any]:
         "expiry_oi_observations": expiry_oi,
         "sniper_expiry_observations": sniper_observations,
         "sniper_runner_comparisons": sniper_runner_comparisons,
+        "accounting_integrity": accounting_integrity,
         "counts": {"paper_trades": len(paper), "rejected_scenarios": len(rejected), "expiry_oi_observations": len(expiry_oi), "sniper_expiry_observations": len(sniper_observations), "sniper_confirmed": sum(1 for x in sniper_observations if x["eligible"]), "sniper_runner_comparisons": len(sniper_runner_comparisons)},
         "disclaimer": "Expiry/OI and Sniper signals are observation-only. Missing ORB, multi-timeframe, volume, Greeks, or historical premium-path evidence fails closed; these results never authorize entries or orders. Hypothetical rejected setups are not executed trades. Missing entry, stop, target, or historical quote data is left unavailable; no synthetic prices or P&L are generated.",
     }
