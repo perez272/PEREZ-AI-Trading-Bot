@@ -70,9 +70,11 @@ function card(x){
  const title=x.contract||x.symbol||'Unidentified contract';
  const meta=[x.entry_time||x.time,x.status||x.data_quality,x.strategy].filter(Boolean).map(esc).join(' · ');
  const levels=[['ENTRY',x.entry],['STOP',x.stop_loss],['T1',x.target1],['T2',x.target2]].map(([k,v])=>'<span class="sim-level">'+k+': '+esc(num(v))+'</span>').join('');
- const pnl=x.pnl==null?(x.return_pct==null?'P&L unavailable':'Observed option return: '+Number(x.return_pct).toFixed(2)+'% (not rupee P&L)'):('Recorded gross P&L: '+money(x.recorded_gross_pnl??x.pnl)+' · brokerage: '+money(x.recorded_brokerage_inr)+' · net: '+money(x.recorded_net_pnl));
+ const pnl=x.pnl==null?(x.return_pct==null?'P&L unavailable':'Observed option return: '+Number(x.return_pct).toFixed(2)+'% (not rupee P&L)'):('Recorded gross: '+money(x.recorded_gross_pnl??x.pnl)+' · recorded fee: '+money(x.recorded_brokerage_inr)+' · recorded net: '+money(x.recorded_net_pnl));
+ const estimate=x.estimated_net_pnl==null?'Historical fee estimate unavailable':('ESTIMATE ONLY · assumed fee '+money(x.estimated_brokerage_inr)+' · estimated net '+money(x.estimated_net_pnl)+' (not recorded)');
+ const accounting=x.accounting_status==='DUPLICATE_TRADE_ID'?'DUPLICATE CSV ID · '+esc(x.accounting_csv_row_count)+' rows; recorded fee/net withheld':(x.accounting_status==='RECORDED_ACCOUNTING_AVAILABLE'?'Recorded accounting available':(x.accounting_status==='CSV_ROW_MATCHED_FEE_MISSING'?'CSV row matched; recorded fee/net missing':'No unique CSV accounting row matched'));
  const note=x.kind==='REJECTED'?(x.data_quality==='RECORDED_SHADOW_PATH'?'Recorded post-rejection option prices at 1/3/5/10/15 minutes. MFE '+(x.mfe_pct??'—')+'% · MAE '+(x.mae_pct??'—')+'%.':(x.missing_fields?.length?'Missing recorded fields: '+x.missing_fields.join(', '):'No post-rejection price path recorded.')):(x.data_quality==='RECORDED_PATH'?'Recorded lifecycle prices only.':'Entry/level evidence only; no continuous price path recorded.');
- return '<article class="sim-card"><h4>'+esc(title)+'</h4><div class="sim-meta">'+meta+'</div><div class="sim-levels">'+levels+'</div>'+chart(x)+'<div class="sim-meta"><b>'+esc(pnl)+'</b><span>'+esc(note)+'</span></div><div class="sim-meta">Source: '+esc(x.source||'Unavailable')+'</div></article>';
+ return '<article class="sim-card"><h4>'+esc(title)+'</h4><div class="sim-meta">'+meta+'</div><div class="sim-levels">'+levels+'</div>'+chart(x)+'<div class="sim-meta"><b>'+esc(pnl)+'</b><span>'+esc(accounting)+'</span></div><div class="sim-meta">'+esc(estimate)+'</div><div class="sim-meta"><span>'+esc(note)+'</span></div><div class="sim-meta">Source: '+esc(x.source||'Unavailable')+'</div></article>';
 }
 function renderExpiryOi(){
  const host=document.getElementById('sim-expiry-oi');
@@ -101,12 +103,13 @@ function renderRunner(){
  const rows=payload.sniper_runner_comparisons||[];
  if(!rows.length){host.innerHTML='<div class="sim-empty">No recorded paper trades available for runner replay.</div>';return}
  host.innerHTML=rows.map(x=>{
-  const recorded='Recorded gross '+money(x.recorded_gross_pnl)+' · fee '+money(x.recorded_brokerage_inr)+' · net '+money(x.recorded_net_pnl);
+  const recorded='Recorded gross '+money(x.recorded_gross_pnl)+' · recorded fee '+money(x.recorded_brokerage_inr)+' · recorded net '+money(x.recorded_net_pnl);
+  const feeBasis=(x.replay_brokerage_basis||'FEE BASIS UNKNOWN')+' · replay fee '+money(x.replay_brokerage_inr);
   const scenarios=x.scenarios||[];
   const rows=scenarios.map(s=>'<tr><td>'+esc(s.activation_pct)+'%</td><td>'+esc(s.atr_multiple)+'×</td><td>'+esc(s.activation_status||'—')+'</td><td>'+esc(num(s.max_favorable_pct))+'%</td><td>'+esc(money(s.gross_pnl))+'</td><td>'+esc(money(s.net_pnl))+'</td><td>'+esc(s.status||'—')+'</td></tr>').join('');
   const table=rows?'<div class="sim-scroll"><table><thead><tr><th>Trigger</th><th>ATR</th><th>Activation</th><th>Max move</th><th>Gross</th><th>Net</th><th>Exit</th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<div class="sim-empty">No runner scenarios available.</div>';
   const note=x.status==='INSUFFICIENT_RECORDED_PATH'?'No recorded premium path; scenario outputs remain unavailable.':'Same recorded path replayed across '+esc(x.scenario_count??scenarios.length)+' parameter combinations. Best in-sample net: '+esc(money(x.best_observed_scenario?.net_pnl))+'.';
-  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.contract||x.trade_id)+'</h4><div class="sim-meta">'+esc(recorded)+' · accounting '+esc(x.accounting_source||'fee unavailable')+'</div><div class="sim-meta">'+esc(note)+'</div>'+table+'<div class="sim-meta">Replay only; best scenario is in-sample and is not a production recommendation.</div></article>';
+  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.contract||x.trade_id)+'</h4><div class="sim-meta">'+esc(recorded)+' · '+esc(x.accounting_status||x.accounting_source||'accounting unavailable')+'</div><div class="sim-meta">'+esc(feeBasis)+'</div><div class="sim-meta">'+esc(note)+'</div>'+table+'<div class="sim-meta">Replay only; estimated fee is an explicit assumption. Best scenario is in-sample, not a production recommendation.</div></article>';
  }).join('');
 }
 function render(){const rows=view==='paper'?payload.paper_trades:payload.rejected_scenarios;const list=document.getElementById('sim-list');list.innerHTML=rows?.length?rows.map(card).join(''):'<div class="sim-empty">'+(view==='paper'?'No paper-trade lifecycle entries found.':'No rejected setups were recorded in the rejection table.')+'</div>';document.querySelectorAll('#ai-sim-workspace .sim-tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.view===view)));}
