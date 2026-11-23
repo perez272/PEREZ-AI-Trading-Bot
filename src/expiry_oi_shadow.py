@@ -70,15 +70,76 @@ def _leg(row: dict[str, Any], side: str) -> dict[str, Any]:
     }
 
 
+def _validate_chain(chain: list[dict[str, Any]], observed_at: str | datetime | None) -> list[str]:
+    """Fail closed unless the snapshot has enough internally consistent evidence."""
+    now = _local_datetime(observed_at)
+    reasons: list[str] = []
+    rows = [row for row in (chain or []) if isinstance(row, dict)]
+    if len(rows) != len(chain or []):
+        reasons.append("MALFORMED_CHAIN_ROW")
+    strikes = {_number(row.get("strike_price")) for row in rows}
+    strikes.discard(None)
+    if len(strikes) < 5:
+        reasons.append("INSUFFICIENT_STRIKE_COVERAGE")
+    expiries = []
+    spots = []
+    for row in rows:
+        try:
+            expiry = date.fromisoformat(str(row.get("expiry") or "")[:10])
+        except (TypeError, ValueError):
+            reasons.append("MISSING_OR_INVALID_EXPIRY")
+            expiry = None
+        if expiry is not None:
+            expiries.append(expiry)
+        spot = _number(row.get("underlying_spot_price") or row.get("underlying_spot"))
+        if spot is not None and spot > 0:
+            spots.append(spot)
+        for side in ("CE", "PE"):
+            option = row.get("call_options" if side == "CE" else "put_options")
+            market = option.get("market_data") if isinstance(option, dict) else None
+            key = option.get("instrument_key") if isinstance(option, dict) else None
+            ltp = _number(market.get("ltp")) if isinstance(market, dict) else None
+            oi = _number(market.get("oi")) if isinstance(market, dict) else None
+            if not key or ltp is None or ltp <= 0 or oi is None or oi < 0:
+                reasons.append("INCOMPLETE_OPTION_LEG")
+                break
+    if not spots:
+        reasons.append("MISSING_UNDERLYING_SPOT")
+    if expiries:
+        if len(set(expiries)) != 1:
+            reasons.append("MIXED_EXPIRIES")
+        if min(expiries) < now.date():
+            reasons.append("EXPIRED_CONTRACTS")
+    if spots and strikes and not (min(strikes) <= median(spots) <= max(strikes)):
+        reasons.append("SPOT_OUTSIDE_STRIKE_COVERAGE")
+    return sorted(set(reasons))
+
+
 def analyze_chain(
     symbol: str,
     chain: list[dict[str, Any]],
     observed_at: str | datetime | None = None,
     previous: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Summarize one timestamped chain. Missing/stale comparisons remain unavailable."""
+    """Summarize a timestamped chain only after strict evidence validation."""
     now = _local_datetime(observed_at)
     previous = previous or {}
+    quality_reasons = _validate_chain(chain, now)
+    if quality_reasons:
+        return {
+            "symbol": str(symbol).upper(), "observed_at": now.isoformat(),
+            "spot": None, "expiry": None, "dte": None, "expiry_bucket": "UNKNOWN",
+            "strike_step": None, "atm_strike": None, "candidates": [],
+            "oi_evidence": [], "highest_combined_oi_strike": None,
+            "highest_combined_oi": None, "oi_chain_complete": False,
+            "max_pain_strike": None, "max_pain_payout": None,
+            "pinning_window": False, "pinning_candidate": False,
+            "breakout_status": "INSUFFICIENT_OI_DATA", "breakout_confirmed": False,
+            "oi_direction": "NO_CONFIRMED_OI_PATTERN",
+            "oi_note": "Snapshot rejected: " + ", ".join(quality_reasons),
+            "late_0dte_cutoff": False, "safety": "OBSERVATION_ONLY",
+            "data_quality_status": "REJECTED", "data_quality_reasons": quality_reasons,
+        }
     rows = []
     strikes = []
     spots = []
@@ -201,6 +262,7 @@ def analyze_chain(
         "oi_direction": direction,
         "oi_note": ("OI changes are interval-based proxies, not proof of participant intent; premium and spot confirmation are required. " + ("Full-chain OI available." if oi_chain_complete else "Incomplete OI chain: max-pain and concentration metrics are unavailable.")),
         "late_0dte_cutoff": late, "safety": "OBSERVATION_ONLY",
+        "data_quality_status": "VALID", "data_quality_reasons": [],
     }
 
 
@@ -209,6 +271,10 @@ def record_chain_snapshot(
     db_path: Path = DEFAULT_DB,
 ) -> dict[str, Any]:
     now = _local_datetime(observed_at)
+    result = analyze_chain(symbol, chain, now)
+    if result.get("data_quality_status") != "VALID":
+        reasons = ", ".join(result.get("data_quality_reasons") or ["INVALID_CHAIN"])
+        raise ValueError(f"Expiry/OI snapshot rejected for {symbol}: {reasons}")
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     current = {}
@@ -247,15 +313,34 @@ def record_chain_snapshot(
     return result
 
 
-def latest_observations(db_path: Path = DEFAULT_DB, limit: int = 30) -> list[dict[str, Any]]:
+def latest_observations(
+    db_path: Path = DEFAULT_DB, limit: int = 30,
+    max_age_seconds: int = 120, now: str | datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return only each symbol's latest validated, non-expired, fresh snapshot."""
     if not Path(db_path).exists():
         return []
+    current_time = _local_datetime(now)
     try:
         with sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=2) as conn:
             rows = conn.execute("""SELECT payload_json FROM observations AS o WHERE id IN
                                  (SELECT MAX(id) FROM observations GROUP BY symbol)
                                  ORDER BY id DESC LIMIT ?""",
                                  (max(1, min(int(limit), 100)),)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        result = []
+        for row in rows:
+            item = json.loads(row[0])
+            if item.get("data_quality_status") != "VALID":
+                continue
+            try:
+                observed = _local_datetime(item.get("observed_at"))
+                age = (current_time - observed).total_seconds()
+                expiry = date.fromisoformat(str(item.get("expiry") or "")[:10])
+            except (TypeError, ValueError):
+                continue
+            if age < 0 or age > max(0, int(max_age_seconds)) or expiry < current_time.date():
+                continue
+            result.append(item)
+        return result
     except (sqlite3.Error, OSError, ValueError, TypeError):
         return []
