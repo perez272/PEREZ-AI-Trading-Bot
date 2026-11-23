@@ -86,29 +86,43 @@ def _event_price(event: dict[str, Any]) -> float | None:
                    event.get("current_ltp"), event.get("entry"), event.get("entry_price"))
 
 
-def _trade_accounting(path: Path = ROOT / "data" / "trades.csv") -> dict[str, dict[str, float]]:
-    """Read completed-trade accounting by stable trade_id."""
+ESTIMATED_PAPER_BROKERAGE_INR = 30.0
+
+
+def _trade_accounting(path: Path = ROOT / "data" / "trades.csv") -> dict[str, dict[str, Any]]:
+    """Read accounting by trade_id without silently selecting duplicate CSV rows."""
     if not path.exists():
         return {}
-    result: dict[str, dict[str, float]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     try:
         with path.open(newline="", encoding="utf-8") as stream:
             for row in csv.DictReader(stream):
                 trade_id = str(row.get("trade_id") or "").strip()
-                if not trade_id:
-                    continue
-                brokerage = _number(row.get("brokerage_inr"))
-                gross = _number(row.get("pnl"))
-                net = _number(row.get("net_pnl"))
-                result[trade_id] = {
-                    "brokerage_inr": brokerage,
-                    "net_pnl": net if net is not None else (
-                        round(gross - brokerage, 2)
-                        if gross is not None and brokerage is not None else None
-                    ),
-                }
+                if trade_id:
+                    grouped.setdefault(trade_id, []).append(row)
     except (OSError, csv.Error):
         return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for trade_id, rows in grouped.items():
+        if len(rows) != 1:
+            result[trade_id] = {
+                "csv_row_count": len(rows), "accounting_status": "DUPLICATE_TRADE_ID",
+                "brokerage_inr": None, "net_pnl": None,
+            }
+            continue
+        row = rows[0]
+        brokerage = _number(row.get("brokerage_inr"))
+        gross = _number(row.get("pnl"))
+        net = _number(row.get("net_pnl"))
+        if net is None and gross is not None and brokerage is not None:
+            net = round(gross - brokerage, 2)
+        result[trade_id] = {
+            "csv_row_count": 1,
+            "accounting_status": "RECORDED_ACCOUNTING_AVAILABLE" if brokerage is not None else "CSV_ROW_MATCHED_FEE_MISSING",
+            "brokerage_inr": brokerage,
+            "net_pnl": net if brokerage is not None else None,
+        }
     return result
 
 
@@ -158,7 +172,24 @@ def _paper_trades(
             "recorded_gross_pnl": _number(close.get("pnl"), close.get("realized_pnl")) if close else None,
             "recorded_brokerage_inr": accounting.get(trade_id, {}).get("brokerage_inr") if close else None,
             "recorded_net_pnl": accounting.get(trade_id, {}).get("net_pnl") if close else None,
-            "accounting_source": "data/trades.csv" if trade_id in accounting else "BROKERAGE_NOT_RECORDED",
+            "accounting_source": "data/trades.csv" if trade_id in accounting else "NO_CSV_ROW_MATCH",
+            "accounting_status": accounting.get(trade_id, {}).get("accounting_status", "NO_CSV_ROW_MATCH") if close else "NOT_CLOSED",
+            "accounting_csv_row_count": accounting.get(trade_id, {}).get("csv_row_count", 0) if close else 0,
+            "estimated_brokerage_inr": (
+                ESTIMATED_PAPER_BROKERAGE_INR
+                if close and _number(close.get("pnl"), close.get("realized_pnl")) is not None
+                and accounting.get(trade_id, {}).get("brokerage_inr") is None else None
+            ),
+            "estimated_net_pnl": (
+                round(_number(close.get("pnl"), close.get("realized_pnl")) - ESTIMATED_PAPER_BROKERAGE_INR, 2)
+                if close and _number(close.get("pnl"), close.get("realized_pnl")) is not None
+                and accounting.get(trade_id, {}).get("brokerage_inr") is None else None
+            ),
+            "estimated_accounting_basis": (
+                "FLAT_PAPER_FEE_ASSUMPTION_30_INR_NOT_RECORDED"
+                if close and _number(close.get("pnl"), close.get("realized_pnl")) is not None
+                and accounting.get(trade_id, {}).get("brokerage_inr") is None else None
+            ),
             "exit_reason": close.get("exit_reason") if close else None,
             "path": path, "source": "data/paper_trade_lifecycle.jsonl",
             "data_quality": "RECORDED_PATH" if len(path) > 1 else "ENTRY_ONLY",
@@ -273,13 +304,18 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
     """Run the all-quantity Sniper trail only on recorded paper-trade price paths."""
     results = []
     for trade in paper:
+        replay_brokerage = (
+            trade.get("recorded_brokerage_inr")
+            if trade.get("recorded_brokerage_inr") is not None
+            else ESTIMATED_PAPER_BROKERAGE_INR
+        )
+        replay_brokerage_basis = (
+            "RECORDED_FEE" if trade.get("recorded_brokerage_inr") is not None
+            else "SIMULATION_ASSUMPTION_30_INR_NOT_RECORDED"
+        )
         result = compare_runner_scenarios(
             trade.get("path") or [], trade.get("entry"), trade.get("stop_loss"),
-            int(trade.get("quantity") or 0),
-            brokerage=(
-                trade.get("recorded_brokerage_inr")
-                if trade.get("recorded_brokerage_inr") is not None else 30.0
-            ),
+            int(trade.get("quantity") or 0), brokerage=replay_brokerage,
         )
         results.append({
             "trade_id": trade.get("id"), "symbol": trade.get("symbol"),
@@ -289,6 +325,9 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
             "recorded_brokerage_inr": trade.get("recorded_brokerage_inr"),
             "recorded_net_pnl": trade.get("recorded_net_pnl"),
             "accounting_source": trade.get("accounting_source"),
+            "accounting_status": trade.get("accounting_status", "UNKNOWN"),
+            "replay_brokerage_inr": replay_brokerage,
+            "replay_brokerage_basis": replay_brokerage_basis,
             **result,
         })
     return results
