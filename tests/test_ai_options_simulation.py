@@ -126,7 +126,7 @@ def test_api_runner_comparisons_expose_all_nine_scenarios_and_gross_net():
 def test_duplicate_csv_trade_id_is_flagged_and_accounting_withheld(tmp_path):
     csv_path = tmp_path / "trades.csv"
     csv_path.write_text(
-        "trade_id,pnl,brokerage_inr,net_pnl\\nT-DUP,-100,30,-130\\nT-DUP,-100,30,-130\\n",
+        "trade_id,pnl,brokerage_inr,net_pnl\nT-DUP,-100,30,-130\nT-DUP,-100,30,-130\n",
         encoding="utf-8",
     )
     trade = _paper_trades([
@@ -144,7 +144,7 @@ def test_duplicate_csv_trade_id_is_flagged_and_accounting_withheld(tmp_path):
 
 def test_unique_csv_row_with_missing_fee_gets_separate_estimate(tmp_path):
     csv_path = tmp_path / "trades.csv"
-    csv_path.write_text("trade_id,pnl\\nT-EST,50\\n", encoding="utf-8")
+    csv_path.write_text("trade_id,pnl\nT-EST,50\n", encoding="utf-8")
     trade = _paper_trades([
         {"trade_id": "T-EST", "event": "OPEN", "entry": 100},
         {"trade_id": "T-EST", "event": "CLOSE", "pnl": 50},
