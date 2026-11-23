@@ -345,43 +345,54 @@ class UpstoxMarketData:
             print(f"[UPSTOX] No underlying instrument mapping for {symbol}.")
             return None
 
-        # Upstox option-chain requires an actual expiry date (YYYY-MM-DD).
-        # Resolve the legacy/default "current_week" request from the
-        # currently available option contracts instead of skipping the chain.
-        resolved_expiry = None if not expiry or expiry == "current_week" else str(expiry)
+        # Never select a historical contract as the default expiry. Upstox may
+        # return expired rows from the contract endpoint, so parse and compare
+        # dates against the current India-local trading date before selecting.
+        today = datetime.now(IST).date()
 
-        if resolved_expiry is None:
+        def parse_expiry(value: Any):
+            try:
+                return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                return None
+
+        resolved_expiry = None
+        if expiry and expiry != "current_week":
+            requested_date = parse_expiry(expiry)
+            if requested_date is None or requested_date < today:
+                print(
+                    f"[UPSTOX] Option chain skipped for {symbol}: "
+                    f"invalid or expired requested expiry {expiry!r}."
+                )
+                return None
+            resolved_expiry = requested_date.isoformat()
+        else:
             contracts_payload = self._get(
                 f"{UPSTOX_V2_BASE_URL}/option/contract",
                 {"instrument_key": underlying_key},
             )
             contracts = contracts_payload.get("data") if contracts_payload else None
-
+            future_expiries = set()
             if isinstance(contracts, list):
-                expiries = sorted(
-                    {
-                        str(row.get("expiry"))
-                        for row in contracts
-                        if isinstance(row, dict)
-                        and row.get("expiry")
-                        and len(str(row.get("expiry"))) == 10
-                        and str(row.get("expiry"))[4] == "-"
-                        and str(row.get("expiry"))[7] == "-"
-                    }
-                )
-                if expiries:
-                    resolved_expiry = expiries[0]
+                for row in contracts:
+                    if not isinstance(row, dict):
+                        continue
+                    parsed_expiry = parse_expiry(row.get("expiry"))
+                    if parsed_expiry is not None and parsed_expiry >= today:
+                        future_expiries.add(parsed_expiry.isoformat())
+            if future_expiries:
+                resolved_expiry = min(future_expiries)
 
             if not resolved_expiry:
                 print(
                     f"[UPSTOX] Option chain skipped for {symbol}: "
-                    "could not resolve an available YYYY-MM-DD expiry."
+                    "no valid non-expired YYYY-MM-DD expiry was returned."
                 )
                 return None
 
             print(
                 f"[UPSTOX] Resolved {symbol} option-chain expiry "
-                f"{resolved_expiry} from option contracts."
+                f"{resolved_expiry} from non-expired option contracts."
             )
 
         payload = self._get(
@@ -393,7 +404,19 @@ class UpstoxMarketData:
         )
 
         data = payload.get("data") if payload else None
-        return data if isinstance(data, list) else None
+        if not isinstance(data, list):
+            return None
+        # Reject a mixed, missing, or expired-expiry response as a whole. A
+        # partial chain can distort OI concentration and max-pain calculations.
+        for row in data:
+            row_expiry = parse_expiry(row.get("expiry")) if isinstance(row, dict) else None
+            if row_expiry is None or row_expiry.isoformat() != resolved_expiry:
+                print(
+                    f"[UPSTOX] Option chain rejected for {symbol}: "
+                    "response contains missing or mismatched expiry metadata."
+                )
+                return None
+        return data
 
     def get_full_quote(self, instrument_key: str) -> dict[str, Any] | None:
         if not self.available() or not instrument_key or "|" not in instrument_key:
