@@ -157,3 +157,36 @@ def test_runner_diagnostics_show_activation_when_threshold_crossed():
     assert result["activation_status"] == "ACTIVATED"
     assert result["activation_reason"] == "THRESHOLD_REACHED"
     assert result["max_favorable_pct"] == 46
+
+
+
+def test_runner_gap_through_stop_fills_at_observed_price_not_stop():
+    result = simulate_runner(
+        [{"price": 100}, {"price": 146}, {"price": 80}],
+        entry=100, initial_stop=90, quantity=25, brokerage=30,
+    )
+    assert result["status"] == "TRAIL_EXIT"
+    assert result["stop_trigger_price"] is not None
+    assert result["exit_price"] == 80
+    assert result["gross_pnl"] == -500
+    assert result["net_pnl"] == -530
+    assert result["execution_basis"] == "RECORDED_OBSERVATION_CONSERVATIVE_GAP_FILL"
+
+
+def test_runner_does_not_apply_new_trailing_stop_to_same_observation():
+    # The activation quote establishes the new stop; only the next quote can hit it.
+    result = simulate_runner(
+        [{"price": 100}, {"price": 146}, {"price": 100}],
+        entry=100, initial_stop=90, quantity=25, brokerage=30,
+    )
+    assert result["status"] == "TRAIL_EXIT"
+    assert result["observations_used"] == 3
+    assert result["exit_price"] == 100
+    assert result["position_model"] == "FULL_QUANTITY_COUNTERFACTUAL_NO_PARTIAL_EXITS"
+
+
+def test_runner_rejects_invalid_quantity_and_fee_inputs():
+    bad_quantity = simulate_runner([{"price": 100}], 100, 90, 0)
+    bad_fee = simulate_runner([{"price": 100}], 100, 90, 25, brokerage=-1)
+    assert bad_quantity["status"] == "INSUFFICIENT_INPUT"
+    assert bad_fee["status"] == "INSUFFICIENT_INPUT"
