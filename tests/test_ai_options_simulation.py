@@ -73,3 +73,32 @@ def test_shadow_path_ignores_unmatched_rejection(tmp_path):
         db.execute("CREATE TABLE surge_candidates (id INTEGER, event_key TEXT)")
         db.execute("CREATE TABLE surge_outcomes (candidate_id INTEGER)")
     assert _shadow_paths([{"id": 1, "features_json": "{}"}], db_path) == []
+
+
+def test_paper_trade_accounting_joins_csv_by_trade_id_and_keeps_gross(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text(
+        "trade_id,pnl,brokerage_inr,net_pnl\nT-1,125,30,95\n",
+        encoding="utf-8",
+    )
+    events = [
+        {"trade_id": "T-1", "event": "OPEN", "entry": 100, "quantity": 25},
+        {"trade_id": "T-1", "event": "CLOSE", "pnl": 125, "exit_price": 105},
+    ]
+    trade = _paper_trades(events, csv_path)[0]
+    assert trade["pnl"] == trade["recorded_gross_pnl"] == 125
+    assert trade["recorded_brokerage_inr"] == 30
+    assert trade["recorded_net_pnl"] == 95
+    assert trade["accounting_source"] == "data/trades.csv"
+
+
+def test_missing_accounting_fee_is_not_assumed_zero(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text("trade_id,pnl\nT-2,50\n", encoding="utf-8")
+    trade = _paper_trades([
+        {"trade_id": "T-2", "event": "OPEN", "entry": 100},
+        {"trade_id": "T-2", "event": "CLOSE", "pnl": 50},
+    ], csv_path)[0]
+    assert trade["recorded_gross_pnl"] == 50
+    assert trade["recorded_brokerage_inr"] is None
+    assert trade["recorded_net_pnl"] is None
