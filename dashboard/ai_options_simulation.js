@@ -47,14 +47,14 @@ root.innerHTML=`
  <div id="sim-expiry-oi"><div class="sim-empty">Waiting for recorded option-chain snapshots…</div></div>
  <div class="sim-head" style="margin-top:10px"><div class="sim-title">SNIPER EXPIRY MODE · STRICT CONFLUENCE</div><span class="sim-muted">Simulation only · never authorizes entries</span></div>
  <div id="sim-sniper"><div class="sim-empty">Waiting for recorded expiry/OI observations…</div></div>
- <div class="sim-head" style="margin-top:10px"><div class="sim-title">SNIPER RUNNER · RECORDED PATH REPLAY</div><span class="sim-muted">All quantity · ₹30 flat fee · simulation only</span></div>
+ <div class="sim-head" style="margin-top:10px"><div class="sim-title">SNIPER RUNNER · RECORDED PATH REPLAY</div><span class="sim-muted">Full-quantity counterfactual · fees disclosed · simulation only</span></div>
  <div id="sim-runner"><div class="sim-empty">Waiting for recorded paper-trade paths…</div></div>
  <div id="sim-list"><div class="sim-empty">Loading scenarios…</div></div>
 </div>`;
 mount.innerHTML='';mount.appendChild(root);
 let payload={rejected_scenarios:[],paper_trades:[]},view='rejected';
 function chart(item){
- const pts=(item.path||[]).filter(p=>Number.isFinite(Number(p.price)));
+ const pts=(item.path||[]).filter(p=>p&&p.price!=null&&Number.isFinite(Number(p.price))&&Number(p.price)>0);
  const levels=[['Entry',item.entry,'#72cfff'],['Stop',item.stop_loss,'#ff7183'],['Target 1',item.target1,'#55e3a0'],['Target 2',item.target2,'#ffd166']];
  const vals=[...pts.map(p=>Number(p.price)),...levels.map(x=>x[1]).filter(v=>v!=null).map(Number)];
  if(!vals.length)return '<div class="sim-empty">No recorded option prices or trade levels. A price curve cannot be plotted without source data.</div>';
@@ -109,7 +109,7 @@ function renderRunner(){
   const rows=scenarios.map(s=>'<tr><td>'+esc(s.activation_pct)+'%</td><td>'+esc(s.atr_multiple)+'×</td><td>'+esc(s.activation_status||'—')+'</td><td>'+esc(num(s.max_favorable_pct))+'%</td><td>'+esc(money(s.gross_pnl))+'</td><td>'+esc(money(s.net_pnl))+'</td><td>'+esc(s.status||'—')+'</td></tr>').join('');
   const table=rows?'<div class="sim-scroll"><table><thead><tr><th>Trigger</th><th>ATR</th><th>Activation</th><th>Max move</th><th>Gross</th><th>Net</th><th>Exit</th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<div class="sim-empty">No runner scenarios available.</div>';
   const note=x.status==='INSUFFICIENT_RECORDED_PATH'?'No recorded premium path; scenario outputs remain unavailable.':'Same recorded path replayed across '+esc(x.scenario_count??scenarios.length)+' parameter combinations. Best in-sample net: '+esc(money(x.best_observed_scenario?.net_pnl))+'.';
-  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.contract||x.trade_id)+'</h4><div class="sim-meta">'+esc(recorded)+' · '+esc(x.accounting_status||x.accounting_source||'accounting unavailable')+'</div><div class="sim-meta">'+esc(feeBasis)+'</div><div class="sim-meta">'+esc(note)+'</div>'+table+'<div class="sim-meta">Replay only; estimated fee is an explicit assumption. Best scenario is in-sample, not a production recommendation.</div></article>';
+  return '<article class="sim-card"><h4>'+esc(x.symbol)+' · '+esc(x.contract||x.trade_id)+'</h4><div class="sim-meta">'+esc(recorded)+' · '+esc(x.accounting_status||x.accounting_source||'accounting unavailable')+'</div><div class="sim-meta">'+esc(feeBasis)+'</div><div class="sim-meta">'+esc(note)+'</div>'+table+'<div class="sim-meta">Full-quantity counterfactual; recorded partial exits are not replayed. Gap-through stops fill at the observed quote. Estimated fee is an explicit assumption; best result is in-sample only.</div></article>';
  }).join('');
 }
 function render(){const rows=view==='paper'?payload.paper_trades:payload.rejected_scenarios;const list=document.getElementById('sim-list');list.innerHTML=rows?.length?rows.map(card).join(''):'<div class="sim-empty">'+(view==='paper'?'No paper-trade lifecycle entries found.':'No rejected setups were recorded in the rejection table.')+'</div>';document.querySelectorAll('#ai-sim-workspace .sim-tab').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.view===view)));}
