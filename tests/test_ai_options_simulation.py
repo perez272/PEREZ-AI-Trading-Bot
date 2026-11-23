@@ -168,3 +168,22 @@ def test_runner_discloses_assumed_fee_when_recorded_fee_missing():
     assert result["replay_brokerage_basis"] == "SIMULATION_ASSUMPTION_30_INR_NOT_RECORDED"
     assert result["recorded_brokerage_inr"] is None
     assert result["recorded_net_pnl"] is None
+
+
+
+def test_build_simulations_reports_duplicate_csv_ids_without_lifecycle_match(tmp_path, monkeypatch):
+    import src.ai_options_simulation as module
+
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text(
+        "trade_id,pnl\nORPHAN,-10\nORPHAN,-10\nUNIQUE,5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "_read_lifecycle", lambda: [])
+    monkeypatch.setattr(module, "_rejections", lambda: [])
+    monkeypatch.setattr(module, "_trade_accounting", lambda: module._trade_accounting(csv_path))
+    monkeypatch.setattr(module, "LIFECYCLE", tmp_path / "empty.jsonl")
+    result = module.build_simulations()
+    assert result["accounting_integrity"]["duplicate_trade_id_count"] == 1
+    assert result["accounting_integrity"]["duplicate_trade_id_examples"] == ["ORPHAN"]
+    assert result["accounting_integrity"]["unique_rows_missing_fee_count"] == 1
