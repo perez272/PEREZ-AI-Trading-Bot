@@ -7,7 +7,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _chain(expiry="2026-11-22"):
-    return [
+    chain = [
         {"expiry": expiry, "strike_price": 25000, "underlying_spot_price": 25010,
          "call_options": {"instrument_key": "CE25000", "market_data": {"ltp": 100, "oi": 1000, "volume": 500},
                           "option_greeks": {"delta": 0.52}},
@@ -19,6 +19,13 @@ def _chain(expiry="2026-11-22"):
          "put_options": {"instrument_key": "PE25050", "market_data": {"ltp": 110, "oi": 900, "volume": 400},
                          "option_greeks": {"delta": -0.58}}},
     ]
+    for strike in (24900, 24950, 25100):
+        chain.append({
+            "expiry": expiry, "strike_price": strike, "underlying_spot_price": 25010,
+            "call_options": {"instrument_key": f"CE{strike}", "market_data": {"ltp": 70, "oi": 100, "volume": 50}},
+            "put_options": {"instrument_key": f"PE{strike}", "market_data": {"ltp": 75, "oi": 100, "volume": 50}},
+        })
+    return chain
 
 
 def test_expiry_class_uses_actual_contract_date():
@@ -111,7 +118,7 @@ def test_snapshot_persists_and_exposes_latest_record(tmp_path):
     chain[0]["call_options"]["market_data"]["ltp"] = 110
     second = record_chain_snapshot("NIFTY", chain, "2026-11-22T10:00:15+05:30", db)
     assert second["oi_direction"] == "NO_CONFIRMED_OI_PATTERN"
-    assert latest_observations(db)[0]["observed_at"] == "2026-11-22T10:00:15+05:30"
+    assert latest_observations(db, now="2026-11-22T10:00:15+05:30")[0]["observed_at"] == "2026-11-22T10:00:15+05:30"
 
 
 
@@ -164,3 +171,50 @@ def test_candidate_exposes_real_gamma_and_lot_size_when_provider_supplies_them()
                      if item["side"] == "CE" and item["strike"] == 25000)
     assert candidate["gamma"] == 0.031
     assert candidate["lot_size"] == 25
+
+
+
+def test_rejects_chain_without_underlying_spot_or_strike_coverage():
+    chain = _chain()
+    for row in chain:
+        row["underlying_spot_price"] = None
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    assert result["data_quality_status"] == "REJECTED"
+    assert "MISSING_UNDERLYING_SPOT" in result["data_quality_reasons"]
+    assert result["highest_combined_oi_strike"] is None
+    assert result["max_pain_strike"] is None
+
+
+def test_expired_chain_is_rejected_before_persistence(tmp_path):
+    import pytest
+
+    db = tmp_path / "shadow.sqlite3"
+    with pytest.raises(ValueError, match="EXPIRED_CONTRACTS"):
+        record_chain_snapshot("NIFTY", _chain("2026-11-21"),
+                              "2026-11-22T10:00:00+05:30", db)
+    assert not db.exists()
+
+
+def test_latest_observations_excludes_stale_records(tmp_path):
+    db = tmp_path / "shadow.sqlite3"
+    record_chain_snapshot("NIFTY", _chain(),
+                          "2026-11-22T10:00:00+05:30", db)
+    assert latest_observations(
+        db, now="2026-11-22T10:03:00+05:30", max_age_seconds=120
+    ) == []
+
+
+def test_latest_observations_excludes_legacy_unvalidated_rows(tmp_path):
+    import json
+    import sqlite3
+
+    db = tmp_path / "shadow.sqlite3"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, observed_at TEXT NOT NULL, payload_json TEXT NOT NULL)")
+        conn.execute("INSERT INTO observations(symbol,observed_at,payload_json) VALUES (?,?,?)",
+                     ("NIFTY", "2026-11-22T10:00:00+05:30",
+                      json.dumps({"symbol": "NIFTY", "observed_at": "2026-11-22T10:00:00+05:30",
+                                  "expiry": "2026-11-22", "oi_chain_complete": True})))
+    assert latest_observations(
+        db, now="2026-11-22T10:00:10+05:30"
+    ) == []
