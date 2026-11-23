@@ -276,6 +276,10 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
         result = compare_runner_scenarios(
             trade.get("path") or [], trade.get("entry"), trade.get("stop_loss"),
             int(trade.get("quantity") or 0),
+            brokerage=(
+                trade.get("recorded_brokerage_inr")
+                if trade.get("recorded_brokerage_inr") is not None else 30.0
+            ),
         )
         results.append({
             "trade_id": trade.get("id"), "symbol": trade.get("symbol"),
