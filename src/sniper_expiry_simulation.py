@@ -179,15 +179,40 @@ def select_sniper_contract(candidates: list[dict], spot: float, strike_step: flo
 def simulate_runner(path: list[dict], entry: float, initial_stop: float,
                     quantity: int, brokerage: float = FLAT_BROKERAGE_INR,
                     activation_pct: float = 45.0, atr_multiple: float = 1.5) -> dict:
-    """Simulate an all-quantity EMA/ATR runner on recorded premium observations only."""
+    """Replay a full-quantity runner conservatively on recorded premium observations.
+
+    Each observation is treated as the only available executable price. A gap
+    through a stop is filled at the observed price, never at the more favourable
+    stop level. The trailing stop calculated from an observation becomes active
+    only for the next observation (no same-tick look-ahead). This is a
+    counterfactual full-quantity replay; it does not reproduce partial exits.
+    """
     entry, initial_stop = _num(entry), _num(initial_stop)
     brokerage = _num(brokerage)
-    if entry is None or initial_stop is None or entry <= 0 or quantity < 1 or brokerage is None:
-        return {"status": "INSUFFICIENT_INPUT", "exit_price": None, "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE", "activation_reason": "INSUFFICIENT_INPUT", "activation_threshold_price": None, "max_favorable_price": None, "max_favorable_pct": None}
+    activation_pct, atr_multiple = _num(activation_pct), _num(atr_multiple)
+    valid_quantity = isinstance(quantity, int) and not isinstance(quantity, bool) and quantity > 0
+    if (entry is None or initial_stop is None or entry <= 0 or initial_stop <= 0
+            or initial_stop >= entry or not valid_quantity or brokerage is None
+            or brokerage < 0 or activation_pct is None or activation_pct < 0
+            or atr_multiple is None or atr_multiple < 0):
+        return {
+            "status": "INSUFFICIENT_INPUT", "exit_price": None, "gross_pnl": None,
+            "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE",
+            "activation_reason": "INSUFFICIENT_INPUT", "activation_threshold_price": None,
+            "max_favorable_price": None, "execution_basis": "UNAVAILABLE",
+        }
+
     prices = [_num(point.get("price")) for point in path or [] if isinstance(point, dict)]
     prices = [price for price in prices if price is not None and price > 0]
     if not prices:
-        return {"status": "NO_RECORDED_PATH", "exit_price": None, "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE", "activation_reason": "NO_RECORDED_PATH", "activation_threshold_price": round(entry * (1 + activation_pct / 100.0), 2), "max_favorable_price": None, "max_favorable_pct": None}
+        return {
+            "status": "NO_RECORDED_PATH", "exit_price": None, "gross_pnl": None,
+            "net_pnl": None, "runner_activated": False, "activation_status": "UNAVAILABLE",
+            "activation_reason": "NO_RECORDED_PATH",
+            "activation_threshold_price": round(entry * (1 + activation_pct / 100.0), 2),
+            "max_favorable_price": None, "execution_basis": "UNAVAILABLE",
+        }
+
     ema = None
     alpha = 2.0 / 4.0
     previous = None
@@ -197,31 +222,37 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
     stop = initial_stop
     exit_price = None
     exit_index = None
-    trail_triggered = False
+    stop_trigger_price = None
+
     for index, price in enumerate(prices):
+        # A stop established by earlier evidence is tested before this quote
+        # can update the trail. If price gaps through it, use the observed price.
+        if price <= stop:
+            exit_price, exit_index, stop_trigger_price = price, index, stop
+            break
+
         high = max(high, price)
         ema = price if ema is None else alpha * price + (1 - alpha) * ema
         if previous is not None:
             ranges.append(abs(price - previous))
         atr = sum(ranges[-3:]) / min(3, len(ranges)) if ranges else 0.0
+
         if high >= entry * (1 + activation_pct / 100.0):
             active = True
         if active:
             breakeven = entry + brokerage / quantity
             trail = ema - atr_multiple * atr
             stop = max(stop, breakeven, trail)
-        if price <= stop:
-            exit_price, exit_index = stop, index
-            trail_triggered = True
-            break
         previous = price
+
     if exit_price is None:
         exit_price = prices[-1]
         exit_index = len(prices) - 1
+
     gross = (exit_price - entry) * quantity
     net = gross - brokerage
     return {
-        "status": "TRAIL_EXIT" if trail_triggered else "PATH_END",
+        "status": "TRAIL_EXIT" if stop_trigger_price is not None else "PATH_END",
         "activation_pct": activation_pct, "brokerage_inr": brokerage,
         "quantity": quantity, "exit_price": round(exit_price, 2),
         "gross_pnl": round(gross, 2), "net_pnl": round(net, 2),
@@ -233,9 +264,11 @@ def simulate_runner(path: list[dict], entry: float, initial_stop: float,
         "max_favorable_price": round(high, 2),
         "max_favorable_pct": round((high / entry - 1) * 100.0, 2),
         "final_stop": round(stop, 2),
+        "stop_trigger_price": round(stop_trigger_price, 2) if stop_trigger_price is not None else None,
+        "execution_basis": "RECORDED_OBSERVATION_CONSERVATIVE_GAP_FILL",
+        "position_model": "FULL_QUANTITY_COUNTERFACTUAL_NO_PARTIAL_EXITS",
         "observations_used": exit_index + 1, "safety": "SIMULATION_ONLY",
     }
-
 
 def compare_runner_scenarios(
     path: list[dict], entry: float, initial_stop: float, quantity: int,
