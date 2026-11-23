@@ -333,15 +333,13 @@ def _sniper_runner_comparisons(paper: list[dict[str, Any]]) -> list[dict[str, An
     return results
 
 
-def build_simulations() -> dict[str, Any]:
-    events = _read_lifecycle()
-    rejections = _rejections()
-    accounting = _trade_accounting()
+def _accounting_integrity(path: Path = ROOT / "data" / "trades.csv") -> dict[str, Any]:
+    accounting = _trade_accounting(path)
     duplicate_ids = sorted(
         trade_id for trade_id, item in accounting.items()
         if item.get("accounting_status") == "DUPLICATE_TRADE_ID"
     )
-    accounting_integrity = {
+    return {
         "csv_trade_ids": len(accounting),
         "duplicate_trade_id_count": len(duplicate_ids),
         "duplicate_trade_id_examples": duplicate_ids[:10],
@@ -351,6 +349,12 @@ def build_simulations() -> dict[str, Any]:
         ),
         "status": "DUPLICATES_FOUND" if duplicate_ids else "NO_DUPLICATE_IDS_DETECTED",
     }
+
+
+def build_simulations() -> dict[str, Any]:
+    events = _read_lifecycle()
+    rejections = _rejections()
+    accounting_integrity = _accounting_integrity()
     paper = _paper_trades(events)
     rejected = _rejected_scenarios(rejections)
     shadow = _shadow_paths(rejections)
