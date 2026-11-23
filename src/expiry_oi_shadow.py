@@ -100,7 +100,11 @@ def _validate_chain(chain: list[dict[str, Any]], observed_at: str | datetime | N
             key = option.get("instrument_key") if isinstance(option, dict) else None
             ltp = _number(market.get("ltp")) if isinstance(market, dict) else None
             oi = _number(market.get("oi")) if isinstance(market, dict) else None
-            if not key or ltp is None or ltp <= 0 or oi is None or oi < 0:
+            volume = _number(market.get("volume")) if isinstance(market, dict) else None
+            if (
+                not key or ltp is None or ltp < 0 or oi is None or oi < 0
+                or (ltp == 0 and (oi != 0 or volume != 0))
+            ):
                 reasons.append("INCOMPLETE_OPTION_LEG")
                 break
     if not spots:

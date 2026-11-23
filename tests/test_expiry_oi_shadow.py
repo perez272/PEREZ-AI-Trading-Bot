@@ -218,3 +218,36 @@ def test_latest_observations_excludes_legacy_unvalidated_rows(tmp_path):
     assert latest_observations(
         db, now="2026-11-22T10:00:10+05:30"
     ) == []
+
+
+def test_inactive_zero_price_contract_is_valid():
+    chain = _chain()
+    chain[0]["call_options"]["market_data"].update(ltp=0, oi=0, volume=0)
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    assert result["data_quality_status"] == "VALID"
+
+
+def test_zero_price_contract_with_open_interest_is_rejected():
+    chain = _chain()
+    chain[0]["call_options"]["market_data"].update(ltp=0, oi=10, volume=0)
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    assert result["data_quality_status"] == "REJECTED"
+    assert "INCOMPLETE_OPTION_LEG" in result["data_quality_reasons"]
+
+
+def test_zero_price_contract_with_volume_is_rejected():
+    chain = _chain()
+    chain[0]["call_options"]["market_data"].update(ltp=0, oi=0, volume=10)
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    assert result["data_quality_status"] == "REJECTED"
+    assert "INCOMPLETE_OPTION_LEG" in result["data_quality_reasons"]
+
+
+def test_zero_price_contract_with_missing_volume_is_rejected():
+    chain = _chain()
+    market = chain[0]["call_options"]["market_data"]
+    market.update(ltp=0, oi=0)
+    market.pop("volume")
+    result = analyze_chain("NIFTY", chain, "2026-11-22T10:00:00+05:30")
+    assert result["data_quality_status"] == "REJECTED"
+    assert "INCOMPLETE_OPTION_LEG" in result["data_quality_reasons"]
