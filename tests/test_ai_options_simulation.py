@@ -120,3 +120,51 @@ def test_api_runner_comparisons_expose_all_nine_scenarios_and_gross_net():
     assert len(result["scenarios"]) == 9
     assert {x["activation_pct"] for x in result["scenarios"]} == {40.0, 45.0, 50.0}
     assert {x["atr_multiple"] for x in result["scenarios"]} == {1.0, 1.5, 2.0}
+
+
+
+def test_duplicate_csv_trade_id_is_flagged_and_accounting_withheld(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text(
+        "trade_id,pnl,brokerage_inr,net_pnl\\nT-DUP,-100,30,-130\\nT-DUP,-100,30,-130\\n",
+        encoding="utf-8",
+    )
+    trade = _paper_trades([
+        {"trade_id": "T-DUP", "event": "OPEN", "entry": 100},
+        {"trade_id": "T-DUP", "event": "CLOSE", "pnl": -100},
+    ], csv_path)[0]
+    assert trade["accounting_status"] == "DUPLICATE_TRADE_ID"
+    assert trade["accounting_csv_row_count"] == 2
+    assert trade["recorded_brokerage_inr"] is None
+    assert trade["recorded_net_pnl"] is None
+    assert trade["estimated_brokerage_inr"] == 30.0
+    assert trade["estimated_net_pnl"] == -130.0
+    assert trade["estimated_accounting_basis"] == "FLAT_PAPER_FEE_ASSUMPTION_30_INR_NOT_RECORDED"
+
+
+def test_unique_csv_row_with_missing_fee_gets_separate_estimate(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    csv_path.write_text("trade_id,pnl\\nT-EST,50\\n", encoding="utf-8")
+    trade = _paper_trades([
+        {"trade_id": "T-EST", "event": "OPEN", "entry": 100},
+        {"trade_id": "T-EST", "event": "CLOSE", "pnl": 50},
+    ], csv_path)[0]
+    assert trade["accounting_status"] == "CSV_ROW_MATCHED_FEE_MISSING"
+    assert trade["recorded_brokerage_inr"] is None
+    assert trade["recorded_net_pnl"] is None
+    assert trade["estimated_brokerage_inr"] == 30.0
+    assert trade["estimated_net_pnl"] == 20.0
+
+
+def test_runner_discloses_assumed_fee_when_recorded_fee_missing():
+    paper = [{
+        "id": "T-EST", "entry": 100, "stop_loss": 90, "quantity": 25,
+        "recorded_gross_pnl": 50, "recorded_brokerage_inr": None,
+        "recorded_net_pnl": None, "accounting_status": "CSV_ROW_MATCHED_FEE_MISSING",
+        "path": [{"price": p} for p in (100, 120, 145, 160)],
+    }]
+    result = _sniper_runner_comparisons(paper)[0]
+    assert result["replay_brokerage_inr"] == 30.0
+    assert result["replay_brokerage_basis"] == "SIMULATION_ASSUMPTION_30_INR_NOT_RECORDED"
+    assert result["recorded_brokerage_inr"] is None
+    assert result["recorded_net_pnl"] is None
